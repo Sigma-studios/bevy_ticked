@@ -34,11 +34,13 @@ struct RegisteredTickedComponent {
     /// Optional serialization support, populated by the networking crate.
     serialize_at: Option<fn(&mut World, u64) -> Option<HashMap<u64, Vec<u8>>>>,
     deserialize_and_apply: Option<fn(&mut World, u64, &HashMap<u64, Vec<u8>>)>,
+    /// Optional: deserialize and insert a single component onto a specific entity.
+    deserialize_and_insert_one: Option<fn(&mut World, Entity, &[u8])>,
 }
 
 impl TickedComponentRegistry {
     pub fn register<T: TickedComponent>(&mut self) {
-        self.register_inner::<T>(None, None);
+        self.register_inner::<T>(None, None, None);
     }
 
     /// Register with serialization support. Called by the networking crate.
@@ -46,14 +48,20 @@ impl TickedComponentRegistry {
         &mut self,
         serialize_at: fn(&mut World, u64) -> Option<HashMap<u64, Vec<u8>>>,
         deserialize_and_apply: fn(&mut World, u64, &HashMap<u64, Vec<u8>>),
+        deserialize_and_insert_one: fn(&mut World, Entity, &[u8]),
     ) {
-        self.register_inner::<T>(Some(serialize_at), Some(deserialize_and_apply));
+        self.register_inner::<T>(
+            Some(serialize_at),
+            Some(deserialize_and_apply),
+            Some(deserialize_and_insert_one),
+        );
     }
 
     fn register_inner<T: TickedComponent>(
         &mut self,
         serialize_at: Option<fn(&mut World, u64) -> Option<HashMap<u64, Vec<u8>>>>,
         deserialize_and_apply: Option<fn(&mut World, u64, &HashMap<u64, Vec<u8>>)>,
+        deserialize_and_insert_one: Option<fn(&mut World, Entity, &[u8])>,
     ) {
         let type_id = TypeId::of::<T>();
         let tname = type_name::<T>();
@@ -77,6 +85,7 @@ impl TickedComponentRegistry {
             has_tick: has_tick_component::<T>,
             serialize_at,
             deserialize_and_apply,
+            deserialize_and_insert_one,
         });
         self.type_indices.insert(type_id, next_index);
     }
@@ -153,6 +162,24 @@ impl TickedComponentRegistry {
                 }
             }
         }
+    }
+
+    /// Deserialize a single component from bytes and insert it onto a specific entity.
+    /// Returns false if the type index has no serialization support.
+    pub fn deserialize_and_insert_one(
+        &self,
+        world: &mut World,
+        type_index: u16,
+        entity: Entity,
+        bytes: &[u8],
+    ) -> bool {
+        if let Some(entry) = self.entries.get(type_index as usize) {
+            if let Some(f) = entry.deserialize_and_insert_one {
+                f(world, entity, bytes);
+                return true;
+            }
+        }
+        false
     }
 }
 

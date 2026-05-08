@@ -86,19 +86,21 @@ fn handle_server_snapshot<T: TickedInput>(world: &mut World) {
     let current_tick = world.resource::<CurrentTick>().0;
     let snapshot_tick = pending.snapshot.tick;
 
-    if snapshot_tick > current_tick {
-        return;
-    }
-
     let registry = world.resource::<TickedComponentRegistry>().clone();
 
     // Apply the authoritative snapshot (sets CurrentTick to snapshot_tick)
     apply_snapshot(world, &pending.snapshot);
 
-    // Truncate any predicted state after the snapshot tick
+    if snapshot_tick >= current_tick {
+        // Snapshot is at or ahead of us — just jump forward, no replay needed.
+        // This handles initial sync when the client joins mid-game.
+        registry.capture_all(world, snapshot_tick);
+        return;
+    }
+
+    // Snapshot is behind us — rollback and replay predicted ticks
     registry.truncate_all_after(world, snapshot_tick);
 
-    // Replay forward from snapshot_tick+1 to current_tick
     for tick in (snapshot_tick + 1)..=current_tick {
         world.resource_mut::<CurrentTick>().0 = tick;
         world.run_schedule(TickedSimulation);

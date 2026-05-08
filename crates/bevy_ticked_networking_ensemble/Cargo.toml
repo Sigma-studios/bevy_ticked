@@ -10,3 +10,10 @@ bevy_ticked_networking = { path = "../bevy_ticked_networking" }
 bevy_ensemble = { path = "../../../bevy_ensemble" }
 postcard = { version = "1", features = ["alloc"] }
 serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+bevy_ensemble_webrtc = { path = "../../../bevy_ensemble/crates/bevy_ensemble_webrtc" }
+
+[[example]]
+name = "top_down_shooter"
+path = "examples/top_down_shooter.rs"

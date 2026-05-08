@@ -64,15 +64,16 @@ fn collect_network_inputs<T: TickedInput>(
 }
 
 /// After the core tick, build and broadcast a snapshot.
+/// Only runs if `LocalServerPlayer` is present (i.e., this peer is the host).
 fn broadcast_snapshot(
     tick: Res<CurrentTick>,
     tick_config: Res<TickConfig>,
+    server_player: Option<Res<LocalServerPlayer>>,
     mut commands: Commands,
 ) {
-    if tick_config.paused {
+    if tick_config.paused || server_player.is_none() {
         return;
     }
-    // Build snapshot needs exclusive world access — use a command instead
     commands.queue(BroadcastSnapshotCommand(tick.0));
 }
 

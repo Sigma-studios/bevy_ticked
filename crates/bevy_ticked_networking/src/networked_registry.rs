@@ -37,6 +37,7 @@ impl NetworkedTickedAppExt for App {
         registry.register_with_serialization::<T>(
             serialize_component::<T>,
             deserialize_and_apply_component::<T>,
+            deserialize_and_insert_one_component::<T>,
         );
         self
     }
@@ -95,4 +96,18 @@ fn deserialize_and_apply_component<T: NetworkedTickedComponent>(
             world.entity_mut(*entity).insert(component.clone());
         }
     }
+}
+
+fn deserialize_and_insert_one_component<T: NetworkedTickedComponent>(
+    world: &mut World,
+    entity: Entity,
+    bytes: &[u8],
+) {
+    let component: T = postcard::from_bytes(bytes).unwrap_or_else(|error| {
+        panic!(
+            "Failed to deserialize ticked component `{}`: {error}",
+            type_name::<T>()
+        )
+    });
+    world.entity_mut(entity).insert(component);
 }
