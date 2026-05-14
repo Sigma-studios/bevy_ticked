@@ -1,14 +1,13 @@
 use bevy::prelude::*;
 use bevy_ensemble::{
     EnsemblePlugin, Host, Lobby, LobbyParticipant, LobbyParticipantOf, LocalMultiplayerPlayerId,
-    PendingLobby, PublicLobbies, StartHosting,
+    PendingLobby, PlayerOwned, PlayerOwnedEntities, PublicLobbies, StartHosting,
 };
 use bevy_ensemble_webrtc::{BevyEnsembleWebrtcPlugin, JoinWebrtcLobby, RefreshLobbyList};
 use bevy_ticked::prelude::*;
 use bevy_ticked_networking::prelude::*;
 use bevy_ticked_networking_ensemble::TickedNetworkingEnsemblePlugin;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 // --- Constants ---
 
@@ -59,10 +58,6 @@ struct ShootCooldown(u64);
 #[derive(Component, Clone, Debug, Serialize, Deserialize)]
 struct PlayerUuid(u128);
 
-/// Tracks which players have been spawned as game entities (server only).
-#[derive(Resource, Default)]
-struct SpawnedPlayers(HashMap<u128, u64>); // player_uuid -> tracked_entity_id
-
 #[derive(Component)]
 struct UiText;
 
@@ -95,7 +90,6 @@ fn main() {
         .register_networked_ticked_component::<ShootCooldown>()
         .register_networked_ticked_component::<PlayerUuid>()
         // Resources
-        .init_resource::<SpawnedPlayers>()
         // Startup
         .add_systems(Startup, setup)
         // Lobby management (Update)
@@ -106,6 +100,7 @@ fn main() {
                 lobby_join_key,
                 lobby_refresh_key,
                 lobby_escape_key,
+                cleanup_on_lobby_gone,
                 on_lobby_ready,
                 server_spawn_players,
                 capture_local_input,
@@ -196,7 +191,6 @@ fn lobby_escape_key(
     mut commands: Commands,
     keys: Res<ButtonInput<KeyCode>>,
     lobbies: Query<Entity, Or<(With<Lobby>, With<PendingLobby>)>>,
-    mut spawned: ResMut<SpawnedPlayers>,
 ) {
     if !keys.just_pressed(KeyCode::Escape) {
         return;
@@ -204,10 +198,23 @@ fn lobby_escape_key(
     for entity in lobbies.iter() {
         commands.entity(entity).try_despawn();
     }
+}
+
+/// When the lobby is removed (local leave or host disconnect), clean up all game entities.
+fn cleanup_on_lobby_gone(
+    mut commands: Commands,
+    mut removed_lobbies: RemovedComponents<Lobby>,
+    game_entities: Query<Entity, With<TickTrackedEntity>>,
+) {
+    if removed_lobbies.read().next().is_none() {
+        return;
+    }
+    for entity in game_entities.iter() {
+        commands.entity(entity).try_despawn();
+    }
     commands.remove_resource::<LocalMultiplayerPlayerId>();
     commands.remove_resource::<LocalServerPlayer>();
     commands.remove_resource::<LocalClientPlayer>();
-    spawned.0.clear();
 }
 
 /// When lobby becomes ready, insert the appropriate server/client player resource.
@@ -234,21 +241,18 @@ fn on_lobby_ready(
 fn server_spawn_players(
     mut commands: Commands,
     host_lobbies: Query<Entity, (With<Lobby>, With<Host>)>,
-    participants: Query<(&LobbyParticipant, &LobbyParticipantOf)>,
-    mut spawned: ResMut<SpawnedPlayers>,
+    new_participants: Query<(Entity, &LobbyParticipant, &LobbyParticipantOf), Without<PlayerOwnedEntities>>,
+    existing_players: Query<(), (With<EntityKind>, With<PlayerOwned>)>,
     mut counter: ResMut<TickTrackedEntityCounter>,
 ) {
     let Some(lobby_entity) = host_lobbies.iter().next() else {
         return;
     };
 
-    let mut player_index = spawned.0.len();
+    let mut player_index = existing_players.iter().count();
 
-    for (participant, participant_of) in participants.iter() {
+    for (participant_entity, participant, participant_of) in new_participants.iter() {
         if participant_of.0 != lobby_entity {
-            continue;
-        }
-        if spawned.0.contains_key(&participant.player_uuid) {
             continue;
         }
 
@@ -270,9 +274,9 @@ fn server_spawn_players(
             SpawnPoint(spawn_pos),
             ShootCooldown::default(),
             PlayerUuid(participant.player_uuid),
+            PlayerOwned(participant_entity),
         ));
 
-        spawned.0.insert(participant.player_uuid, tracked_id.0);
         player_index += 1;
     }
 }
@@ -476,12 +480,12 @@ fn move_bullets(world: &mut World) {
     // Spawn new bullets (server only)
     if server_player.is_some() {
         // Find player entities and their cooldowns
-        let mut player_data: Vec<(u128, Vec2, u64)> = Vec::new();
+        let mut player_data: Vec<(u128, Vec2, u64, Entity)> = Vec::new();
         {
-            let mut query = world.query::<(&PlayerUuid, &PlayerPosition, &ShootCooldown, &EntityKind)>();
-            for (uuid, pos, cooldown, kind) in query.iter(world) {
+            let mut query = world.query::<(&PlayerUuid, &PlayerPosition, &ShootCooldown, &EntityKind, &PlayerOwned)>();
+            for (uuid, pos, cooldown, kind, owned) in query.iter(world) {
                 if *kind == EntityKind::Player {
-                    player_data.push((uuid.0, pos.0, cooldown.0));
+                    player_data.push((uuid.0, pos.0, cooldown.0, owned.0));
                 }
             }
         }
@@ -490,25 +494,25 @@ fn move_bullets(world: &mut World) {
         let mut spawns = Vec::new();
 
         for (uuid, aim_angle) in &shoot_requests {
-            if let Some((_, pos, cooldown)) = player_data.iter().find(|(u, _, _)| u == uuid) {
+            if let Some((_, pos, cooldown, participant_entity)) = player_data.iter().find(|(u, _, _, _)| u == uuid) {
                 if *cooldown > 0 {
                     continue;
                 }
                 let tracked_id = counter.next();
                 let dir = Vec2::new(aim_angle.cos(), aim_angle.sin());
                 let bullet_pos = *pos + dir * (PLAYER_RADIUS + BULLET_RADIUS + 2.0);
-                spawns.push((*uuid, tracked_id, bullet_pos, *aim_angle));
+                spawns.push((*uuid, tracked_id, bullet_pos, *aim_angle, *participant_entity));
             }
         }
 
-        for (owner_uuid, tracked_id, bullet_pos, aim_angle) in spawns {
-            // Find owner's tracked entity id
+        for (owner_uuid, tracked_id, bullet_pos, aim_angle, participant_entity) in spawns {
             world.spawn((
                 tracked_id,
                 EntityKind::Bullet,
                 PlayerPosition(bullet_pos),
                 AimAngle(aim_angle),
                 PlayerUuid(owner_uuid),
+                PlayerOwned(participant_entity),
             ));
 
             // Reset cooldown on the player
