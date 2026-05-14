@@ -86,12 +86,11 @@ pub fn apply_snapshot(world: &mut World, snapshot: &WorldSnapshot) {
     // 5. Apply snapshot to existing (surviving) entities + write into WorldActions
     registry.deserialize_and_apply_all(world, snapshot.tick, &snapshot.components);
 
-    // 6. Advance counter past max snapshot ID to avoid collisions
+    // 6. Reset counter to max snapshot ID so that rollback+replay produces
+    //    deterministic entity IDs matching the server.
     if let Some(&max_id) = snapshot_entity_ids.iter().max() {
         let mut counter = world.resource_mut::<TickTrackedEntityCounter>();
-        if counter.0 <= max_id {
-            counter.0 = max_id;
-        }
+        counter.0 = max_id;
     }
 
     // 7. Set current tick

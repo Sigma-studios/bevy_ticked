@@ -431,17 +431,14 @@ fn move_players(
 fn move_bullets(world: &mut World) {
     let dt = 1.0 / 64.0;
     let tick = world.resource::<CurrentTick>().0;
-    let server_player = world.get_resource::<LocalServerPlayer>().map(|p| p.0);
     let input_queue = world.resource::<InputQueue<PlayerInput>>();
 
-    // Collect shooting requests from this tick's inputs (server only)
+    // Collect shooting requests from this tick's inputs
     let mut shoot_requests: Vec<(u128, f32)> = Vec::new();
-    if server_player.is_some() {
-        if let Some(tick_inputs) = input_queue.at_tick(tick) {
-            for (uuid, input) in tick_inputs {
-                if input.shooting {
-                    shoot_requests.push((*uuid, input.aim_angle));
-                }
+    if let Some(tick_inputs) = input_queue.at_tick(tick) {
+        for (uuid, input) in tick_inputs {
+            if input.shooting {
+                shoot_requests.push((*uuid, input.aim_angle));
             }
         }
     }
@@ -477,61 +474,52 @@ fn move_bullets(world: &mut World) {
         world.despawn(entity);
     }
 
-    // Spawn new bullets (server only)
-    if server_player.is_some() {
-        // Find player entities and their cooldowns
-        let mut player_data: Vec<(u128, Vec2, u64, Entity)> = Vec::new();
-        {
-            let mut query = world.query::<(&PlayerUuid, &PlayerPosition, &ShootCooldown, &EntityKind, &PlayerOwned)>();
-            for (uuid, pos, cooldown, kind, owned) in query.iter(world) {
-                if *kind == EntityKind::Player {
-                    player_data.push((uuid.0, pos.0, cooldown.0, owned.0));
-                }
+    // Spawn new bullets
+    let mut player_data: Vec<(u128, Vec2, u64)> = Vec::new();
+    {
+        let mut query = world.query::<(&PlayerUuid, &PlayerPosition, &ShootCooldown, &EntityKind)>();
+        for (uuid, pos, cooldown, kind) in query.iter(world) {
+            if *kind == EntityKind::Player {
+                player_data.push((uuid.0, pos.0, cooldown.0));
             }
         }
+    }
 
-        let mut counter = world.resource_mut::<TickTrackedEntityCounter>();
-        let mut spawns = Vec::new();
+    let mut counter = world.resource_mut::<TickTrackedEntityCounter>();
+    let mut spawns = Vec::new();
 
-        for (uuid, aim_angle) in &shoot_requests {
-            if let Some((_, pos, cooldown, participant_entity)) = player_data.iter().find(|(u, _, _, _)| u == uuid) {
-                if *cooldown > 0 {
-                    continue;
-                }
-                let tracked_id = counter.next();
-                let dir = Vec2::new(aim_angle.cos(), aim_angle.sin());
-                let bullet_pos = *pos + dir * (PLAYER_RADIUS + BULLET_RADIUS + 2.0);
-                spawns.push((*uuid, tracked_id, bullet_pos, *aim_angle, *participant_entity));
+    for (uuid, aim_angle) in &shoot_requests {
+        if let Some((_, pos, cooldown)) = player_data.iter().find(|(u, _, _)| u == uuid) {
+            if *cooldown > 0 {
+                continue;
             }
+            let tracked_id = counter.next();
+            let dir = Vec2::new(aim_angle.cos(), aim_angle.sin());
+            let bullet_pos = *pos + dir * (PLAYER_RADIUS + BULLET_RADIUS + 2.0);
+            spawns.push((*uuid, tracked_id, bullet_pos, *aim_angle));
         }
+    }
 
-        for (owner_uuid, tracked_id, bullet_pos, aim_angle, participant_entity) in spawns {
-            world.spawn((
-                tracked_id,
-                EntityKind::Bullet,
-                PlayerPosition(bullet_pos),
-                AimAngle(aim_angle),
-                PlayerUuid(owner_uuid),
-                PlayerOwned(participant_entity),
-            ));
+    for (owner_uuid, tracked_id, bullet_pos, aim_angle) in spawns {
+        world.spawn((
+            tracked_id,
+            EntityKind::Bullet,
+            PlayerPosition(bullet_pos),
+            AimAngle(aim_angle),
+            PlayerUuid(owner_uuid),
+        ));
 
-            // Reset cooldown on the player
-            let mut query = world.query::<(&PlayerUuid, &mut ShootCooldown, &EntityKind)>();
-            for (uuid, mut cooldown, kind) in query.iter_mut(world) {
-                if *kind == EntityKind::Player && uuid.0 == owner_uuid {
-                    cooldown.0 = SHOOT_COOLDOWN_TICKS;
-                }
+        // Reset cooldown on the player
+        let mut query = world.query::<(&PlayerUuid, &mut ShootCooldown, &EntityKind)>();
+        for (uuid, mut cooldown, kind) in query.iter_mut(world) {
+            if *kind == EntityKind::Player && uuid.0 == owner_uuid {
+                cooldown.0 = SHOOT_COOLDOWN_TICKS;
             }
         }
     }
 }
 
 fn bullet_collision(world: &mut World) {
-    let server_player = world.get_resource::<LocalServerPlayer>().map(|p| p.0);
-    if server_player.is_none() {
-        return; // Only server handles collision
-    }
-
     // Collect bullet positions
     let mut bullets: Vec<(Entity, Vec2, u128)> = Vec::new();
     {
