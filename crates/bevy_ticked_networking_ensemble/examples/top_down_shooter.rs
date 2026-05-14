@@ -263,6 +263,8 @@ fn on_lobby_ready(
 
     if !host_lobbies.is_empty() && server_player.is_none() {
         commands.insert_resource(LocalServerPlayer(local_player.0));
+        // Server is the clock — start ticking
+        commands.insert_resource(TickConfig { paused: false });
     }
     if !client_lobbies.is_empty() && client_player.is_none() {
         commands.insert_resource(LocalClientPlayer(local_player.0));
