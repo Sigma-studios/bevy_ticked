@@ -54,7 +54,9 @@ impl<T: TickedInput> Default for TickedClientPlugin<T> {
 
 impl<T: TickedInput> Plugin for TickedClientPlugin<T> {
     fn build(&self, app: &mut App) {
-        app.init_resource::<InputQueue<T>>()
+        // Start paused — the first server snapshot will unpause us
+        app.insert_resource(TickConfig { paused: true })
+            .init_resource::<InputQueue<T>>()
             .add_observer(receive_snapshot)
             .add_systems(
                 FixedUpdate,
@@ -75,14 +77,11 @@ fn receive_snapshot(trigger: On<ReceivedNetworkSnapshot>, mut commands: Commands
 
 /// PreTick: if a server snapshot arrived, rollback and replay local inputs to now.
 fn handle_server_snapshot<T: TickedInput>(world: &mut World) {
-    if world.resource::<TickConfig>().paused {
-        return;
-    }
-
     let Some(pending) = world.remove_resource::<PendingSnapshot>() else {
         return;
     };
 
+    let was_paused = world.resource::<TickConfig>().paused;
     let current_tick = world.resource::<CurrentTick>().0;
     let snapshot_tick = pending.snapshot.tick;
 
@@ -92,9 +91,21 @@ fn handle_server_snapshot<T: TickedInput>(world: &mut World) {
     apply_snapshot(world, &pending.snapshot);
 
     if snapshot_tick >= current_tick {
-        // Snapshot is at or ahead of us — just jump forward, no replay needed.
+        // Snapshot is at or ahead of us — jump forward, no replay needed.
         // This handles initial sync when the client joins mid-game.
         registry.capture_all(world, snapshot_tick);
+
+        // First snapshot received — unpause to start ticking
+        if was_paused {
+            world.resource_mut::<TickConfig>().paused = false;
+        }
+        return;
+    }
+
+    // If paused (shouldn't normally happen after initial sync), don't replay
+    if was_paused {
+        registry.capture_all(world, snapshot_tick);
+        world.resource_mut::<TickConfig>().paused = false;
         return;
     }
 

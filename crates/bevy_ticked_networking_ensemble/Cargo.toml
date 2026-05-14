@@ -12,6 +12,7 @@ postcard = { version = "1", features = ["alloc"] }
 serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
+avian2d = { version = "0.6", features = ["serialize"] }
 bevy_ensemble_webrtc = { path = "../../../bevy_ensemble/crates/bevy_ensemble_webrtc" }
 
 [[example]]

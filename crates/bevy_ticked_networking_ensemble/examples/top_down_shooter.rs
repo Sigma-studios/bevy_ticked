@@ -1,3 +1,4 @@
+use avian2d::prelude::*;
 use bevy::prelude::*;
 use bevy_ensemble::{
     EnsemblePlugin, Host, Lobby, LobbyParticipant, LobbyParticipantOf, LocalMultiplayerPlayerId,
@@ -11,7 +12,8 @@ use serde::{Deserialize, Serialize};
 
 // --- Constants ---
 
-const MOVE_SPEED: f32 = 200.0;
+const MOVE_ACCEL: f32 = 8000.0;
+const PLAYER_DRAG: f32 = 15.0;
 const BULLET_SPEED: f32 = 600.0;
 const BULLET_RADIUS: f32 = 4.0;
 const PLAYER_RADIUS: f32 = 16.0;
@@ -32,12 +34,6 @@ struct PlayerInput {
 }
 
 // --- Networked components ---
-
-#[derive(Component, Clone, Debug, Serialize, Deserialize, Default)]
-struct PlayerPosition(Vec2);
-
-#[derive(Component, Clone, Debug, Serialize, Deserialize, Default)]
-struct PlayerVelocity(Vec2);
 
 #[derive(Component, Clone, Debug, Serialize, Deserialize, Default)]
 struct AimAngle(f32);
@@ -78,18 +74,21 @@ fn main() {
             ..default()
         })
         .add_plugins(TickedPlugin)
+        .add_plugins(PhysicsPlugins::new(TickedSimulation).with_length_unit(1.0))
+        .insert_resource(Gravity(Vec2::ZERO))
         .add_plugins(TickedServerPlugin::<PlayerInput>::new())
         .add_plugins(TickedClientPlugin::<PlayerInput>::new())
         .add_plugins(TickedNetworkingEnsemblePlugin::<PlayerInput>::new())
         // Register networked components (order must match on all peers)
-        .register_networked_ticked_component::<PlayerPosition>()
-        .register_networked_ticked_component::<PlayerVelocity>()
+        .register_networked_ticked_component::<Position>()
+        .register_networked_ticked_component::<Rotation>()
+        .register_networked_ticked_component::<LinearVelocity>()
+        .register_networked_ticked_component::<AngularVelocity>()
         .register_networked_ticked_component::<AimAngle>()
         .register_networked_ticked_component::<EntityKind>()
         .register_networked_ticked_component::<SpawnPoint>()
         .register_networked_ticked_component::<ShootCooldown>()
         .register_networked_ticked_component::<PlayerUuid>()
-        // Resources
         // Startup
         .add_systems(Startup, setup)
         // Lobby management (Update)
@@ -111,7 +110,7 @@ fn main() {
         // Simulation systems (run inside TickedSimulation)
         .add_systems(
             TickedSimulation,
-            (apply_inputs, move_players, move_bullets, bullet_collision)
+            (apply_inputs, move_bullets, bullet_collision)
                 .chain(),
         )
         // React to networked entity lifecycle
@@ -132,12 +131,43 @@ fn setup(mut commands: Commands) {
         Transform::from_xyz(0.0, 0.0, -1.0),
     ));
 
-    // Wall in the middle (visual only — collision is checked in simulation)
-    commands.spawn(Sprite {
-        color: Color::srgb(0.5, 0.5, 0.6),
-        custom_size: Some(Vec2::new(WALL_HALF_W * 2.0, WALL_HALF_H * 2.0)),
-        ..default()
-    });
+    // Arena walls (static colliders)
+    let wall_thickness = 20.0;
+    // Top
+    commands.spawn((
+        RigidBody::Static,
+        Collider::rectangle(ARENA_HALF_W * 2.0 + wall_thickness * 2.0, wall_thickness),
+        Position(Vec2::new(0.0, ARENA_HALF_H + wall_thickness / 2.0)),
+    ));
+    // Bottom
+    commands.spawn((
+        RigidBody::Static,
+        Collider::rectangle(ARENA_HALF_W * 2.0 + wall_thickness * 2.0, wall_thickness),
+        Position(Vec2::new(0.0, -ARENA_HALF_H - wall_thickness / 2.0)),
+    ));
+    // Left
+    commands.spawn((
+        RigidBody::Static,
+        Collider::rectangle(wall_thickness, ARENA_HALF_H * 2.0),
+        Position(Vec2::new(-ARENA_HALF_W - wall_thickness / 2.0, 0.0)),
+    ));
+    // Right
+    commands.spawn((
+        RigidBody::Static,
+        Collider::rectangle(wall_thickness, ARENA_HALF_H * 2.0),
+        Position(Vec2::new(ARENA_HALF_W + wall_thickness / 2.0, 0.0)),
+    ));
+
+    // Wall in the middle
+    commands.spawn((
+        Sprite {
+            color: Color::srgb(0.5, 0.5, 0.6),
+            custom_size: Some(Vec2::new(WALL_HALF_W * 2.0, WALL_HALF_H * 2.0)),
+            ..default()
+        },
+        RigidBody::Static,
+        Collider::rectangle(WALL_HALF_W * 2.0, WALL_HALF_H * 2.0),
+    ));
 
     // UI
     commands.spawn((
@@ -152,7 +182,7 @@ fn setup(mut commands: Commands) {
     ));
 }
 
-// --- Lobby management (copied from webrtc example pattern) ---
+// --- Lobby management ---
 
 fn lobby_host_key(
     keys: Res<ButtonInput<KeyCode>>,
@@ -215,6 +245,9 @@ fn cleanup_on_lobby_gone(
     commands.remove_resource::<LocalMultiplayerPlayerId>();
     commands.remove_resource::<LocalServerPlayer>();
     commands.remove_resource::<LocalClientPlayer>();
+    // Reset tick state for the next game
+    commands.insert_resource(CurrentTick(0));
+    commands.insert_resource(TickConfig { paused: true });
 }
 
 /// When lobby becomes ready, insert the appropriate server/client player resource.
@@ -268,8 +301,11 @@ fn server_spawn_players(
         commands.spawn((
             tracked_id,
             EntityKind::Player,
-            PlayerPosition(spawn_pos),
-            PlayerVelocity::default(),
+            RigidBody::Dynamic,
+            Collider::circle(PLAYER_RADIUS),
+            Position(spawn_pos),
+            LinearDamping(PLAYER_DRAG),
+            LockedAxes::ROTATION_LOCKED,
             AimAngle(0.0),
             SpawnPoint(spawn_pos),
             ShootCooldown::default(),
@@ -292,7 +328,7 @@ fn capture_local_input(
     local_client: Option<Res<LocalClientPlayer>>,
     local_server: Option<Res<LocalServerPlayer>>,
     mut input_queue: ResMut<InputQueue<PlayerInput>>,
-    players: Query<(&PlayerPosition, &PlayerUuid)>,
+    players: Query<(&Position, &PlayerUuid)>,
 ) {
     // Determine our UUID
     let my_uuid = local_client
@@ -356,7 +392,7 @@ fn apply_inputs(
     tick: Res<CurrentTick>,
     input_queue: Res<InputQueue<PlayerInput>>,
     mut players: Query<(
-        &mut PlayerVelocity,
+        &mut LinearVelocity,
         &mut AimAngle,
         &mut ShootCooldown,
         &PlayerUuid,
@@ -373,58 +409,13 @@ fn apply_inputs(
         }
         if let Some(input) = tick_inputs.get(&uuid.0) {
             let movement = Vec2::new(input.movement[0], input.movement[1]);
-            vel.0 = movement * MOVE_SPEED;
+            vel.0 += movement * MOVE_ACCEL * (1.0 / 64.0);
             aim.0 = input.aim_angle;
 
             if cooldown.0 > 0 {
                 cooldown.0 -= 1;
             }
         }
-    }
-}
-
-fn move_players(
-    mut players: Query<(&mut PlayerPosition, &PlayerVelocity, &EntityKind)>,
-) {
-    let dt = 1.0 / 64.0; // Fixed timestep
-
-    for (mut pos, vel, kind) in players.iter_mut() {
-        if *kind != EntityKind::Player {
-            continue;
-        }
-        let mut new_pos = pos.0 + vel.0 * dt;
-
-        // Arena bounds
-        new_pos.x = new_pos.x.clamp(-ARENA_HALF_W + PLAYER_RADIUS, ARENA_HALF_W - PLAYER_RADIUS);
-        new_pos.y = new_pos.y.clamp(-ARENA_HALF_H + PLAYER_RADIUS, ARENA_HALF_H - PLAYER_RADIUS);
-
-        // Wall collision (simple AABB push-out)
-        let wall_min = Vec2::new(-WALL_HALF_W, -WALL_HALF_H);
-        let wall_max = Vec2::new(WALL_HALF_W, WALL_HALF_H);
-        if new_pos.x > wall_min.x - PLAYER_RADIUS
-            && new_pos.x < wall_max.x + PLAYER_RADIUS
-            && new_pos.y > wall_min.y - PLAYER_RADIUS
-            && new_pos.y < wall_max.y + PLAYER_RADIUS
-        {
-            // Push out on the axis with least penetration
-            let dx_left = (wall_min.x - PLAYER_RADIUS) - new_pos.x;
-            let dx_right = (wall_max.x + PLAYER_RADIUS) - new_pos.x;
-            let dy_down = (wall_min.y - PLAYER_RADIUS) - new_pos.y;
-            let dy_up = (wall_max.y + PLAYER_RADIUS) - new_pos.y;
-
-            let min_push = [dx_left, dx_right, dy_down, dy_up]
-                .into_iter()
-                .min_by(|a, b| a.abs().partial_cmp(&b.abs()).unwrap())
-                .unwrap();
-
-            if min_push == dx_left || min_push == dx_right {
-                new_pos.x += min_push;
-            } else {
-                new_pos.y += min_push;
-            }
-        }
-
-        pos.0 = new_pos;
     }
 }
 
@@ -446,7 +437,7 @@ fn move_bullets(world: &mut World) {
     // Move existing bullets
     let mut bullets_to_despawn = Vec::new();
     {
-        let mut query = world.query::<(Entity, &mut PlayerPosition, &AimAngle, &EntityKind, &TickTrackedEntity)>();
+        let mut query = world.query::<(Entity, &mut Position, &AimAngle, &EntityKind, &TickTrackedEntity)>();
         for (entity, mut pos, aim, kind, _) in query.iter_mut(world) {
             if *kind != EntityKind::Bullet {
                 continue;
@@ -477,7 +468,7 @@ fn move_bullets(world: &mut World) {
     // Spawn new bullets
     let mut player_data: Vec<(u128, Vec2, u64)> = Vec::new();
     {
-        let mut query = world.query::<(&PlayerUuid, &PlayerPosition, &ShootCooldown, &EntityKind)>();
+        let mut query = world.query::<(&PlayerUuid, &Position, &ShootCooldown, &EntityKind)>();
         for (uuid, pos, cooldown, kind) in query.iter(world) {
             if *kind == EntityKind::Player {
                 player_data.push((uuid.0, pos.0, cooldown.0));
@@ -504,7 +495,7 @@ fn move_bullets(world: &mut World) {
         world.spawn((
             tracked_id,
             EntityKind::Bullet,
-            PlayerPosition(bullet_pos),
+            Position(bullet_pos),
             AimAngle(aim_angle),
             PlayerUuid(owner_uuid),
         ));
@@ -523,7 +514,7 @@ fn bullet_collision(world: &mut World) {
     // Collect bullet positions
     let mut bullets: Vec<(Entity, Vec2, u128)> = Vec::new();
     {
-        let mut query = world.query::<(Entity, &PlayerPosition, &PlayerUuid, &EntityKind)>();
+        let mut query = world.query::<(Entity, &Position, &PlayerUuid, &EntityKind)>();
         for (entity, pos, uuid, kind) in query.iter(world) {
             if *kind == EntityKind::Bullet {
                 bullets.push((entity, pos.0, uuid.0));
@@ -534,7 +525,7 @@ fn bullet_collision(world: &mut World) {
     // Collect player positions
     let mut players: Vec<(Entity, Vec2, u128, Vec2)> = Vec::new();
     {
-        let mut query = world.query::<(Entity, &PlayerPosition, &PlayerUuid, &SpawnPoint, &EntityKind)>();
+        let mut query = world.query::<(Entity, &Position, &PlayerUuid, &SpawnPoint, &EntityKind)>();
         for (entity, pos, uuid, spawn, kind) in query.iter(world) {
             if *kind == EntityKind::Player {
                 players.push((entity, pos.0, uuid.0, spawn.0));
@@ -564,10 +555,10 @@ fn bullet_collision(world: &mut World) {
     }
 
     for (entity, spawn_pos) in players_to_respawn {
-        if let Some(mut pos) = world.entity_mut(entity).get_mut::<PlayerPosition>() {
+        if let Some(mut pos) = world.entity_mut(entity).get_mut::<Position>() {
             pos.0 = spawn_pos;
         }
-        if let Some(mut vel) = world.entity_mut(entity).get_mut::<PlayerVelocity>() {
+        if let Some(mut vel) = world.entity_mut(entity).get_mut::<LinearVelocity>() {
             vel.0 = Vec2::ZERO;
         }
     }
@@ -578,10 +569,11 @@ fn bullet_collision(world: &mut World) {
 fn on_entity_spawned(
     trigger: On<Add, TickTrackedEntity>,
     mut commands: Commands,
-    query: Query<&EntityKind>,
+    query: Query<(&EntityKind, &Position)>,
 ) {
     let entity = trigger.entity;
-    let Ok(kind) = query.get(entity) else { return };
+    let Ok((kind, pos)) = query.get(entity) else { return };
+    let transform = Transform::from_translation(pos.0.extend(0.0));
 
     match kind {
         EntityKind::Player => {
@@ -591,7 +583,12 @@ fn on_entity_spawned(
                     custom_size: Some(Vec2::splat(PLAYER_RADIUS * 2.0)),
                     ..default()
                 },
-                Transform::default(),
+                transform,
+                // Physics components needed for client-side prediction
+                RigidBody::Dynamic,
+                Collider::circle(PLAYER_RADIUS),
+                LinearDamping(PLAYER_DRAG),
+                LockedAxes::ROTATION_LOCKED,
             ));
 
             // Spawn laser child
@@ -614,7 +611,7 @@ fn on_entity_spawned(
                     custom_size: Some(Vec2::splat(BULLET_RADIUS * 2.0)),
                     ..default()
                 },
-                Transform::default(),
+                transform,
             ));
         }
     }
@@ -622,7 +619,7 @@ fn on_entity_spawned(
 
 fn sync_visuals(
     mut entities: Query<
-        (&PlayerPosition, &AimAngle, &mut Transform),
+        (&Position, &AimAngle, &mut Transform),
         With<TickTrackedEntity>,
     >,
 ) {

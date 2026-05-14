@@ -1,17 +1,17 @@
-pub mod tracked_entity;
 pub mod prelude;
 pub mod registry;
 pub mod rollback;
 pub mod tick;
+pub mod tracked_entity;
 pub mod world_actions;
 
 use bevy::ecs::schedule::ScheduleLabel;
 use bevy::prelude::*;
 
-use tracked_entity::TickTrackedEntityCounter;
 use registry::TickedComponentRegistry;
 use rollback::rollback_and_resimulate;
 use tick::{CurrentTick, ResetToTick, StepBackward, StepForward, TickConfig};
+use tracked_entity::TickTrackedEntityCounter;
 
 /// The schedule where all tick-driven simulation systems run.
 ///
