@@ -24,6 +24,13 @@ struct PendingSnapshot {
     snapshot: crate::snapshot::WorldSnapshot,
 }
 
+/// How many ticks ahead of the server the client should run.
+///
+/// This buffer ensures that client inputs arrive at the server before the
+/// server reaches the tick they're intended for. Should be roughly RTT/2
+/// in ticks. At 64hz: 6 ticks ≈ 94ms.
+const CLIENT_TICK_BUFFER: u64 = 6;
+
 /// Plugin for the client side of multiplayer tick networking.
 ///
 /// Hooks into `TickedPlugin`'s tick lifecycle:
@@ -84,6 +91,7 @@ fn handle_server_snapshot<T: TickedInput>(world: &mut World) {
     let was_paused = world.resource::<TickConfig>().paused;
     let current_tick = world.resource::<CurrentTick>().0;
     let snapshot_tick = pending.snapshot.tick;
+    let tick_buffer = CLIENT_TICK_BUFFER;
 
     let registry = world.resource::<TickedComponentRegistry>().clone();
 
@@ -91,12 +99,18 @@ fn handle_server_snapshot<T: TickedInput>(world: &mut World) {
     apply_snapshot(world, &pending.snapshot);
 
     if snapshot_tick >= current_tick {
-        // Snapshot is at or ahead of us — jump forward, no replay needed.
-        // This handles initial sync when the client joins mid-game.
+        // Snapshot is at or ahead of us — jump forward.
         registry.capture_all(world, snapshot_tick);
 
-        // First snapshot received — unpause to start ticking
+        // On initial sync, skip ahead by tick_buffer so our inputs
+        // arrive at the server before it reaches those ticks.
         if was_paused {
+            let target_tick = snapshot_tick + tick_buffer;
+            for tick in (snapshot_tick + 1)..=target_tick {
+                world.resource_mut::<CurrentTick>().0 = tick;
+                world.run_schedule(TickedSimulation);
+                registry.capture_all(world, tick);
+            }
             world.resource_mut::<TickConfig>().paused = false;
         }
         return;

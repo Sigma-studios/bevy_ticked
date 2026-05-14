@@ -57,9 +57,16 @@ impl<T: TickedInput> Plugin for TickedServerPlugin<T> {
 /// Observer: collect incoming network inputs into the InputQueue.
 fn collect_network_inputs<T: TickedInput>(
     trigger: On<ReceivedNetworkInput<T>>,
+    tick: Res<CurrentTick>,
     mut queue: ResMut<InputQueue<T>>,
 ) {
     let event = trigger.event();
+    if event.tick < tick.0 {
+        warn!(
+            "Input from player {} arrived in the past (input tick: {}, server tick: {}, delta: {})",
+            event.sender, event.tick, tick.0, tick.0 - event.tick
+        );
+    }
     queue.insert(event.tick, event.sender, event.input.clone());
 }
 
