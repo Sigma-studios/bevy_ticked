@@ -110,8 +110,7 @@ fn main() {
         // Simulation systems (run inside TickedSimulation)
         .add_systems(
             TickedSimulation,
-            (apply_inputs, move_bullets, bullet_collision)
-                .chain(),
+            (apply_inputs, move_bullets, bullet_collision).chain(),
         )
         // React to networked entity lifecycle
         .add_observer(on_entity_spawned)
@@ -204,7 +203,9 @@ fn lobby_join_key(
         return;
     }
     let Some(lobby_list) = lobby_list else { return };
-    let Some(first) = lobby_list.0.first() else { return };
+    let Some(first) = lobby_list.0.first() else {
+        return;
+    };
     join_writer.write(JoinWebrtcLobby(first.lobby_id));
 }
 
@@ -259,7 +260,9 @@ fn on_lobby_ready(
     host_lobbies: Query<(), (With<Lobby>, With<Host>)>,
     client_lobbies: Query<(), (With<Lobby>, Without<Host>)>,
 ) {
-    let Some(local_player) = local_player else { return };
+    let Some(local_player) = local_player else {
+        return;
+    };
 
     if !host_lobbies.is_empty() && server_player.is_none() {
         commands.insert_resource(LocalServerPlayer(local_player.0));
@@ -276,7 +279,10 @@ fn on_lobby_ready(
 fn server_spawn_players(
     mut commands: Commands,
     host_lobbies: Query<Entity, (With<Lobby>, With<Host>)>,
-    new_participants: Query<(Entity, &LobbyParticipant, &LobbyParticipantOf), Without<PlayerOwnedEntities>>,
+    new_participants: Query<
+        (Entity, &LobbyParticipant, &LobbyParticipantOf),
+        Without<PlayerOwnedEntities>,
+    >,
     existing_players: Query<(), (With<EntityKind>, With<PlayerOwned>)>,
     mut counter: ResMut<TickTrackedEntityCounter>,
 ) {
@@ -411,7 +417,7 @@ fn apply_inputs(
         }
         if let Some(input) = tick_inputs.get(&uuid.0) {
             let movement = Vec2::new(input.movement[0], input.movement[1]);
-            vel.0 += movement * MOVE_ACCEL * (1.0 / 64.0);
+            vel.0 += movement * MOVE_ACCEL * SECONDS_PER_TICK;
             aim.0 = input.aim_angle;
 
             if cooldown.0 > 0 {
@@ -422,7 +428,7 @@ fn apply_inputs(
 }
 
 fn move_bullets(world: &mut World) {
-    let dt = 1.0 / 64.0;
+    let dt = SECONDS_PER_TICK;
     let tick = world.resource::<CurrentTick>().0;
     let input_queue = world.resource::<InputQueue<PlayerInput>>();
 
@@ -439,7 +445,13 @@ fn move_bullets(world: &mut World) {
     // Move existing bullets
     let mut bullets_to_despawn = Vec::new();
     {
-        let mut query = world.query::<(Entity, &mut Position, &AimAngle, &EntityKind, &TickTrackedEntity)>();
+        let mut query = world.query::<(
+            Entity,
+            &mut Position,
+            &AimAngle,
+            &EntityKind,
+            &TickTrackedEntity,
+        )>();
         for (entity, mut pos, aim, kind, _) in query.iter_mut(world) {
             if *kind != EntityKind::Bullet {
                 continue;
@@ -574,7 +586,9 @@ fn on_entity_spawned(
     query: Query<(&EntityKind, &Position)>,
 ) {
     let entity = trigger.entity;
-    let Ok((kind, pos)) = query.get(entity) else { return };
+    let Ok((kind, pos)) = query.get(entity) else {
+        return;
+    };
     let transform = Transform::from_translation(pos.0.extend(0.0));
 
     match kind {
@@ -620,10 +634,7 @@ fn on_entity_spawned(
 }
 
 fn sync_visuals(
-    mut entities: Query<
-        (&Position, &AimAngle, &mut Transform),
-        With<TickTrackedEntity>,
-    >,
+    mut entities: Query<(&Position, &AimAngle, &mut Transform), With<TickTrackedEntity>>,
 ) {
     for (pos, aim, mut transform) in entities.iter_mut() {
         transform.translation = pos.0.extend(0.0);
@@ -644,7 +655,9 @@ fn update_ui(
     lobbies: Query<Entity, With<Lobby>>,
     mut ui: Query<&mut Text, With<UiText>>,
 ) {
-    let Ok(mut text) = ui.single_mut() else { return };
+    let Ok(mut text) = ui.single_mut() else {
+        return;
+    };
 
     if !pending_lobbies.is_empty() {
         **text = "Connecting...".to_string();
