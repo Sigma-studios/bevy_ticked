@@ -113,7 +113,11 @@ fn forward_outgoing_snapshots(
     };
     commands
         .entity(lobby_entity)
-        .trigger(move |entity| LobbyMessage { entity, message });
+        .trigger(move |entity| LobbyMessage {
+            entity,
+            message,
+            send_mode: SendMode::Unreliable,
+        });
 }
 
 /// Forward outgoing input events to ensemble as lobby messages.
