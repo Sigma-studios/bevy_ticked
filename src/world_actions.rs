@@ -45,4 +45,9 @@ impl<T: TickedComponent> WorldActions<T> {
     pub fn truncate_after(&mut self, tick: u64) {
         self.history.retain(|&t, _| t <= tick);
     }
+
+    /// Clear all history.
+    pub fn clear(&mut self) {
+        self.history.clear();
+    }
 }

@@ -30,6 +30,7 @@ struct RegisteredTickedComponent {
     capture: fn(&mut World, u64),
     restore: fn(&mut World, u64),
     truncate_after: fn(&mut World, u64),
+    clear: fn(&mut World),
     has_tick: fn(&World, u64) -> bool,
     /// Optional serialization support, populated by the networking crate.
     serialize_at: Option<fn(&mut World, u64) -> Option<HashMap<u64, Vec<u8>>>>,
@@ -82,6 +83,7 @@ impl TickedComponentRegistry {
             capture: capture_component::<T>,
             restore: restore_component::<T>,
             truncate_after: truncate_component::<T>,
+            clear: clear_component::<T>,
             has_tick: has_tick_component::<T>,
             serialize_at,
             deserialize_and_apply,
@@ -127,6 +129,13 @@ impl TickedComponentRegistry {
     pub fn truncate_all_after(&self, world: &mut World, tick: u64) {
         for entry in &self.entries {
             (entry.truncate_after)(world, tick);
+        }
+    }
+
+    /// Clear all WorldActions history for all registered components.
+    pub fn clear_all(&self, world: &mut World) {
+        for entry in &self.entries {
+            (entry.clear)(world);
         }
     }
 
@@ -243,6 +252,10 @@ fn truncate_component<T: TickedComponent>(world: &mut World, tick: u64) {
     world
         .resource_mut::<WorldActions<T>>()
         .truncate_after(tick);
+}
+
+fn clear_component<T: TickedComponent>(world: &mut World) {
+    world.resource_mut::<WorldActions<T>>().clear();
 }
 
 fn has_tick_component<T: TickedComponent>(world: &World, tick: u64) -> bool {

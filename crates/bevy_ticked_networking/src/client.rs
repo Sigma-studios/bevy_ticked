@@ -6,6 +6,7 @@ use bevy_ticked::{
     TickedSet, TickedSimulation,
     registry::TickedComponentRegistry,
     tick::{CurrentTick, TickConfig},
+    tracked_entity::TickTrackedEntityCounter,
 };
 
 use crate::{
@@ -61,10 +62,9 @@ impl<T: TickedInput> Default for TickedClientPlugin<T> {
 
 impl<T: TickedInput> Plugin for TickedClientPlugin<T> {
     fn build(&self, app: &mut App) {
-        // Start paused — the first server snapshot will unpause us
-        app.insert_resource(TickConfig { paused: true })
-            .init_resource::<InputQueue<T>>()
+        app.init_resource::<InputQueue<T>>()
             .add_observer(receive_snapshot)
+            .add_observer(reset_on_join::<T>)
             .add_systems(
                 FixedUpdate,
                 (
@@ -80,6 +80,17 @@ fn receive_snapshot(trigger: On<ReceivedNetworkSnapshot>, mut commands: Commands
     commands.insert_resource(PendingSnapshot {
         snapshot: trigger.event().0.clone(),
     });
+}
+
+/// Observer: when `LocalClientPlayer` is inserted, reset tick state and pause
+/// until the first server snapshot arrives.
+fn reset_on_join<T: TickedInput>(_trigger: On<Insert, LocalClientPlayer>, world: &mut World) {
+    world.insert_resource(CurrentTick(0));
+    world.insert_resource(TickConfig { paused: true });
+    world.insert_resource(TickTrackedEntityCounter::default());
+    world.resource_mut::<InputQueue<T>>().inputs.clear();
+    let registry = world.resource::<TickedComponentRegistry>().clone();
+    registry.clear_all(world);
 }
 
 /// PreTick: if a server snapshot arrived, rollback and replay local inputs to now.
