@@ -5,8 +5,8 @@ use bevy_ensemble::prelude::*;
 use bevy_ticked_networking::{
     input::TickedInput,
     messages::{
-        NetworkInputPayload, NetworkSnapshotPayload, ReceivedNetworkInput,
-        ReceivedNetworkSnapshot, SendNetworkInput, SendNetworkSnapshot,
+        NetworkInputPayload, NetworkSnapshotPayload, ReceivedNetworkInput, ReceivedNetworkSnapshot,
+        SendNetworkInput, SendNetworkSnapshot,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -57,10 +57,7 @@ impl<T: TickedInput + Serialize + for<'de> Deserialize<'de>> Plugin
             .register_ensemble_message_type::<EnsembleInputMessage<T>>()
             .add_systems(
                 PreUpdate,
-                (
-                    forward_received_snapshots,
-                    forward_received_inputs::<T>,
-                ),
+                (forward_received_snapshots, forward_received_inputs::<T>),
             )
             .add_observer(forward_outgoing_snapshots)
             .add_observer(forward_outgoing_inputs::<T>);
@@ -137,5 +134,9 @@ fn forward_outgoing_inputs<T: TickedInput + Serialize + for<'de> Deserialize<'de
     };
     commands
         .entity(lobby_entity)
-        .trigger(move |entity| LobbyMessage { entity, message });
+        .trigger(move |entity| LobbyMessage {
+            entity,
+            message,
+            send_mode: SendMode::Reliable,
+        });
 }
