@@ -64,7 +64,10 @@ impl<T: TickedInput> Plugin for TickedClientPlugin<T> {
     fn build(&self, app: &mut App) {
         app.init_resource::<InputQueue<T>>()
             .add_observer(receive_snapshot)
-            .add_observer(reset_on_join::<T>)
+            .add_systems(
+                Update,
+                reset_on_join::<T>.run_if(resource_added::<LocalClientPlayer>),
+            )
             .add_systems(
                 FixedUpdate,
                 (
@@ -82,9 +85,9 @@ fn receive_snapshot(trigger: On<ReceivedNetworkSnapshot>, mut commands: Commands
     });
 }
 
-/// Observer: when `LocalClientPlayer` is inserted, reset tick state and pause
+/// When `LocalClientPlayer` is inserted, reset tick state and pause
 /// until the first server snapshot arrives.
-fn reset_on_join<T: TickedInput>(_trigger: On<Insert, LocalClientPlayer>, world: &mut World) {
+fn reset_on_join<T: TickedInput>(world: &mut World) {
     world.insert_resource(CurrentTick(0));
     world.insert_resource(TickConfig { paused: true });
     world.insert_resource(TickTrackedEntityCounter::default());

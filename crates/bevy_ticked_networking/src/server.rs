@@ -49,7 +49,10 @@ impl<T: TickedInput> Plugin for TickedServerPlugin<T> {
     fn build(&self, app: &mut App) {
         app.init_resource::<InputQueue<T>>()
             .add_observer(collect_network_inputs::<T>)
-            .add_observer(reset_on_host::<T>)
+            .add_systems(
+                Update,
+                reset_on_host::<T>.run_if(resource_added::<LocalServerPlayer>),
+            )
             .add_systems(
                 FixedUpdate,
                 broadcast_snapshot.in_set(TickedSet::PostTick),
@@ -57,9 +60,9 @@ impl<T: TickedInput> Plugin for TickedServerPlugin<T> {
     }
 }
 
-/// Observer: when `LocalServerPlayer` is inserted, reset tick state so the
+/// When `LocalServerPlayer` is inserted, reset tick state so the
 /// multiplayer session starts fresh from tick 0.
-fn reset_on_host<T: TickedInput>(_trigger: On<Insert, LocalServerPlayer>, world: &mut World) {
+fn reset_on_host<T: TickedInput>(world: &mut World) {
     world.insert_resource(CurrentTick(0));
     world.insert_resource(TickTrackedEntityCounter::default());
     world.resource_mut::<InputQueue<T>>().inputs.clear();
