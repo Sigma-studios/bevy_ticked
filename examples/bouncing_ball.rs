@@ -99,46 +99,51 @@ fn setup(
 }
 
 fn keyboard_controls(
+    mut commands: Commands,
     keys: Res<ButtonInput<KeyCode>>,
-    mut tick_config: ResMut<TickConfig>,
+    ticks_paused: Option<Res<TicksPaused>>,
     mut step_forward: MessageWriter<StepForward>,
     mut step_backward: MessageWriter<StepBackward>,
     mut reset: MessageWriter<ResetToTick>,
 ) {
     if keys.just_pressed(KeyCode::Space) {
-        tick_config.paused = !tick_config.paused;
+        if ticks_paused.is_some() {
+            commands.remove_resource::<TicksPaused>();
+        } else {
+            commands.insert_resource(TicksPaused);
+        }
     }
     // A/D: step once on press
     if keys.just_pressed(KeyCode::KeyD) {
-        tick_config.paused = true;
+        commands.insert_resource(TicksPaused);
         step_forward.write(StepForward);
     }
     if keys.just_pressed(KeyCode::KeyA) {
-        tick_config.paused = true;
+        commands.insert_resource(TicksPaused);
         step_backward.write(StepBackward);
     }
     // Q/E: step continuously while held
     if keys.pressed(KeyCode::KeyE) {
-        tick_config.paused = true;
+        commands.insert_resource(TicksPaused);
         step_forward.write(StepForward);
     }
     if keys.pressed(KeyCode::KeyQ) {
-        tick_config.paused = true;
+        commands.insert_resource(TicksPaused);
         step_backward.write(StepBackward);
     }
     if keys.just_pressed(KeyCode::KeyR) {
-        tick_config.paused = true;
+        commands.insert_resource(TicksPaused);
         reset.write(ResetToTick(0));
     }
 }
 
 fn update_ui(
     tick: Res<CurrentTick>,
-    config: Res<TickConfig>,
+    ticks_paused: Option<Res<TicksPaused>>,
     mut query: Query<&mut Text, With<TickUiText>>,
 ) {
     for mut text in &mut query {
-        let status = if config.paused { "PAUSED" } else { "PLAYING" };
+        let status = if ticks_paused.is_some() { "PAUSED" } else { "PLAYING" };
         **text = format!("Tick: {} [{}]", tick.0, status);
     }
 }

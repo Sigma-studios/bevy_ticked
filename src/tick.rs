@@ -11,17 +11,11 @@ pub const SECONDS_PER_TICK: f32 = 1.0 / TICKS_PER_SECOND;
 #[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct CurrentTick(pub u64);
 
-/// Controls whether ticks advance automatically via FixedUpdate.
-#[derive(Resource, Clone, Debug)]
-pub struct TickConfig {
-    pub paused: bool,
-}
-
-impl Default for TickConfig {
-    fn default() -> Self {
-        Self { paused: false }
-    }
-}
+/// Marker resource: when present, tick advancement is paused.
+///
+/// Insert this resource to pause the simulation, remove it to resume.
+#[derive(Resource, Clone, Copy, Debug, Default)]
+pub struct TicksPaused;
 
 /// Message: advance one tick forward (used for manual stepping while paused).
 #[derive(Message)]

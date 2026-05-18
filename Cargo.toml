@@ -7,6 +7,7 @@ edition = "2024"
 members = [
     "crates/bevy_ticked_networking",
     "crates/bevy_ticked_networking_ensemble",
+    "crates/bevy_ticked_lockstep_networking",
 ]
 
 [dependencies]

@@ -1770,6 +1770,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "bevy_ticked_lockstep_networking"
+version = "0.1.0"
+dependencies = [
+ "avian2d",
+ "bevy",
+ "bevy_ensemble",
+ "bevy_ensemble_webrtc",
+ "bevy_ticked",
+ "serde",
+]
+
+[[package]]
 name = "bevy_ticked_networking"
 version = "0.1.0"
 dependencies = [

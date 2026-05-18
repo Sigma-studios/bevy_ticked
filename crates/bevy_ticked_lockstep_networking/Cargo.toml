@@ -1,0 +1,22 @@
+[package]
+name = "bevy_ticked_lockstep_networking"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bevy = "0.18"
+bevy_ticked = { path = "../.." }
+bevy_ensemble = { path = "../../../bevy_ensemble" }
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+avian2d = { version = "0.6", features = ["serialize"] }
+bevy_ensemble_webrtc = { path = "../../../bevy_ensemble/crates/bevy_ensemble_webrtc" }
+
+[[example]]
+name = "block_placer"
+path = "examples/block_placer.rs"
+
+[lints.clippy]
+too_many_arguments = "allow"
+type_complexity = "allow"

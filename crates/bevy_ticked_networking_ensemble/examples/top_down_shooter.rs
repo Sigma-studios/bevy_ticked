@@ -641,7 +641,7 @@ fn sync_visuals(
 
 fn update_ui(
     tick: Res<CurrentTick>,
-    config: Res<TickConfig>,
+    ticks_paused: Option<Res<TicksPaused>>,
     host_lobbies: Query<(), (With<Lobby>, With<Host>)>,
     client_lobbies: Query<(), (With<Lobby>, Without<Host>)>,
     pending_lobbies: Query<(), With<PendingLobby>>,
@@ -692,7 +692,7 @@ fn update_ui(
         }
     }
 
-    let status = if config.paused { "PAUSED" } else { "PLAYING" };
+    let status = if ticks_paused.is_some() { "PAUSED" } else { "PLAYING" };
     **text = format!(
         "[{}] Tick: {} [{}] | Players: {} | WASD: Move | Mouse: Aim | LMB: Shoot | Esc: Leave",
         role, tick.0, status, player_count

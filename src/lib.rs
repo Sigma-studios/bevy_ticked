@@ -10,7 +10,7 @@ use bevy::prelude::*;
 
 use registry::TickedComponentRegistry;
 use rollback::rollback_and_resimulate;
-use tick::{CurrentTick, ResetToTick, StepBackward, StepForward, TickConfig};
+use tick::{CurrentTick, ResetToTick, StepBackward, StepForward, TicksPaused};
 use tracked_entity::TickTrackedEntityCounter;
 
 /// The schedule where all tick-driven simulation systems run.
@@ -41,7 +41,6 @@ pub struct TickedPlugin;
 impl Plugin for TickedPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<CurrentTick>()
-            .init_resource::<TickConfig>()
             .init_resource::<TickedComponentRegistry>()
             .init_resource::<TickTrackedEntityCounter>()
             .init_schedule(TickedSimulation)
@@ -69,8 +68,7 @@ fn advance_tick_system(world: &mut World) {
         }
     }
 
-    let paused = world.resource::<TickConfig>().paused;
-    if paused {
+    if world.get_resource::<TicksPaused>().is_some() {
         return;
     }
 

@@ -5,7 +5,7 @@ use bevy::prelude::*;
 use bevy_ticked::{
     TickedSet, TickedSimulation,
     registry::TickedComponentRegistry,
-    tick::{CurrentTick, TickConfig},
+    tick::{CurrentTick, TicksPaused},
     tracked_entity::TickTrackedEntityCounter,
 };
 
@@ -89,7 +89,7 @@ fn receive_snapshot(trigger: On<ReceivedNetworkSnapshot>, mut commands: Commands
 /// until the first server snapshot arrives.
 fn reset_on_join<T: TickedInput>(world: &mut World) {
     world.insert_resource(CurrentTick(0));
-    world.insert_resource(TickConfig { paused: true });
+    world.insert_resource(TicksPaused);
     world.insert_resource(TickTrackedEntityCounter::default());
     world.resource_mut::<InputQueue<T>>().inputs.clear();
     let registry = world.resource::<TickedComponentRegistry>().clone();
@@ -102,7 +102,7 @@ fn handle_server_snapshot<T: TickedInput>(world: &mut World) {
         return;
     };
 
-    let was_paused = world.resource::<TickConfig>().paused;
+    let was_paused = world.get_resource::<TicksPaused>().is_some();
     let current_tick = world.resource::<CurrentTick>().0;
     let snapshot_tick = pending.snapshot.tick;
     let tick_buffer = CLIENT_TICK_BUFFER;
@@ -125,7 +125,7 @@ fn handle_server_snapshot<T: TickedInput>(world: &mut World) {
                 world.run_schedule(TickedSimulation);
                 registry.capture_all(world, tick);
             }
-            world.resource_mut::<TickConfig>().paused = false;
+            world.remove_resource::<TicksPaused>();
         }
         return;
     }
@@ -133,7 +133,7 @@ fn handle_server_snapshot<T: TickedInput>(world: &mut World) {
     // If paused (shouldn't normally happen after initial sync), don't replay
     if was_paused {
         registry.capture_all(world, snapshot_tick);
-        world.resource_mut::<TickConfig>().paused = false;
+        world.remove_resource::<TicksPaused>();
         return;
     }
 
@@ -150,12 +150,12 @@ fn handle_server_snapshot<T: TickedInput>(world: &mut World) {
 /// PostTick: send the local player's input for the current tick to the server.
 fn send_local_input<T: TickedInput>(
     tick: Res<CurrentTick>,
-    tick_config: Res<TickConfig>,
+    ticks_paused: Option<Res<TicksPaused>>,
     local_player: Option<Res<LocalClientPlayer>>,
     queue: Res<InputQueue<T>>,
     mut commands: Commands,
 ) {
-    if tick_config.paused {
+    if ticks_paused.is_some() {
         return;
     }
     let Some(local_player) = local_player else {

@@ -5,7 +5,7 @@ use bevy::prelude::*;
 use bevy_ticked::{
     TickedSet,
     registry::TickedComponentRegistry,
-    tick::{CurrentTick, TickConfig},
+    tick::{CurrentTick, TicksPaused},
     tracked_entity::TickTrackedEntityCounter,
 };
 
@@ -90,11 +90,11 @@ fn collect_network_inputs<T: TickedInput>(
 /// Only runs if `LocalServerPlayer` is present (i.e., this peer is the host).
 fn broadcast_snapshot(
     tick: Res<CurrentTick>,
-    tick_config: Res<TickConfig>,
+    ticks_paused: Option<Res<TicksPaused>>,
     server_player: Option<Res<LocalServerPlayer>>,
     mut commands: Commands,
 ) {
-    if tick_config.paused || server_player.is_none() {
+    if ticks_paused.is_some() || server_player.is_none() {
         return;
     }
     commands.queue(BroadcastSnapshotCommand(tick.0));
