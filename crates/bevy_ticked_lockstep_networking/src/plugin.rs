@@ -57,7 +57,7 @@ impl<A, S> Default for LockstepPlugin<A, S> {
 fn reset_lockstep_state_on_lobby_removed<A: LockstepAction, S: JoinSnapshot>(
     mut removed_lobbies: RemovedComponents<Lobby>,
     mut tracker: ResMut<ActionTracker<A>>,
-    mut pending_actions: ResMut<LocalPendingActions<A>>,
+    pending_actions: Option<ResMut<LocalPendingActions<A>>>,
     mut pending_client_joins: ResMut<PendingClientJoins>,
     mut pending_participant_joins: ResMut<PendingLockstepParticipantJoins>,
     mut stashed_ticks: ResMut<StashedAuthoritativeTicks<A>>,
@@ -69,7 +69,9 @@ fn reset_lockstep_state_on_lobby_removed<A: LockstepAction, S: JoinSnapshot>(
         return;
     }
     tracker.ticks.clear();
-    pending_actions.0.clear();
+    if let Some(mut pending_actions) = pending_actions {
+        pending_actions.0.clear();
+    }
     pending_client_joins.0.clear();
     pending_participant_joins.0.clear();
     stashed_ticks.0.clear();
