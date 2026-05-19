@@ -962,8 +962,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "bevy_ensemble"
+version = "0.1.0"
+source = "git+https://github.com/Sigma-studios/bevy_ensemble.git#575b999f0ed6c192c82593dc77775c91b38fe92b"
+dependencies = [
+ "bevy",
+ "postcard",
+ "serde",
+]
+
+[[package]]
 name = "bevy_ensemble_sockets"
 version = "0.1.0"
+dependencies = [
+ "bytes",
+ "js-sys",
+ "serde",
+ "serde-wasm-bindgen",
+ "serde_json",
+ "tokio",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+ "webrtc",
+]
+
+[[package]]
+name = "bevy_ensemble_sockets"
+version = "0.1.0"
+source = "git+https://github.com/Sigma-studios/bevy_ensemble.git#575b999f0ed6c192c82593dc77775c91b38fe92b"
 dependencies = [
  "bytes",
  "js-sys",
@@ -983,8 +1010,28 @@ version = "0.1.0"
 dependencies = [
  "async-tungstenite",
  "bevy",
- "bevy_ensemble",
- "bevy_ensemble_sockets",
+ "bevy_ensemble 0.1.0",
+ "bevy_ensemble_sockets 0.1.0",
+ "futures-util",
+ "getrandom 0.3.4",
+ "postcard",
+ "serde",
+ "serde_json",
+ "tokio",
+ "uuid",
+ "wasm-bindgen-futures",
+ "ws_stream_wasm",
+]
+
+[[package]]
+name = "bevy_ensemble_webrtc"
+version = "0.1.0"
+source = "git+https://github.com/Sigma-studios/bevy_ensemble.git#575b999f0ed6c192c82593dc77775c91b38fe92b"
+dependencies = [
+ "async-tungstenite",
+ "bevy",
+ "bevy_ensemble 0.1.0 (git+https://github.com/Sigma-studios/bevy_ensemble.git)",
+ "bevy_ensemble_sockets 0.1.0 (git+https://github.com/Sigma-studios/bevy_ensemble.git)",
  "futures-util",
  "getrandom 0.3.4",
  "postcard",
@@ -1775,8 +1822,8 @@ version = "0.1.0"
 dependencies = [
  "avian2d",
  "bevy",
- "bevy_ensemble",
- "bevy_ensemble_webrtc",
+ "bevy_ensemble 0.1.0 (git+https://github.com/Sigma-studios/bevy_ensemble.git)",
+ "bevy_ensemble_webrtc 0.1.0 (git+https://github.com/Sigma-studios/bevy_ensemble.git)",
  "bevy_ticked",
  "serde",
 ]
@@ -1797,8 +1844,8 @@ version = "0.1.0"
 dependencies = [
  "avian2d",
  "bevy",
- "bevy_ensemble",
- "bevy_ensemble_webrtc",
+ "bevy_ensemble 0.1.0",
+ "bevy_ensemble_webrtc 0.1.0",
  "bevy_ticked",
  "bevy_ticked_networking",
  "postcard",

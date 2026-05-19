@@ -6,12 +6,12 @@ edition = "2024"
 [dependencies]
 bevy = "0.18"
 bevy_ticked = { path = "../.." }
-bevy_ensemble = { path = "../../../bevy_ensemble" }
+bevy_ensemble = { git = "https://github.com/Sigma-studios/bevy_ensemble.git" }
 serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 avian2d = { version = "0.6", features = ["serialize"] }
-bevy_ensemble_webrtc = { path = "../../../bevy_ensemble/crates/bevy_ensemble_webrtc" }
+bevy_ensemble_webrtc = { git = "https://github.com/Sigma-studios/bevy_ensemble.git" }
 
 [[example]]
 name = "block_placer"
