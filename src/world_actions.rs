@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use bevy::prelude::*;
 
@@ -8,15 +8,18 @@ use crate::registry::TickedComponent;
 ///
 /// One `WorldActions<T>` resource exists per registered component type.
 /// Maps `tick -> (entity_network_id -> component_value)`.
+///
+/// Uses a `BTreeMap` for the outer tick index so that truncation and pruning
+/// can be done in O(log n) via `split_off` rather than O(n) `retain`.
 #[derive(Resource)]
 pub struct WorldActions<T: TickedComponent> {
-    pub(crate) history: HashMap<u64, HashMap<u64, T>>,
+    pub(crate) history: BTreeMap<u64, HashMap<u64, T>>,
 }
 
 impl<T: TickedComponent> Default for WorldActions<T> {
     fn default() -> Self {
         Self {
-            history: HashMap::new(),
+            history: BTreeMap::new(),
         }
     }
 }
@@ -43,7 +46,14 @@ impl<T: TickedComponent> WorldActions<T> {
     /// Remove all history after a given tick (exclusive).
     /// Used after rollback to discard invalidated future state.
     pub fn truncate_after(&mut self, tick: u64) {
-        self.history.retain(|&t, _| t <= tick);
+        self.history.split_off(&(tick + 1));
+    }
+
+    /// Remove all history before a given tick.
+    /// Used to bound memory growth during long sessions.
+    pub fn prune_before(&mut self, tick: u64) {
+        let kept = self.history.split_off(&tick);
+        self.history = kept;
     }
 
     /// Clear all history.

@@ -420,7 +420,7 @@ fn apply_actions(world: &mut World) {
     let actions: Vec<(u128, Vec<Action>)> = world
         .resource::<ActionTracker<Action>>()
         .actions_for_tick(current_tick)
-        .map(|s| s.to_vec())
+        .map(|btree| btree.iter().map(|(k, v)| (*k, v.clone())).collect())
         .unwrap_or_default();
 
     for (player_uuid, player_actions) in &actions {
@@ -634,6 +634,25 @@ fn sync_visuals(
 
 // --- UI ---
 
+fn format_in_game_ui(
+    tick: u64,
+    is_paused: bool,
+    is_host: bool,
+    lobby_entity: Entity,
+    participants: &Query<(&LobbyParticipant, &LobbyParticipantOf)>,
+    block_count: usize,
+) -> String {
+    let role = if is_host { "HOST" } else { "CLIENT" };
+    let player_count = participants
+        .iter()
+        .filter(|(_, pof)| pof.0 == lobby_entity)
+        .count();
+    let status = if is_paused { "WAITING" } else { "PLAYING" };
+    format!(
+        "[{role}] Tick: {tick} [{status}] | Players: {player_count} | Blocks: {block_count} | WASD: Move | LMB: Place | RMB: Remove | Esc: Leave"
+    )
+}
+
 #[cfg(feature = "transport-webrtc")]
 fn update_ui(
     tick: Res<CurrentTick>,
@@ -677,23 +696,16 @@ fn update_ui(
         return;
     }
 
-    let role = if is_host { "HOST" } else { "CLIENT" };
-    let lobby_entity = lobbies.iter().next();
-
-    let mut player_count = 0;
-    if let Some(lobby_entity) = lobby_entity {
-        for (_, pof) in participants.iter() {
-            if pof.0 == lobby_entity {
-                player_count += 1;
-            }
-        }
-    }
-
-    let status = if ticks_paused.is_some() { "WAITING" } else { "PLAYING" };
-    let block_count = blocks.iter().count();
-    **text = format!(
-        "[{}] Tick: {} [{}] | Players: {} | Blocks: {} | WASD: Move | LMB: Place | RMB: Remove | Esc: Leave",
-        role, tick.0, status, player_count, block_count
+    let Some(lobby_entity) = lobbies.iter().next() else {
+        return;
+    };
+    **text = format_in_game_ui(
+        tick.0,
+        ticks_paused.is_some(),
+        is_host,
+        lobby_entity,
+        &participants,
+        blocks.iter().count(),
     );
 }
 
@@ -740,22 +752,15 @@ fn update_ui(
         return;
     }
 
-    let role = if is_host { "HOST" } else { "CLIENT" };
-    let lobby_entity = lobbies.iter().next();
-
-    let mut player_count = 0;
-    if let Some(lobby_entity) = lobby_entity {
-        for (_, pof) in participants.iter() {
-            if pof.0 == lobby_entity {
-                player_count += 1;
-            }
-        }
-    }
-
-    let status = if ticks_paused.is_some() { "WAITING" } else { "PLAYING" };
-    let block_count = blocks.iter().count();
-    **text = format!(
-        "[{}] Tick: {} [{}] | Players: {} | Blocks: {} | WASD: Move | LMB: Place | RMB: Remove | Esc: Leave",
-        role, tick.0, status, player_count, block_count
+    let Some(lobby_entity) = lobbies.iter().next() else {
+        return;
+    };
+    **text = format_in_game_ui(
+        tick.0,
+        ticks_paused.is_some(),
+        is_host,
+        lobby_entity,
+        &participants,
+        blocks.iter().count(),
     );
 }

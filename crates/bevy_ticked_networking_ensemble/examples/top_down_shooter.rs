@@ -629,11 +629,38 @@ fn on_entity_spawned(
 }
 
 fn sync_visuals(
-    mut entities: Query<(&Position, &AimAngle, &mut Transform), With<TickTrackedEntity>>,
+    mut tracked: Query<
+        (
+            &Position,
+            &AimAngle,
+            &EntityKind,
+            &mut Transform,
+            Option<&Children>,
+        ),
+        With<TickTrackedEntity>,
+    >,
+    mut child_transforms: Query<&mut Transform, Without<TickTrackedEntity>>,
 ) {
-    for (pos, aim, mut transform) in entities.iter_mut() {
+    for (pos, aim, kind, mut transform, children) in tracked.iter_mut() {
         transform.translation = pos.0.extend(0.0);
-        transform.rotation = Quat::from_rotation_z(aim.0);
+        match kind {
+            EntityKind::Player => {
+                // Rotate the laser child instead of the player entity.
+                // Avian owns the player's Transform.rotation (via physics Rotation),
+                // so writing to it here would fight with avian's transform sync and
+                // cause jitter during rollback+replay on the client.
+                if let Some(children) = children {
+                    for child in children.iter() {
+                        if let Ok(mut ct) = child_transforms.get_mut(child) {
+                            ct.rotation = Quat::from_rotation_z(aim.0);
+                        }
+                    }
+                }
+            }
+            EntityKind::Bullet => {
+                transform.rotation = Quat::from_rotation_z(aim.0);
+            }
+        }
     }
 }
 
