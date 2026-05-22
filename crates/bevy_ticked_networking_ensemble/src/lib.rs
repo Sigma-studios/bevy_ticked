@@ -84,7 +84,10 @@ fn forward_received_inputs<T: TickedInput + Serialize + for<'de> Deserialize<'de
     mut commands: Commands,
 ) {
     for msg in messages.read() {
-        let sender = msg.sender.unwrap_or(0);
+        let Some(sender) = msg.sender else {
+            warn!("Received network input with no sender, skipping");
+            continue;
+        };
         commands.trigger(ReceivedNetworkInput {
             sender,
             tick: msg.message.payload.tick,

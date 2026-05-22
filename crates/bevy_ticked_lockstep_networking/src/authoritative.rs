@@ -16,11 +16,10 @@ pub fn tracker_has_actions_for_player<A>(
     tick: u64,
     player_uuid: u128,
 ) -> bool {
-    tracker.ticks.get(&tick).is_some_and(|players_actions| {
-        players_actions
-            .iter()
-            .any(|(tracked_player_uuid, _)| *tracked_player_uuid == player_uuid)
-    })
+    tracker
+        .ticks
+        .get(&tick)
+        .is_some_and(|players_actions| players_actions.contains_key(&player_uuid))
 }
 
 pub fn broadcast_buffered_authoritative_actions_to_loaded_clients<A: LockstepAction>(
@@ -54,7 +53,10 @@ pub fn broadcast_buffered_authoritative_actions_to_loaded_clients<A: LockstepAct
 
             let message = AuthoritativeTick {
                 tick,
-                players_actions: players_actions.clone(),
+                players_actions: players_actions
+                    .iter()
+                    .map(|(k, v)| (*k, v.clone()))
+                    .collect(),
             };
             commands
                 .entity(client_entity)
@@ -90,9 +92,7 @@ pub fn broadcast_authoritative_actions<A: LockstepAction>(
                     && participant_is_required_for_tick(lockstep_participant, tick)
             })
             .any(|(participant, _, _)| {
-                !players_actions
-                    .iter()
-                    .any(|(uuid, _)| *uuid == participant.player_uuid)
+                !players_actions.contains_key(&participant.player_uuid)
             });
         if has_missing {
             break;
@@ -100,7 +100,10 @@ pub fn broadcast_authoritative_actions<A: LockstepAction>(
 
         let message = AuthoritativeTick {
             tick,
-            players_actions: players_actions.clone(),
+            players_actions: players_actions
+                .iter()
+                .map(|(k, v)| (*k, v.clone()))
+                .collect(),
         };
         commands
             .entity(*host_lobby)
