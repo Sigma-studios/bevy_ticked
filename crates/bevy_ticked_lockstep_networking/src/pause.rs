@@ -1,6 +1,6 @@
 use crate::{
-    ActionTracker, ClientSnapshotState, JoinSnapshot, LockstepAction, LockstepLobbyParticipant,
-    participant_is_required_for_tick, tracker_has_actions_for_player,
+    ActionTracker, ClientSnapshotState, JoinSnapshot, LockstepAction, LockstepConfig,
+    LockstepLobbyParticipant, participant_is_required_for_tick, tracker_has_actions_for_player,
 };
 use bevy::prelude::*;
 use bevy_ensemble::{Host, Lobby, LobbyParticipant, LobbyParticipantOf};
@@ -42,29 +42,31 @@ pub fn sync_lockstep_pause_state<A: LockstepAction, S: JoinSnapshot>(world: &mut
     let next_tick = current_tick + 1;
 
     let should_pause = if host_lobby.is_some() {
-        // Host: wait for every required participant that has previously submitted
-        // actions. Participants who have never appeared in the tracker are still
-        // joining — their actions are implicitly empty and should not block.
-        let required_participant_ids: Vec<u128> = world
+        // Host: wait for every required participant whose initial buffer window
+        // has elapsed. During the first `buffer` ticks after joining, a
+        // participant's flush has not yet produced actions for `next_tick` — this
+        // is expected and should not block.
+        let buffer = world.resource::<LockstepConfig>().host_tick_buffer;
+
+        let required_participants: Vec<(u128, u64)> = world
             .query::<(&LobbyParticipant, &LockstepLobbyParticipant, &LobbyParticipantOf)>()
             .iter(world)
             .filter(|(_, lockstep, pof)| {
                 pof.0 == scoped_lobby && participant_is_required_for_tick(lockstep, next_tick)
             })
-            .map(|(p, _, _)| p.player_uuid)
+            .map(|(p, lockstep, _)| (p.player_uuid, lockstep.joined_at_tick))
             .collect();
 
-        if required_participant_ids.is_empty() {
+        if required_participants.is_empty() {
             true
         } else {
             let tracker = world.resource::<ActionTracker<A>>();
-            required_participant_ids.iter().any(|uuid| {
-                let ever_tracked = tracker
-                    .ticks
-                    .values()
-                    .any(|actions| actions.contains_key(uuid));
-                // Only block on participants whose actions we have seen before.
-                ever_tracked && !tracker_has_actions_for_player(tracker, next_tick, *uuid)
+            required_participants.iter().any(|(uuid, joined_at_tick)| {
+                // Still in the initial buffer window — actions not expected yet.
+                if next_tick <= joined_at_tick + buffer {
+                    return false;
+                }
+                !tracker_has_actions_for_player(tracker, next_tick, *uuid)
             })
         }
     } else {

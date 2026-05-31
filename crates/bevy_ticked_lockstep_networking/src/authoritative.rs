@@ -72,6 +72,7 @@ pub fn broadcast_authoritative_actions<A: LockstepAction>(
     mut commands: Commands,
     current_tick: Res<CurrentTick>,
     mut last_broadcast_tick: ResMut<LastBroadcastTick>,
+    config: Res<LockstepConfig>,
     tracker: Res<ActionTracker<A>>,
     host_lobby: Option<Single<Entity, (With<Lobby>, With<Host>)>>,
     participants: Query<(&LobbyParticipant, &LockstepLobbyParticipant, &LobbyParticipantOf)>,
@@ -91,24 +92,23 @@ pub fn broadcast_authoritative_actions<A: LockstepAction>(
             .map(|(k, v)| (*k, v.clone()))
             .collect();
 
-        for (participant, _, _) in participants.iter().filter(|(_, lockstep_participant, pof)| {
-            pof.0 == *host_lobby && participant_is_required_for_tick(lockstep_participant, tick)
-        }) {
+        for (participant, lockstep_participant, _) in
+            participants.iter().filter(|(_, lockstep_participant, pof)| {
+                pof.0 == *host_lobby && participant_is_required_for_tick(lockstep_participant, tick)
+            })
+        {
             if players_actions.contains_key(&participant.player_uuid) {
                 continue;
             }
             // Participant is required but missing from the tracker for this tick.
-            // If they have never appeared in any tick, they are still joining and
-            // their actions are implicitly empty.
-            let ever_tracked = tracker
-                .ticks
-                .values()
-                .any(|pa| pa.contains_key(&participant.player_uuid));
-            if ever_tracked {
+            // If still in their initial buffer window, their actions are
+            // implicitly empty.
+            if tick <= lockstep_participant.joined_at_tick + config.host_tick_buffer {
+                broadcast_actions.push((participant.player_uuid, Vec::new()));
+            } else {
                 has_missing_established = true;
                 break;
             }
-            broadcast_actions.push((participant.player_uuid, Vec::new()));
         }
         if has_missing_established {
             break;
