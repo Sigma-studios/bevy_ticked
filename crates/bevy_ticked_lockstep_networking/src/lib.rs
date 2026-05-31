@@ -27,7 +27,7 @@ pub use participants::{
     LockstepLobbyParticipant, PendingLockstepParticipantJoins, activate_loaded_client_participants,
     add_host_participant, apply_pending_lockstep_participants, apply_received_participants,
     broadcast_new_participants_to_existing_clients, broadcast_participants_to_loaded_clients,
-    participant_is_required_for_tick, prefill_actions_for_new_participants,
+    participant_is_required_for_tick,
 };
 pub use pause::sync_lockstep_pause_state;
 pub use plugin::{LockstepConfig, LockstepJoinSet, LockstepPlugin};

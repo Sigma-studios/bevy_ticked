@@ -1,7 +1,4 @@
-use crate::{
-    ActionTracker, ClientLoaded, LastBroadcastTick, LockstepAction, LockstepConfig,
-    ParticipantJoined, insert_actions_into_tracker,
-};
+use crate::{ClientLoaded, LastBroadcastTick, LockstepConfig, ParticipantJoined};
 use bevy::prelude::*;
 use bevy_ensemble::{
     Host, Lobby, LobbyClient, LobbyClientMessage, LobbyClientPlayerUuid, LobbyMessage,
@@ -243,33 +240,3 @@ pub fn participant_is_required_for_tick(participant: &LockstepLobbyParticipant, 
     tick >= participant.joined_at_tick
 }
 
-pub fn prefill_actions_for_new_participants<A: LockstepAction>(
-    mut tracker: ResMut<ActionTracker<A>>,
-    current_tick: Res<CurrentTick>,
-    config: Res<LockstepConfig>,
-    host_lobbies: Query<Entity, (With<Lobby>, With<Host>)>,
-    added_participants: Query<
-        (
-            &LobbyParticipant,
-            &LockstepLobbyParticipant,
-            &LobbyParticipantOf,
-        ),
-        Added<LockstepLobbyParticipant>,
-    >,
-) {
-    let Some(host_lobby) = host_lobbies.iter().next() else {
-        return;
-    };
-
-    for (participant, lockstep_participant, participant_of) in added_participants.iter() {
-        if participant_of.0 != host_lobby {
-            continue;
-        }
-        let start_tick = lockstep_participant.joined_at_tick;
-        let end_tick = current_tick.0 + config.host_tick_buffer;
-
-        for tick in start_tick..=end_tick {
-            insert_actions_into_tracker(&mut tracker, tick, participant.player_uuid, Vec::new());
-        }
-    }
-}

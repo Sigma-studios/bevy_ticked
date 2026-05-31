@@ -85,25 +85,38 @@ pub fn broadcast_authoritative_actions<A: LockstepAction>(
             break;
         };
 
-        let has_missing = participants
+        let mut has_missing_established = false;
+        let mut broadcast_actions: Vec<(u128, Vec<A>)> = players_actions
             .iter()
-            .filter(|(_, lockstep_participant, participant_of)| {
-                participant_of.0 == *host_lobby
-                    && participant_is_required_for_tick(lockstep_participant, tick)
-            })
-            .any(|(participant, _, _)| {
-                !players_actions.contains_key(&participant.player_uuid)
-            });
-        if has_missing {
+            .map(|(k, v)| (*k, v.clone()))
+            .collect();
+
+        for (participant, _, _) in participants.iter().filter(|(_, lockstep_participant, pof)| {
+            pof.0 == *host_lobby && participant_is_required_for_tick(lockstep_participant, tick)
+        }) {
+            if players_actions.contains_key(&participant.player_uuid) {
+                continue;
+            }
+            // Participant is required but missing from the tracker for this tick.
+            // If they have never appeared in any tick, they are still joining and
+            // their actions are implicitly empty.
+            let ever_tracked = tracker
+                .ticks
+                .values()
+                .any(|pa| pa.contains_key(&participant.player_uuid));
+            if ever_tracked {
+                has_missing_established = true;
+                break;
+            }
+            broadcast_actions.push((participant.player_uuid, Vec::new()));
+        }
+        if has_missing_established {
             break;
         }
 
         let message = AuthoritativeTick {
             tick,
-            players_actions: players_actions
-                .iter()
-                .map(|(k, v)| (*k, v.clone()))
-                .collect(),
+            players_actions: broadcast_actions,
         };
         commands
             .entity(*host_lobby)
