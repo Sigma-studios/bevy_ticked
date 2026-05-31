@@ -1,9 +1,6 @@
-use std::{
-    any::type_name,
-    collections::HashMap,
-};
+use std::{any::type_name, collections::HashMap};
 
-use bevy::prelude::*;
+use bevy::{log::error, prelude::*};
 use serde::{Serialize, de::DeserializeOwned};
 
 use bevy_ticked::{
@@ -54,13 +51,17 @@ fn serialize_component<T: NetworkedTickedComponent>(
 
     let mut result = HashMap::new();
     for (net_id, component) in state {
-        let bytes = postcard::to_allocvec(component).unwrap_or_else(|error| {
-            panic!(
-                "Failed to serialize ticked component `{}`: {error}",
-                type_name::<T>()
-            )
-        });
-        result.insert(*net_id, bytes);
+        match postcard::to_allocvec(component) {
+            Ok(bytes) => {
+                result.insert(*net_id, bytes);
+            }
+            Err(err) => {
+                error!(
+                    "Failed to serialize ticked component `{}` for entity {net_id}: {err}",
+                    type_name::<T>()
+                );
+            }
+        }
     }
     Some(result)
 }
@@ -72,13 +73,17 @@ fn deserialize_and_apply_component<T: NetworkedTickedComponent>(
 ) {
     let mut state: HashMap<u64, T> = HashMap::new();
     for (net_id, bytes) in data {
-        let component: T = postcard::from_bytes(bytes).unwrap_or_else(|error| {
-            panic!(
-                "Failed to deserialize ticked component `{}`: {error}",
-                type_name::<T>()
-            )
-        });
-        state.insert(*net_id, component);
+        match postcard::from_bytes::<T>(bytes) {
+            Ok(component) => {
+                state.insert(*net_id, component);
+            }
+            Err(err) => {
+                error!(
+                    "Failed to deserialize ticked component `{}` for entity {net_id}: {err}",
+                    type_name::<T>()
+                );
+            }
+        }
     }
 
     world
@@ -103,11 +108,15 @@ fn deserialize_and_insert_one_component<T: NetworkedTickedComponent>(
     entity: Entity,
     bytes: &[u8],
 ) {
-    let component: T = postcard::from_bytes(bytes).unwrap_or_else(|error| {
-        panic!(
-            "Failed to deserialize ticked component `{}`: {error}",
-            type_name::<T>()
-        )
-    });
-    world.entity_mut(entity).insert(component);
+    match postcard::from_bytes::<T>(bytes) {
+        Ok(component) => {
+            world.entity_mut(entity).insert(component);
+        }
+        Err(err) => {
+            error!(
+                "Failed to deserialize ticked component `{}` for entity {entity}: {err}",
+                type_name::<T>()
+            );
+        }
+    }
 }

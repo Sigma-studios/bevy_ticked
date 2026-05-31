@@ -8,7 +8,7 @@ use crate::{
     broadcast_buffered_authoritative_actions_to_loaded_clients,
     broadcast_new_participants_to_existing_clients, broadcast_participants_to_loaded_clients,
     cleanup_old_tracker_entries, flush_pending_actions, flush_provided_join_snapshots,
-    prefill_actions_for_new_participants, receive_authoritative_actions, receive_client_actions,
+    receive_authoritative_actions, receive_client_actions,
     receive_join_snapshot_requests, receive_join_snapshot_responses,
     replay_stashed_authoritative_actions, request_join_snapshot_on_client_join,
     send_client_loaded_after_snapshot_applied, sync_lockstep_pause_state,
@@ -154,7 +154,6 @@ where
                     broadcast_new_participants_to_existing_clients,
                     apply_received_participants,
                     apply_pending_lockstep_participants.after(apply_received_participants),
-                    prefill_actions_for_new_participants::<A>,
                     broadcast_buffered_authoritative_actions_to_loaded_clients::<A>,
                     receive_client_actions::<A>,
                     replay_stashed_authoritative_actions::<A, S>

@@ -6,21 +6,17 @@ use bevy::prelude::*;
 use bevy_ensemble::{Host, Lobby, LobbyMessage, LocalMultiplayerPlayerId, ReceivedEnsembleMessage};
 use bevy_ticked::tick::{CurrentTick, TicksPaused};
 
-pub fn insert_actions_into_tracker<A: Clone>(
+pub fn insert_actions_into_tracker<A>(
     tracker: &mut ActionTracker<A>,
     tick: u64,
     player_uuid: u128,
     actions: Vec<A>,
 ) {
-    let players_actions = tracker.ticks.entry(tick).or_default();
-    if let Some((_, existing_actions)) = players_actions
-        .iter_mut()
-        .find(|(existing_player_uuid, _)| *existing_player_uuid == player_uuid)
-    {
-        *existing_actions = actions;
-    } else {
-        players_actions.push((player_uuid, actions));
-    }
+    tracker
+        .ticks
+        .entry(tick)
+        .or_default()
+        .insert(player_uuid, actions);
 }
 
 /// Flush pending local actions into the tracker (host) or send to host (client).

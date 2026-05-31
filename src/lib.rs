@@ -10,7 +10,9 @@ use bevy::prelude::*;
 
 use registry::TickedComponentRegistry;
 use rollback::rollback_and_resimulate;
-use tick::{CurrentTick, ResetToTick, StepBackward, StepForward, TicksPaused};
+use tick::{
+    CurrentTick, ResetToTick, StepBackward, StepForward, TicksPaused, HISTORY_BUFFER_TICKS,
+};
 use tracked_entity::TickTrackedEntityCounter;
 
 /// The schedule where all tick-driven simulation systems run.
@@ -58,9 +60,10 @@ impl Plugin for TickedPlugin {
 
 /// Capture the initial world state at tick 0 on the first run, then advance ticks when unpaused.
 fn advance_tick_system(world: &mut World) {
+    let registry = world.resource::<TickedComponentRegistry>().clone();
+
     // On the very first run, capture the initial state at tick 0 so reset works.
     let current_tick = world.resource::<CurrentTick>().0;
-    let registry = world.resource::<TickedComponentRegistry>().clone();
     if current_tick == 0 && !registry.is_empty() {
         let needs_capture = !registry.has_tick_captured(world, 0);
         if needs_capture {
@@ -79,9 +82,13 @@ fn advance_tick_system(world: &mut World) {
     };
 
     world.run_schedule(TickedSimulation);
-
-    let registry = world.resource::<TickedComponentRegistry>().clone();
     registry.capture_all(world, tick);
+
+    // Prune old history to prevent unbounded memory growth
+    let prune_tick = tick.saturating_sub(HISTORY_BUFFER_TICKS);
+    if prune_tick > 0 {
+        registry.prune_all_before(world, prune_tick);
+    }
 }
 
 enum ManualControlAction {

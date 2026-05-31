@@ -1,10 +1,21 @@
+#[cfg(all(feature = "transport-webrtc", feature = "transport-steam"))]
+compile_error!("Features `transport-webrtc` and `transport-steam` are mutually exclusive.");
+
+#[cfg(not(any(feature = "transport-webrtc", feature = "transport-steam")))]
+compile_error!("One of `transport-webrtc` or `transport-steam` must be enabled.");
+
 use avian2d::prelude::*;
 use bevy::prelude::*;
 use bevy_ensemble::{
     EnsemblePlugin, Host, Lobby, LobbyParticipant, LobbyParticipantOf,
-    LocalMultiplayerPlayerId, PendingLobby, PublicLobbies, StartHosting,
+    LocalMultiplayerPlayerId, PendingLobby, StartHosting,
 };
+#[cfg(feature = "transport-webrtc")]
+use bevy_ensemble::PublicLobbies;
+#[cfg(feature = "transport-webrtc")]
 use bevy_ensemble_webrtc::{BevyEnsembleWebrtcPlugin, JoinWebrtcLobby, RefreshLobbyList};
+#[cfg(feature = "transport-steam")]
+use bevy_ensemble_steam::{BevyEnsembleSteamPlugin, JoinSteamLobby, SteamFriendLobbies};
 use bevy_ticked::prelude::*;
 use bevy_ticked_lockstep_networking::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -85,20 +96,27 @@ fn player_color(uuid: u128) -> Color {
 // --- Main ---
 
 fn main() {
-    let server_url = std::env::var("SIGNALLING_SERVER_URL")
-        .ok()
-        .or_else(|| option_env!("SIGNALLING_SERVER_URL").map(String::from))
-        .unwrap_or_else(|| "ws://localhost:9090/ws".into());
+    let mut app = App::new();
+    app.add_plugins(DefaultPlugins)
+        .add_plugins(EnsemblePlugin);
 
-    App::new()
-        .add_plugins(DefaultPlugins)
-        .add_plugins(EnsemblePlugin)
-        .add_plugins(BevyEnsembleWebrtcPlugin {
+    #[cfg(feature = "transport-webrtc")]
+    {
+        let server_url = std::env::var("SIGNALLING_SERVER_URL")
+            .ok()
+            .or_else(|| option_env!("SIGNALLING_SERVER_URL").map(String::from))
+            .unwrap_or_else(|| "ws://localhost:9090/ws".into());
+        app.add_plugins(BevyEnsembleWebrtcPlugin {
             server_url,
             display_name: "Player".into(),
             ..default()
-        })
-        .add_plugins(TickedPlugin)
+        });
+    }
+
+    #[cfg(feature = "transport-steam")]
+    app.add_plugins(BevyEnsembleSteamPlugin::default());
+
+    app.add_plugins(TickedPlugin)
         .add_plugins(PhysicsPlugins::new(TickedSimulation).with_length_unit(1.0))
         .insert_resource(Gravity(Vec2::ZERO))
         .add_plugins(LockstepPlugin::<Action, GameSnapshot>::default())
@@ -110,8 +128,6 @@ fn main() {
             Update,
             (
                 lobby_host_key,
-                lobby_join_key,
-                lobby_refresh_key,
                 lobby_escape_key,
                 cleanup_on_lobby_gone,
                 spawn_player_on_lockstep_join,
@@ -122,9 +138,15 @@ fn main() {
                 sync_visuals,
                 update_ui,
             ),
-        )
-        // Simulation
-        .add_systems(TickedSimulation, apply_actions)
+        );
+
+    #[cfg(feature = "transport-webrtc")]
+    app.add_systems(Update, (lobby_join_key_webrtc, lobby_refresh_key_webrtc));
+
+    #[cfg(feature = "transport-steam")]
+    app.add_systems(Update, (lobby_join_key_steam, lobby_refresh_key_steam));
+
+    app.add_systems(TickedSimulation, apply_actions)
         .run();
 }
 
@@ -156,7 +178,8 @@ fn lobby_host_key(
     }
 }
 
-fn lobby_join_key(
+#[cfg(feature = "transport-webrtc")]
+fn lobby_join_key_webrtc(
     keys: Res<ButtonInput<KeyCode>>,
     lobby_list: Option<Res<PublicLobbies>>,
     mut join_writer: MessageWriter<JoinWebrtcLobby>,
@@ -172,12 +195,40 @@ fn lobby_join_key(
     join_writer.write(JoinWebrtcLobby(first.lobby_id));
 }
 
-fn lobby_refresh_key(
+#[cfg(feature = "transport-steam")]
+fn lobby_join_key_steam(
+    keys: Res<ButtonInput<KeyCode>>,
+    lobby_list: Option<Res<SteamFriendLobbies>>,
+    mut join_writer: MessageWriter<JoinSteamLobby>,
+    lobbies: Query<(), Or<(With<Lobby>, With<PendingLobby>)>>,
+) {
+    if !keys.just_pressed(KeyCode::KeyJ) || !lobbies.is_empty() {
+        return;
+    }
+    let Some(lobby_list) = lobby_list else { return };
+    let Some(first) = lobby_list.0.first() else {
+        return;
+    };
+    join_writer.write(JoinSteamLobby(first.lobby_id));
+}
+
+#[cfg(feature = "transport-webrtc")]
+fn lobby_refresh_key_webrtc(
     keys: Res<ButtonInput<KeyCode>>,
     mut refresh: MessageWriter<RefreshLobbyList>,
 ) {
     if keys.just_pressed(KeyCode::KeyR) {
         refresh.write(RefreshLobbyList);
+    }
+}
+
+#[cfg(feature = "transport-steam")]
+fn lobby_refresh_key_steam(
+    mut commands: Commands,
+    keys: Res<ButtonInput<KeyCode>>,
+) {
+    if keys.just_pressed(KeyCode::KeyR) {
+        commands.remove_resource::<SteamFriendLobbies>();
     }
 }
 
@@ -369,7 +420,7 @@ fn apply_actions(world: &mut World) {
     let actions: Vec<(u128, Vec<Action>)> = world
         .resource::<ActionTracker<Action>>()
         .actions_for_tick(current_tick)
-        .map(|s| s.to_vec())
+        .map(|btree| btree.iter().map(|(k, v)| (*k, v.clone())).collect())
         .unwrap_or_default();
 
     for (player_uuid, player_actions) in &actions {
@@ -583,6 +634,26 @@ fn sync_visuals(
 
 // --- UI ---
 
+fn format_in_game_ui(
+    tick: u64,
+    is_paused: bool,
+    is_host: bool,
+    lobby_entity: Entity,
+    participants: &Query<(&LobbyParticipant, &LobbyParticipantOf)>,
+    block_count: usize,
+) -> String {
+    let role = if is_host { "HOST" } else { "CLIENT" };
+    let player_count = participants
+        .iter()
+        .filter(|(_, pof)| pof.0 == lobby_entity)
+        .count();
+    let status = if is_paused { "WAITING" } else { "PLAYING" };
+    format!(
+        "[{role}] Tick: {tick} [{status}] | Players: {player_count} | Blocks: {block_count} | WASD: Move | LMB: Place | RMB: Remove | Esc: Leave"
+    )
+}
+
+#[cfg(feature = "transport-webrtc")]
 fn update_ui(
     tick: Res<CurrentTick>,
     ticks_paused: Option<Res<TicksPaused>>,
@@ -625,22 +696,71 @@ fn update_ui(
         return;
     }
 
-    let role = if is_host { "HOST" } else { "CLIENT" };
-    let lobby_entity = lobbies.iter().next();
+    let Some(lobby_entity) = lobbies.iter().next() else {
+        return;
+    };
+    **text = format_in_game_ui(
+        tick.0,
+        ticks_paused.is_some(),
+        is_host,
+        lobby_entity,
+        &participants,
+        blocks.iter().count(),
+    );
+}
 
-    let mut player_count = 0;
-    if let Some(lobby_entity) = lobby_entity {
-        for (_, pof) in participants.iter() {
-            if pof.0 == lobby_entity {
-                player_count += 1;
-            }
-        }
+#[cfg(feature = "transport-steam")]
+fn update_ui(
+    tick: Res<CurrentTick>,
+    ticks_paused: Option<Res<TicksPaused>>,
+    host_lobbies: Query<(), (With<Lobby>, With<Host>)>,
+    client_lobbies: Query<(), (With<Lobby>, Without<Host>)>,
+    pending_lobbies: Query<(), With<PendingLobby>>,
+    lobby_list: Option<Res<SteamFriendLobbies>>,
+    participants: Query<(&LobbyParticipant, &LobbyParticipantOf)>,
+    lobbies: Query<Entity, With<Lobby>>,
+    blocks: Query<(), With<Block>>,
+    mut ui: Query<&mut Text, With<UiText>>,
+) {
+    let Ok(mut text) = ui.single_mut() else {
+        return;
+    };
+
+    if !pending_lobbies.is_empty() {
+        **text = "Connecting...".to_string();
+        return;
     }
 
-    let status = if ticks_paused.is_some() { "WAITING" } else { "PLAYING" };
-    let block_count = blocks.iter().count();
-    **text = format!(
-        "[{}] Tick: {} [{}] | Players: {} | Blocks: {} | WASD: Move | LMB: Place | RMB: Remove | Esc: Leave",
-        role, tick.0, status, player_count, block_count
+    let is_host = !host_lobbies.is_empty();
+    let is_client = !client_lobbies.is_empty();
+
+    if !is_host && !is_client {
+        let mut s = "H: Host | J: Join (friend lobby) | R: Refresh".to_string();
+        if let Some(lobby_list) = &lobby_list {
+            if lobby_list.0.is_empty() {
+                s.push_str("\nNo friend lobbies found");
+            } else {
+                for lobby in &lobby_list.0 {
+                    s.push_str(&format!(
+                        "\n  {} ({} players)",
+                        lobby.host_name, lobby.member_count,
+                    ));
+                }
+            }
+        }
+        **text = s;
+        return;
+    }
+
+    let Some(lobby_entity) = lobbies.iter().next() else {
+        return;
+    };
+    **text = format_in_game_ui(
+        tick.0,
+        ticks_paused.is_some(),
+        is_host,
+        lobby_entity,
+        &participants,
+        blocks.iter().count(),
     );
 }
