@@ -75,11 +75,19 @@ pub fn broadcast_authoritative_actions<A: LockstepAction>(
     config: Res<LockstepConfig>,
     tracker: Res<ActionTracker<A>>,
     host_lobby: Option<Single<Entity, (With<Lobby>, With<Host>)>>,
+    lobby_clients: Query<(), With<LobbyClient>>,
     participants: Query<(&LobbyParticipant, &LockstepLobbyParticipant, &LobbyParticipantOf)>,
 ) {
     let Some(host_lobby) = host_lobby else {
         return;
     };
+
+    // No connected clients — nothing to broadcast. Keep last_broadcast_tick
+    // current so cleanup doesn't create a gap for future broadcasts.
+    if lobby_clients.is_empty() {
+        last_broadcast_tick.0 = current_tick.0;
+        return;
+    }
 
     for tick in (last_broadcast_tick.0 + 1)..=current_tick.0 {
         let Some(players_actions) = tracker.ticks.get(&tick) else {
