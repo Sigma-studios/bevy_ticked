@@ -1,6 +1,9 @@
 use crate::{AuthoritativeTick, JoinSnapshot, JoinSnapshotResponse};
 use bevy::prelude::*;
-use std::{collections::HashMap, marker::PhantomData};
+use std::{
+    collections::{BTreeMap, HashMap},
+    marker::PhantomData,
+};
 
 #[derive(Resource)]
 pub struct LocalPendingActions<A>(pub Vec<A>);
@@ -13,12 +16,12 @@ impl<A> Default for LocalPendingActions<A> {
 
 #[derive(Resource)]
 pub struct ActionTracker<A> {
-    pub ticks: HashMap<u64, Vec<(u128, Vec<A>)>>,
+    pub ticks: HashMap<u64, BTreeMap<u128, Vec<A>>>,
 }
 
 impl<A> ActionTracker<A> {
-    pub fn actions_for_tick(&self, tick: u64) -> Option<&[(u128, Vec<A>)]> {
-        self.ticks.get(&tick).map(Vec::as_slice)
+    pub fn actions_for_tick(&self, tick: u64) -> Option<&BTreeMap<u128, Vec<A>>> {
+        self.ticks.get(&tick)
     }
 }
 

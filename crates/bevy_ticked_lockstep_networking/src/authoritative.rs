@@ -16,11 +16,10 @@ pub fn tracker_has_actions_for_player<A>(
     tick: u64,
     player_uuid: u128,
 ) -> bool {
-    tracker.ticks.get(&tick).is_some_and(|players_actions| {
-        players_actions
-            .iter()
-            .any(|(tracked_player_uuid, _)| *tracked_player_uuid == player_uuid)
-    })
+    tracker
+        .ticks
+        .get(&tick)
+        .is_some_and(|players_actions| players_actions.contains_key(&player_uuid))
 }
 
 pub fn broadcast_buffered_authoritative_actions_to_loaded_clients<A: LockstepAction>(
@@ -54,7 +53,10 @@ pub fn broadcast_buffered_authoritative_actions_to_loaded_clients<A: LockstepAct
 
             let message = AuthoritativeTick {
                 tick,
-                players_actions: players_actions.clone(),
+                players_actions: players_actions
+                    .iter()
+                    .map(|(k, v)| (*k, v.clone()))
+                    .collect(),
             };
             commands
                 .entity(client_entity)
@@ -70,37 +72,59 @@ pub fn broadcast_authoritative_actions<A: LockstepAction>(
     mut commands: Commands,
     current_tick: Res<CurrentTick>,
     mut last_broadcast_tick: ResMut<LastBroadcastTick>,
+    config: Res<LockstepConfig>,
     tracker: Res<ActionTracker<A>>,
     host_lobby: Option<Single<Entity, (With<Lobby>, With<Host>)>>,
+    lobby_clients: Query<(), With<LobbyClient>>,
     participants: Query<(&LobbyParticipant, &LockstepLobbyParticipant, &LobbyParticipantOf)>,
 ) {
     let Some(host_lobby) = host_lobby else {
         return;
     };
 
+    // No connected clients — nothing to broadcast. Keep last_broadcast_tick
+    // current so cleanup doesn't create a gap for future broadcasts.
+    if lobby_clients.is_empty() {
+        last_broadcast_tick.0 = current_tick.0;
+        return;
+    }
+
     for tick in (last_broadcast_tick.0 + 1)..=current_tick.0 {
         let Some(players_actions) = tracker.ticks.get(&tick) else {
             break;
         };
 
-        let has_missing = participants
+        let mut has_missing_established = false;
+        let mut broadcast_actions: Vec<(u128, Vec<A>)> = players_actions
             .iter()
-            .filter(|(_, lockstep_participant, participant_of)| {
-                participant_of.0 == *host_lobby
-                    && participant_is_required_for_tick(lockstep_participant, tick)
+            .map(|(k, v)| (*k, v.clone()))
+            .collect();
+
+        for (participant, lockstep_participant, _) in
+            participants.iter().filter(|(_, lockstep_participant, pof)| {
+                pof.0 == *host_lobby && participant_is_required_for_tick(lockstep_participant, tick)
             })
-            .any(|(participant, _, _)| {
-                !players_actions
-                    .iter()
-                    .any(|(uuid, _)| *uuid == participant.player_uuid)
-            });
-        if has_missing {
+        {
+            if players_actions.contains_key(&participant.player_uuid) {
+                continue;
+            }
+            // Participant is required but missing from the tracker for this tick.
+            // If still in their initial buffer window, their actions are
+            // implicitly empty.
+            if tick <= lockstep_participant.joined_at_tick + config.host_tick_buffer {
+                broadcast_actions.push((participant.player_uuid, Vec::new()));
+            } else {
+                has_missing_established = true;
+                break;
+            }
+        }
+        if has_missing_established {
             break;
         }
 
         let message = AuthoritativeTick {
             tick,
-            players_actions: players_actions.clone(),
+            players_actions: broadcast_actions,
         };
         commands
             .entity(*host_lobby)

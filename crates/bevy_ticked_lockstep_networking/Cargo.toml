@@ -3,15 +3,21 @@ name = "bevy_ticked_lockstep_networking"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["transport-webrtc"]
+transport-webrtc = ["bevy_ensemble_webrtc"]
+transport-steam = ["bevy_ensemble_steam"]
+
 [dependencies]
 bevy = "0.18"
 bevy_ticked = { path = "../.." }
 bevy_ensemble = { git = "https://github.com/Sigma-studios/bevy_ensemble.git" }
+bevy_ensemble_webrtc = { git = "https://github.com/Sigma-studios/bevy_ensemble.git", optional = true }
+bevy_ensemble_steam = { git = "https://github.com/Sigma-studios/bevy_ensemble.git", optional = true }
 serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 avian2d = { version = "0.6", features = ["serialize"] }
-bevy_ensemble_webrtc = { git = "https://github.com/Sigma-studios/bevy_ensemble.git" }
 
 [[example]]
 name = "block_placer"

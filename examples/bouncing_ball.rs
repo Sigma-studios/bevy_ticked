@@ -50,7 +50,6 @@ fn setup(
         MeshMaterial3d(materials.add(Color::srgb(0.3, 0.5, 0.3))),
         RigidBody::Static,
         Collider::half_space(Vec3::Y),
-        TickTrackedEntity(0),
     ));
 
     // Bouncing ball — dynamic rigidbody

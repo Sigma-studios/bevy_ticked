@@ -1,6 +1,7 @@
 use std::{
     any::{TypeId, type_name},
     collections::HashMap,
+    sync::Arc,
 };
 
 use bevy::prelude::*;
@@ -18,8 +19,25 @@ impl<T> TickedComponent for T where T: Component + Clone + Send + Sync + 'static
 ///
 /// Each registered component type is assigned a sequential `u16` index.
 /// Registration order must be the same on all peers.
-#[derive(Resource, Default, Clone)]
+///
+/// Internals are `Arc`-wrapped so that cloning the registry (required to
+/// work around `&mut World` borrow conflicts) is an O(1) reference-count
+/// bump instead of a deep copy.
+#[derive(Resource, Clone)]
 pub struct TickedComponentRegistry {
+    inner: Arc<RegistryInner>,
+}
+
+impl Default for TickedComponentRegistry {
+    fn default() -> Self {
+        Self {
+            inner: Arc::new(RegistryInner::default()),
+        }
+    }
+}
+
+#[derive(Default, Clone)]
+struct RegistryInner {
     entries: Vec<RegisteredTickedComponent>,
     type_indices: HashMap<TypeId, u16>,
 }
@@ -30,6 +48,7 @@ struct RegisteredTickedComponent {
     capture: fn(&mut World, u64),
     restore: fn(&mut World, u64),
     truncate_after: fn(&mut World, u64),
+    prune_before: fn(&mut World, u64),
     clear: fn(&mut World),
     has_tick: fn(&World, u64) -> bool,
     /// Optional serialization support, populated by the networking crate.
@@ -64,77 +83,89 @@ impl TickedComponentRegistry {
         deserialize_and_apply: Option<fn(&mut World, u64, &HashMap<u64, Vec<u8>>)>,
         deserialize_and_insert_one: Option<fn(&mut World, Entity, &[u8])>,
     ) {
+        let inner = Arc::make_mut(&mut self.inner);
         let type_id = TypeId::of::<T>();
         let tname = type_name::<T>();
 
-        if self.type_indices.contains_key(&type_id) {
+        if inner.type_indices.contains_key(&type_id) {
             panic!("Ticked component type `{tname}` was registered more than once");
         }
 
-        let next_index = u16::try_from(self.entries.len()).unwrap_or_else(|_| {
+        let next_index = u16::try_from(inner.entries.len()).unwrap_or_else(|_| {
             panic!(
                 "Too many ticked component types registered: maximum is {}",
                 u16::MAX
             )
         });
 
-        self.entries.push(RegisteredTickedComponent {
+        inner.entries.push(RegisteredTickedComponent {
             _type_name: tname,
             capture: capture_component::<T>,
             restore: restore_component::<T>,
             truncate_after: truncate_component::<T>,
+            prune_before: prune_component::<T>,
             clear: clear_component::<T>,
             has_tick: has_tick_component::<T>,
             serialize_at,
             deserialize_and_apply,
             deserialize_and_insert_one,
         });
-        self.type_indices.insert(type_id, next_index);
+        inner.type_indices.insert(type_id, next_index);
     }
 
     /// Get the index for a component type.
     pub fn index_of<T: TickedComponent>(&self) -> Option<u16> {
-        self.type_indices.get(&TypeId::of::<T>()).copied()
+        self.inner.type_indices.get(&TypeId::of::<T>()).copied()
     }
 
     /// Number of registered component types.
     pub fn len(&self) -> usize {
-        self.entries.len()
+        self.inner.entries.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.inner.entries.is_empty()
     }
 
     /// Check if any registered component has captured state at the given tick.
     pub fn has_tick_captured(&self, world: &World, tick: u64) -> bool {
-        self.entries.iter().any(|entry| (entry.has_tick)(world, tick))
+        self.inner
+            .entries
+            .iter()
+            .any(|entry| (entry.has_tick)(world, tick))
     }
 
     /// Capture all registered components at the given tick.
     pub fn capture_all(&self, world: &mut World, tick: u64) {
-        for entry in &self.entries {
+        for entry in &self.inner.entries {
             (entry.capture)(world, tick);
         }
     }
 
     /// Restore all registered components from the given tick.
     pub fn restore_all(&self, world: &mut World, tick: u64) {
-        for entry in &self.entries {
+        for entry in &self.inner.entries {
             (entry.restore)(world, tick);
         }
     }
 
     /// Truncate all WorldActions history after the given tick.
     pub fn truncate_all_after(&self, world: &mut World, tick: u64) {
-        for entry in &self.entries {
+        for entry in &self.inner.entries {
             (entry.truncate_after)(world, tick);
+        }
+    }
+
+    /// Remove all WorldActions history before the given tick.
+    pub fn prune_all_before(&self, world: &mut World, tick: u64) {
+        for entry in &self.inner.entries {
+            (entry.prune_before)(world, tick);
         }
     }
 
     /// Clear all WorldActions history for all registered components.
     pub fn clear_all(&self, world: &mut World) {
-        for entry in &self.entries {
+        for entry in &self.inner.entries {
             (entry.clear)(world);
         }
     }
@@ -147,7 +178,7 @@ impl TickedComponentRegistry {
         tick: u64,
     ) -> HashMap<u16, HashMap<u64, Vec<u8>>> {
         let mut result = HashMap::new();
-        for (i, entry) in self.entries.iter().enumerate() {
+        for (i, entry) in self.inner.entries.iter().enumerate() {
             if let Some(serialize_fn) = entry.serialize_at {
                 if let Some(data) = serialize_fn(world, tick) {
                     result.insert(i as u16, data);
@@ -165,7 +196,7 @@ impl TickedComponentRegistry {
         components: &HashMap<u16, HashMap<u64, Vec<u8>>>,
     ) {
         for (index, data) in components {
-            if let Some(entry) = self.entries.get(*index as usize) {
+            if let Some(entry) = self.inner.entries.get(*index as usize) {
                 if let Some(deserialize_fn) = entry.deserialize_and_apply {
                     deserialize_fn(world, tick, data);
                 }
@@ -182,7 +213,7 @@ impl TickedComponentRegistry {
         entity: Entity,
         bytes: &[u8],
     ) -> bool {
-        if let Some(entry) = self.entries.get(type_index as usize) {
+        if let Some(entry) = self.inner.entries.get(type_index as usize) {
             if let Some(f) = entry.deserialize_and_insert_one {
                 f(world, entity, bytes);
                 return true;
@@ -252,6 +283,12 @@ fn truncate_component<T: TickedComponent>(world: &mut World, tick: u64) {
     world
         .resource_mut::<WorldActions<T>>()
         .truncate_after(tick);
+}
+
+fn prune_component<T: TickedComponent>(world: &mut World, tick: u64) {
+    world
+        .resource_mut::<WorldActions<T>>()
+        .prune_before(tick);
 }
 
 fn clear_component<T: TickedComponent>(world: &mut World) {

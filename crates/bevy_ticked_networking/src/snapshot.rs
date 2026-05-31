@@ -57,7 +57,9 @@ pub fn apply_snapshot(world: &mut World, snapshot: &WorldSnapshot) {
 
     let existing_ids: HashSet<u64> = existing.iter().map(|(_, id)| *id).collect();
 
-    // 3. Despawn local entities NOT in the snapshot
+    // 3. Despawn local entities NOT in the snapshot.
+    //    Uses world.despawn() (immediate) rather than deferred commands so that
+    //    the query in deserialize_and_apply_all (step 5) does not see them.
     for (entity, id) in &existing {
         if !snapshot_entity_ids.contains(id) {
             world.despawn(*entity);
@@ -88,10 +90,8 @@ pub fn apply_snapshot(world: &mut World, snapshot: &WorldSnapshot) {
 
     // 6. Reset counter to max snapshot ID so that rollback+replay produces
     //    deterministic entity IDs matching the server.
-    if let Some(&max_id) = snapshot_entity_ids.iter().max() {
-        let mut counter = world.resource_mut::<TickTrackedEntityCounter>();
-        counter.0 = max_id;
-    }
+    let max_id = snapshot_entity_ids.iter().max().copied().unwrap_or(0);
+    world.resource_mut::<TickTrackedEntityCounter>().0 = max_id;
 
     // 7. Set current tick
     world.resource_mut::<CurrentTick>().0 = snapshot.tick;

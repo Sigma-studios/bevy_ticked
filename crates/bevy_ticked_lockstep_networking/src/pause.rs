@@ -1,6 +1,6 @@
 use crate::{
-    ActionTracker, ClientSnapshotState, JoinSnapshot, LockstepAction, LockstepLobbyParticipant,
-    participant_is_required_for_tick, tracker_has_actions_for_player,
+    ActionTracker, ClientSnapshotState, JoinSnapshot, LockstepAction, LockstepConfig,
+    LockstepLobbyParticipant, participant_is_required_for_tick, tracker_has_actions_for_player,
 };
 use bevy::prelude::*;
 use bevy_ensemble::{Host, Lobby, LobbyParticipant, LobbyParticipantOf};
@@ -41,22 +41,49 @@ pub fn sync_lockstep_pause_state<A: LockstepAction, S: JoinSnapshot>(world: &mut
     let current_tick = world.resource::<CurrentTick>().0;
     let next_tick = current_tick + 1;
 
-    // Collect required participant UUIDs for the next tick
-    let required_participant_ids: Vec<u128> = world
-        .query::<(&LobbyParticipant, &LockstepLobbyParticipant, &LobbyParticipantOf)>()
-        .iter(world)
-        .filter(|(_, lockstep, pof)| {
-            pof.0 == scoped_lobby && participant_is_required_for_tick(lockstep, next_tick)
-        })
-        .map(|(p, _, _)| p.player_uuid)
-        .collect();
+    let should_pause = if host_lobby.is_some() {
+        // Host: wait for every required participant whose initial buffer window
+        // has elapsed. During the first `buffer` ticks after joining, a
+        // participant's flush has not yet produced actions for `next_tick` — this
+        // is expected and should not block.
+        let buffer = world.resource::<LockstepConfig>().host_tick_buffer;
 
-    let tracker = world.resource::<ActionTracker<A>>();
-    let has_missing = required_participant_ids
-        .iter()
-        .any(|uuid| !tracker_has_actions_for_player(tracker, next_tick, *uuid));
+        let required_participants: Vec<(u128, u64)> = world
+            .query::<(&LobbyParticipant, &LockstepLobbyParticipant, &LobbyParticipantOf)>()
+            .iter(world)
+            .filter(|(_, lockstep, pof)| {
+                pof.0 == scoped_lobby && participant_is_required_for_tick(lockstep, next_tick)
+            })
+            .map(|(p, lockstep, _)| (p.player_uuid, lockstep.joined_at_tick))
+            .collect();
 
-    if required_participant_ids.is_empty() || has_missing {
+        if required_participants.is_empty() {
+            true
+        } else {
+            let tracker = world.resource::<ActionTracker<A>>();
+            required_participants.iter().any(|(uuid, joined_at_tick)| {
+                // Still in the initial buffer window — actions not expected yet.
+                if next_tick <= joined_at_tick + buffer {
+                    return false;
+                }
+                !tracker_has_actions_for_player(tracker, next_tick, *uuid)
+            })
+        }
+    } else {
+        // Client: authoritative ticks from the host are already complete — if the
+        // tracker has any data for `next_tick`, all required players are covered.
+        // Checking per-player would deadlock when `ParticipantJoined` arrives
+        // before the authoritative ticks that include the new participant.
+        let has_any_participant = world
+            .query::<(&LockstepLobbyParticipant, &LobbyParticipantOf)>()
+            .iter(world)
+            .any(|(_, pof)| pof.0 == scoped_lobby);
+
+        let tracker = world.resource::<ActionTracker<A>>();
+        !has_any_participant || !tracker.ticks.contains_key(&next_tick)
+    };
+
+    if should_pause {
         world.insert_resource(TicksPaused);
     } else {
         world.remove_resource::<TicksPaused>();
