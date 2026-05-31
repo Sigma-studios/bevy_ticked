@@ -54,21 +54,6 @@ pub fn broadcast_participants_to_loaded_clients(
         return;
     };
 
-    let mut participants = HashMap::<u128, LockstepLobbyParticipant>::new();
-    for (participant, lockstep_participant, participant_of) in all_participants.iter() {
-        if participant_of.0 != *host_lobby {
-            continue;
-        }
-        participants
-            .entry(participant.player_uuid)
-            .and_modify(|existing| {
-                existing.joined_at_tick = existing
-                    .joined_at_tick
-                    .min(lockstep_participant.joined_at_tick);
-            })
-            .or_insert(*lockstep_participant);
-    }
-
     for loaded_client in client_loaded_messages
         .read()
         .filter_map(|message| message.sender)
@@ -80,10 +65,13 @@ pub fn broadcast_participants_to_loaded_clients(
             continue;
         };
 
-        for (player_uuid, participant) in participants.iter() {
+        for (participant, lockstep_participant, participant_of) in all_participants.iter() {
+            if participant_of.0 != *host_lobby {
+                continue;
+            }
             let message = ParticipantJoined {
-                player_uuid: *player_uuid,
-                joined_at_tick: participant.joined_at_tick,
+                player_uuid: participant.player_uuid,
+                joined_at_tick: lockstep_participant.joined_at_tick,
             };
             commands
                 .entity(client_entity)
@@ -138,7 +126,7 @@ pub fn broadcast_new_participants_to_existing_clients(
     mut commands: Commands,
     host_lobby: Option<Single<Entity, (With<Lobby>, With<Host>)>>,
     added_participants: Query<
-        (&LobbyParticipant, &LockstepLobbyParticipant),
+        (&LobbyParticipant, &LockstepLobbyParticipant, &LobbyParticipantOf),
         Added<LockstepLobbyParticipant>,
     >,
 ) {
@@ -146,7 +134,10 @@ pub fn broadcast_new_participants_to_existing_clients(
         return;
     };
 
-    for (participant, lockstep_participant) in added_participants.iter() {
+    for (participant, lockstep_participant, participant_of) in added_participants.iter() {
+        if participant_of.0 != *host_lobby {
+            continue;
+        }
         let message = ParticipantJoined {
             player_uuid: participant.player_uuid,
             joined_at_tick: lockstep_participant.joined_at_tick,
@@ -212,8 +203,6 @@ pub fn apply_pending_lockstep_participants(
         return;
     };
 
-    let mut applied = Vec::new();
-
     for (participant_entity, participant, lockstep_participant, participant_of) in
         participants.iter()
     {
@@ -221,18 +210,13 @@ pub fn apply_pending_lockstep_participants(
             continue;
         }
 
-        let Some(joined_at_tick) = pending_joins.0.get(&participant.player_uuid).copied() else {
+        let Some(joined_at_tick) = pending_joins.0.remove(&participant.player_uuid) else {
             continue;
         };
 
         commands
             .entity(participant_entity)
             .insert(LockstepLobbyParticipant { joined_at_tick });
-        applied.push(participant.player_uuid);
-    }
-
-    for player_uuid in applied {
-        pending_joins.0.remove(&player_uuid);
     }
 }
 
