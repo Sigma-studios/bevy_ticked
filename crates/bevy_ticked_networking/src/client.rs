@@ -30,7 +30,7 @@ struct PendingSnapshot {
 /// This buffer ensures that client inputs arrive at the server before the
 /// server reaches the tick they're intended for. Should be roughly RTT/2
 /// in ticks. At 64hz: 6 ticks ≈ 94ms.
-const CLIENT_TICK_BUFFER: u64 = 6;
+const CLIENT_TICK_BUFFER: u64 = 10s;
 
 /// Plugin for the client side of multiplayer tick networking.
 ///
