@@ -9,15 +9,15 @@ transport-webrtc = ["bevy_ensemble_webrtc"]
 transport-steam = ["bevy_ensemble_steam"]
 
 [dependencies]
-bevy = "0.18"
+bevy = "0.19"
 bevy_ticked = { path = "../.." }
-bevy_ensemble = { git = "https://github.com/Sigma-studios/bevy_ensemble.git" }
-bevy_ensemble_webrtc = { git = "https://github.com/Sigma-studios/bevy_ensemble.git", optional = true }
-bevy_ensemble_steam = { git = "https://github.com/Sigma-studios/bevy_ensemble.git", optional = true }
+bevy_ensemble = { path = "../../../bevy_ensemble" }
+bevy_ensemble_webrtc = { path = "../../../bevy_ensemble/crates/bevy_ensemble_webrtc", optional = true }
+bevy_ensemble_steam = { path = "../../../bevy_ensemble/crates/bevy_ensemble_steam", optional = true }
 serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
-avian2d = { version = "0.6", features = ["serialize"] }
+avian2d = { version = "0.7", features = ["serialize"] }
 
 [[example]]
 name = "block_placer"

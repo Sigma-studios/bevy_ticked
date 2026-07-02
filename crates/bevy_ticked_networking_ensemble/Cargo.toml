@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-bevy = "0.18"
+bevy = "0.19"
 bevy_ticked = { path = "../.." }
 bevy_ticked_networking = { path = "../bevy_ticked_networking" }
 bevy_ensemble = { path = "../../../bevy_ensemble" }
@@ -12,9 +12,15 @@ postcard = { version = "1", features = ["alloc"] }
 serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
-avian2d = { version = "0.6", features = ["serialize"] }
+avian2d = { version = "0.7", features = ["serialize"] }
+avian3d = { version = "0.7", features = ["serialize"] }
 bevy_ensemble_webrtc = { path = "../../../bevy_ensemble/crates/bevy_ensemble_webrtc" }
+bevy_elan = { git = "https://github.com/Sigma-dev/bevy_elan", rev = "44d312910e4320931b9872a12065fbb60ad33cf6" }
 
 [[example]]
 name = "top_down_shooter"
 path = "examples/top_down_shooter.rs"
+
+[[example]]
+name = "fps_shooter"
+path = "examples/fps_shooter.rs"
