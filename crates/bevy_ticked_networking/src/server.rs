@@ -103,6 +103,8 @@ fn broadcast_snapshot(
 struct BroadcastSnapshotCommand(u64);
 
 impl Command for BroadcastSnapshotCommand {
+    type Out = ();
+
     fn apply(self, world: &mut World) {
         let snapshot = build_snapshot(world, self.0);
         world.commands().trigger(SendNetworkSnapshot(snapshot));
