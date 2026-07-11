@@ -13,7 +13,7 @@ use rollback::rollback_and_resimulate;
 use tick::{
     CurrentTick, HistoryBufferTicks, ResetToTick, StepBackward, StepForward, TicksPaused,
 };
-use tracked_entity::TickTrackedEntityCounter;
+use tracked_entity::{TickTrackedEntity, TickTrackedEntityCounter};
 
 /// The schedule where all tick-driven simulation systems run.
 ///
@@ -99,6 +99,14 @@ fn ensure_initial_capture(world: &mut World, mut done: Local<bool>) {
     }
     let registry = world.resource::<TickedComponentRegistry>().clone();
     if registry.is_empty() {
+        return;
+    }
+    // Wait until at least one tracked entity exists before snapshotting tick 0.
+    // Capturing an empty world (e.g. before entities finish spawning from an
+    // async asset load) would make `ResetToTick(0)` strip components off every
+    // entity later. An empty tick-0 snapshot is useless anyway.
+    let mut tracked = world.query::<&TickTrackedEntity>();
+    if tracked.iter(world).next().is_none() {
         return;
     }
     let current_tick = world.resource::<CurrentTick>().0;
