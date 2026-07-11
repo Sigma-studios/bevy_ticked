@@ -73,7 +73,7 @@ fn main() {
             display_name: "Player".into(),
             ..default()
         })
-        .add_plugins(TickedPlugin)
+        .add_plugins(TickedPlugin::default())
         .add_plugins(PhysicsPlugins::new(TickedSimulation).with_length_unit(1.0))
         .insert_resource(Gravity(Vec2::ZERO))
         .add_plugins(TickedServerPlugin::<PlayerInput>::new())
