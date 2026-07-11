@@ -6,7 +6,7 @@ fn main() -> AppExit {
     App::new()
         .add_plugins((
             DefaultPlugins,
-            TickedPlugin,
+            TickedPlugin::default(),
             PhysicsPlugins::new(TickedSimulation),
         ))
         .register_ticked_component::<Transform>()

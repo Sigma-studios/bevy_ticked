@@ -30,6 +30,29 @@ impl<T: TickedComponent> WorldActions<T> {
         self.history.get(&tick)
     }
 
+    /// The oldest tick still retained in history, if any.
+    pub fn oldest_recorded_tick(&self) -> Option<u64> {
+        self.history.keys().next().copied()
+    }
+
+    /// The newest tick recorded in history, if any.
+    pub fn newest_recorded_tick(&self) -> Option<u64> {
+        self.history.keys().next_back().copied()
+    }
+
+    /// The inclusive `(oldest, newest)` range of recorded ticks, if any exist.
+    ///
+    /// Useful for sizing a scrub bar precisely instead of guessing from
+    /// `CurrentTick - HISTORY_BUFFER_TICKS`.
+    pub fn recorded_range(&self) -> Option<(u64, u64)> {
+        Some((self.oldest_recorded_tick()?, self.newest_recorded_tick()?))
+    }
+
+    /// Iterate over all recorded ticks in ascending order.
+    pub fn recorded_ticks(&self) -> impl DoubleEndedIterator<Item = u64> + '_ {
+        self.history.keys().copied()
+    }
+
     /// Insert state for a specific entity at a specific tick.
     pub fn insert(&mut self, tick: u64, entity_network_id: u64, component: T) {
         self.history

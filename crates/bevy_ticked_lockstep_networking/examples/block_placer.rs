@@ -116,7 +116,7 @@ fn main() {
     #[cfg(feature = "transport-steam")]
     app.add_plugins(BevyEnsembleSteamPlugin::default());
 
-    app.add_plugins(TickedPlugin)
+    app.add_plugins(TickedPlugin::default())
         .add_plugins(PhysicsPlugins::new(TickedSimulation).with_length_unit(1.0))
         .insert_resource(Gravity(Vec2::ZERO))
         .add_plugins(LockstepPlugin::<Action, GameSnapshot>::default())
