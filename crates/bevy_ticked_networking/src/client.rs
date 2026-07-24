@@ -218,7 +218,12 @@ fn handle_server_snapshot<T: TickedInput>(world: &mut World) {
     world.resource_mut::<CurrentTick>().0 = end_tick;
 }
 
-/// PostTick: send the local player's input for the current tick to the server.
+/// Number of recent ticks of input included in each packet. Input for tick T
+/// also rides in the packets sent at T+1 and T+2, so up to two consecutive
+/// packet losses cost nothing.
+const INPUT_REDUNDANCY: u64 = 3;
+
+/// PostTick: send the local player's recent inputs to the server.
 fn send_local_input<T: TickedInput>(
     tick: Res<CurrentTick>,
     ticks_paused: Option<Res<TicksPaused>>,
@@ -232,11 +237,11 @@ fn send_local_input<T: TickedInput>(
     let Some(local_player) = local_player else {
         return;
     };
-    let Some(input) = queue.get(tick.0, local_player.0).cloned() else {
+    let inputs: Vec<(u64, T)> = (tick.0.saturating_sub(INPUT_REDUNDANCY - 1)..=tick.0)
+        .filter_map(|t| queue.get(t, local_player.0).map(|input| (t, input.clone())))
+        .collect();
+    if inputs.is_empty() {
         return;
-    };
-    commands.trigger(SendNetworkInput {
-        tick: tick.0,
-        input,
-    });
+    }
+    commands.trigger(SendNetworkInput { inputs });
 }

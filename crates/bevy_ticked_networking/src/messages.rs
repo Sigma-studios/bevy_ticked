@@ -27,13 +27,17 @@ pub struct ReceivedNetworkInput<T: TickedInput> {
 #[derive(Event, Clone, Debug)]
 pub struct SendNetworkSnapshot(pub WorldSnapshot);
 
-/// Outgoing event: request to send the local player's input to the server.
+/// Outgoing event: request to send the local player's recent inputs to the server.
 ///
 /// The multiplayer client triggers this each tick. Transport layers observe it.
+///
+/// Carries the last few ticks of input (ascending tick order) so that a dropped
+/// packet self-heals: input for tick T also rides in the packets sent at T+1 and
+/// T+2. This makes unreliable delivery safe without retransmits.
 #[derive(Event, Clone, Debug)]
 pub struct SendNetworkInput<T: TickedInput> {
-    pub tick: u64,
-    pub input: T,
+    /// `(tick, input)` pairs in ascending tick order, newest last.
+    pub inputs: Vec<(u64, T)>,
 }
 
 /// Serializable wrapper for snapshots sent over the network.
@@ -43,8 +47,11 @@ pub struct NetworkSnapshotPayload {
 }
 
 /// Serializable wrapper for inputs sent over the network.
+///
+/// Contains redundant recent history (see [`SendNetworkInput`]); receivers apply
+/// entries in ascending tick order so the newest entry wins for margin tracking.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NetworkInputPayload<T> {
-    pub tick: u64,
-    pub input: T,
+    /// `(tick, input)` pairs in ascending tick order, newest last.
+    pub inputs: Vec<(u64, T)>,
 }
