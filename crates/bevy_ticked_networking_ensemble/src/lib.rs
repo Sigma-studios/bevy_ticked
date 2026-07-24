@@ -3,7 +3,6 @@ use std::marker::PhantomData;
 use bevy::prelude::*;
 use bevy_ensemble::prelude::*;
 use bevy_ticked_networking::{
-    client::{ClientTickBuffer, LocalClientPlayer},
     input::TickedInput,
     messages::{
         NetworkInputPayload, NetworkSnapshotPayload, ReceivedNetworkInput, ReceivedNetworkSnapshot,
@@ -60,27 +59,8 @@ impl<T: TickedInput + Serialize + for<'de> Deserialize<'de>> Plugin
                 PreUpdate,
                 (forward_received_snapshots, forward_received_inputs::<T>),
             )
-            .add_systems(Update, adapt_tick_buffer)
             .add_observer(forward_outgoing_snapshots)
             .add_observer(forward_outgoing_inputs::<T>);
-    }
-}
-
-/// Size the client's prediction lead from the measured round-trip time, so a
-/// high-ping peer leads enough to avoid rubber-banding while a low-ping peer keeps
-/// a small lead (and thus minimal remote misprediction). Transport-specific glue:
-/// reads ensemble's `PeerRtt` and feeds `bevy_ticked_networking`'s `ClientTickBuffer`.
-fn adapt_tick_buffer(
-    lobby_rtt: Query<&PeerRtt, With<Lobby>>,
-    local_client: Option<Res<LocalClientPlayer>>,
-    buffer: Option<ResMut<ClientTickBuffer>>,
-) {
-    // Only an actual client sizes its own lead; the host doesn't roll back.
-    let (Some(_), Some(mut buffer)) = (local_client, buffer) else {
-        return;
-    };
-    if let Ok(rtt) = lobby_rtt.single() {
-        buffer.set_from_rtt(rtt.0);
     }
 }
 

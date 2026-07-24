@@ -28,46 +28,54 @@ struct PendingSnapshot {
 /// How many ticks ahead of the server the client runs (its prediction lead).
 ///
 /// The client must lead the server by enough that its inputs arrive before the
-/// server reaches the tick they're for. Since the latest snapshot is already
-/// one-way-latency stale *and* the client must sit one-way ahead of the server,
-/// the required lead is ~one full round-trip (plus a jitter margin) — so this
-/// should scale with the peer's RTT rather than be a fixed constant.
-///
-/// The client uses this both for the initial jump-ahead and as the steady-state
-/// target it re-converges toward (one tick per snapshot), so it can be updated
-/// live (e.g. from measured RTT) without causing visible tick jumps. Update it
-/// via [`ClientTickBuffer::set_from_rtt`], or set `target_ticks` directly.
+/// server reaches the tick they're for. This sizes itself from the *actual* input
+/// timeliness, self-contained in this crate: the server measures how many ticks
+/// early/late each client's inputs arrive and reports it in every snapshot (see
+/// [`WorldSnapshot::input_margins`](crate::snapshot::WorldSnapshot)); the client
+/// then solves directly for the lead that keeps a small positive margin, and
+/// re-converges toward it one tick per snapshot (no transport RTT needed, no
+/// visible tick jumps). `target_ticks` is exposed for read-only display.
 #[derive(Resource, Clone, Copy, Debug)]
 pub struct ClientTickBuffer {
     /// Target lead, in ticks, of the client over the server.
     pub target_ticks: u64,
+    /// EWMA accumulator for the target, so per-snapshot margin jitter doesn't
+    /// make the lead wander.
+    smoothed: f64,
 }
 
 impl Default for ClientTickBuffer {
     fn default() -> Self {
-        // Safe fallback until a measured RTT is available (~covers up to ~60ms RTT).
-        Self { target_ticks: 6 }
+        // Starting lead until the first margin measurement arrives.
+        Self {
+            target_ticks: 6,
+            smoothed: 6.0,
+        }
     }
 }
 
 impl ClientTickBuffer {
-    /// Extra ticks of lead beyond the raw RTT, to absorb network jitter and
-    /// once-per-frame delivery/scheduling.
-    pub const JITTER_MARGIN_TICKS: u64 = 2;
-    /// Never lead by less than this (avoids thrashing on tiny/zero RTT samples).
-    pub const MIN_TICKS: u64 = 2;
-    /// Cap the lead so a pathological RTT can't make prediction explode.
-    pub const MAX_TICKS: u64 = 32;
+    /// Desired input-arrival margin: inputs should reach the server this many
+    /// ticks early, to absorb jitter and once-per-frame delivery.
+    const TARGET_MARGIN: i64 = 2;
+    /// Never lead by less than this.
+    const MIN_TICKS: u64 = 2;
+    /// Cap the lead so a pathological connection can't make prediction explode.
+    const MAX_TICKS: u64 = 64;
+    /// EWMA weight for new observations.
+    const SMOOTHING: f64 = 0.1;
 
-    /// Size the target lead from a measured round-trip time (seconds).
+    /// Update the target lead from an observed replay distance
+    /// (`current_tick - snapshot_tick`) and the server-measured input margin.
     ///
-    /// The lead needs to be about one RTT (see the type docs) plus a margin.
-    pub fn set_from_rtt(&mut self, rtt_seconds: f64) {
-        let rtt_ticks = (rtt_seconds.max(0.0)
-            / bevy_ticked::tick::SECONDS_PER_TICK as f64)
-            .ceil() as u64;
-        self.target_ticks =
-            (rtt_ticks + Self::JITTER_MARGIN_TICKS).clamp(Self::MIN_TICKS, Self::MAX_TICKS);
+    /// With `replay_distance = lead + one_way` and `margin = lead - one_way`, the
+    /// lead that yields `TARGET_MARGIN` is `replay_distance - margin + TARGET_MARGIN`.
+    /// This is a stable fixed point, EWMA-smoothed against jitter.
+    fn observe(&mut self, replay_distance: u64, margin: i64) {
+        let raw = (replay_distance as i64 - margin + Self::TARGET_MARGIN)
+            .clamp(Self::MIN_TICKS as i64, Self::MAX_TICKS as i64) as f64;
+        self.smoothed = (1.0 - Self::SMOOTHING) * self.smoothed + Self::SMOOTHING * raw;
+        self.target_ticks = (self.smoothed.round() as u64).clamp(Self::MIN_TICKS, Self::MAX_TICKS);
     }
 }
 
@@ -180,14 +188,23 @@ fn handle_server_snapshot<T: TickedInput>(world: &mut World) {
     // Snapshot is behind us — rollback and replay predicted ticks.
     registry.truncate_all_after(world, snapshot_tick);
 
-    // Adaptive lead maintenance: nudge the replay end (and thus the lead) one tick
-    // toward `target_ticks` so the client re-converges as RTT changes, without a
-    // visible jump. A deadband of [target, target+1] avoids thrashing on ±1 snapshot
-    // jitter while never dropping below the target (which would risk late inputs).
     let lead = current_tick - snapshot_tick;
-    let end_tick = if lead > tick_buffer + 1 {
+
+    // Self-adaptive lead: update the target from the server-reported input margin
+    // for this client (how early/late its inputs are arriving), self-contained in
+    // this crate.
+    if let Some(uuid) = world.get_resource::<LocalClientPlayer>().map(|p| p.0) {
+        if let Some(&margin) = pending.snapshot.input_margins.get(&uuid) {
+            world.resource_mut::<ClientTickBuffer>().observe(lead, margin);
+        }
+    }
+    let target = world.resource::<ClientTickBuffer>().target_ticks;
+
+    // Re-converge one tick toward the target lead (deadband [target, target+1];
+    // never below target, which would risk late inputs) — no visible jump.
+    let end_tick = if lead > target + 1 {
         current_tick - 1 // too far ahead: drop one predicted tick
-    } else if lead < tick_buffer {
+    } else if lead < target {
         current_tick + 1 // not far enough ahead: predict one extra tick
     } else {
         current_tick
