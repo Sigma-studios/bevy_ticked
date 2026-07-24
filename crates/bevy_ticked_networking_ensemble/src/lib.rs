@@ -88,11 +88,17 @@ fn forward_received_inputs<T: TickedInput + Serialize + for<'de> Deserialize<'de
             warn!("Received network input with no sender, skipping");
             continue;
         };
-        commands.trigger(ReceivedNetworkInput {
-            sender,
-            tick: msg.message.payload.tick,
-            input: msg.message.payload.input.clone(),
-        });
+        // Apply in ascending tick order so the newest entry is the last to
+        // update the server's InputMargins.
+        let mut entries = msg.message.payload.inputs.clone();
+        entries.sort_by_key(|(tick, _)| *tick);
+        for (tick, input) in entries {
+            commands.trigger(ReceivedNetworkInput {
+                sender,
+                tick,
+                input,
+            });
+        }
     }
 }
 
@@ -128,18 +134,19 @@ fn forward_outgoing_inputs<T: TickedInput + Serialize + for<'de> Deserialize<'de
 ) {
     let Some(lobby) = lobby else { return };
     let lobby_entity = *lobby;
-    let event = trigger.event();
     let message = EnsembleInputMessage {
         payload: NetworkInputPayload {
-            tick: event.tick,
-            input: event.input.clone(),
+            inputs: trigger.event().inputs.clone(),
         },
     };
+    // Unreliable: a lost packet is cheaper than head-of-line blocking the
+    // inputs behind it, and the redundant history in each payload means a
+    // drop only matters if INPUT_REDUNDANCY consecutive packets are lost.
     commands
         .entity(lobby_entity)
         .trigger(move |entity| LobbyMessage {
             entity,
             message,
-            send_mode: SendMode::Reliable,
+            send_mode: SendMode::Unreliable,
         });
 }
