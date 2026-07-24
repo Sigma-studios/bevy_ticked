@@ -1,5 +1,5 @@
 pub use crate::{
-    client::{LocalClientPlayer, TickedClientPlugin},
+    client::{ClientTickBuffer, LocalClientPlayer, TickedClientPlugin},
     input::{InputQueue, TickedInput},
     messages::{
         NetworkInputPayload, NetworkSnapshotPayload, ReceivedNetworkInput,
