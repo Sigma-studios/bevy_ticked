@@ -1,4 +1,5 @@
- use std::marker::PhantomData;
+ use std::collections::HashMap;
+use std::marker::PhantomData;
 
 use bevy::prelude::*;
 
@@ -18,6 +19,14 @@ use crate::{
 /// Resource identifying the local player on the server (for listen-server setups).
 #[derive(Resource)]
 pub struct LocalServerPlayer(pub u128);
+
+/// Latest input-arrival margin (in ticks) per client, measured by the server:
+/// `input.tick - server_tick` at arrival. Sent to clients in each snapshot so they
+/// can size their prediction lead from the real thing (see [`WorldSnapshot`]).
+///
+/// [`WorldSnapshot`]: crate::snapshot::WorldSnapshot
+#[derive(Resource, Default)]
+pub struct InputMargins(pub HashMap<u128, i64>);
 
 /// Plugin for the server side of multiplayer tick networking.
 ///
@@ -48,6 +57,7 @@ impl<T: TickedInput> Default for TickedServerPlugin<T> {
 impl<T: TickedInput> Plugin for TickedServerPlugin<T> {
     fn build(&self, app: &mut App) {
         app.init_resource::<InputQueue<T>>()
+            .init_resource::<InputMargins>()
             .add_observer(collect_network_inputs::<T>)
             .add_systems(
                 Update,
@@ -75,14 +85,13 @@ fn collect_network_inputs<T: TickedInput>(
     trigger: On<ReceivedNetworkInput<T>>,
     tick: Res<CurrentTick>,
     mut queue: ResMut<InputQueue<T>>,
+    mut margins: ResMut<InputMargins>,
 ) {
     let event = trigger.event();
-    if event.tick < tick.0 {
-        warn!(
-            "Input from player {} arrived in the past (input tick: {}, server tick: {}, delta: {})",
-            event.sender, event.tick, tick.0, tick.0 - event.tick
-        );
-    }
+    // How many ticks ahead of the server this input arrived (negative = late).
+    // Reported back to the client so it can adapt its prediction lead.
+    let margin = event.tick as i64 - tick.0 as i64;
+    margins.0.insert(event.sender, margin);
     queue.insert(event.tick, event.sender, event.input.clone());
 }
 
@@ -106,7 +115,10 @@ impl Command for BroadcastSnapshotCommand {
     type Out = ();
 
     fn apply(self, world: &mut World) {
-        let snapshot = build_snapshot(world, self.0);
+        let mut snapshot = build_snapshot(world, self.0);
+        if let Some(margins) = world.get_resource::<InputMargins>() {
+            snapshot.input_margins = margins.0.clone();
+        }
         world.commands().trigger(SendNetworkSnapshot(snapshot));
     }
 }

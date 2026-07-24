@@ -19,13 +19,25 @@ pub struct WorldSnapshot {
     pub tick: u64,
     /// component_type_index -> (tracked_entity_id -> serialized_component_bytes)
     pub components: HashMap<u16, HashMap<u64, Vec<u8>>>,
+    /// Per-client input-arrival margin in ticks, measured by the server: how many
+    /// ticks *ahead* of the server that client's most recent input arrived
+    /// (negative = arrived late). Clients read their own entry to size their
+    /// prediction lead. Populated by the server; empty in `build_snapshot`.
+    #[serde(default)]
+    pub input_margins: HashMap<u128, i64>,
 }
 
 /// Build a snapshot of the current world state at the given tick.
+///
+/// `input_margins` is left empty here; the server fills it in before broadcasting.
 pub fn build_snapshot(world: &mut World, tick: u64) -> WorldSnapshot {
     let registry = world.resource::<TickedComponentRegistry>().clone();
     let components = registry.serialize_all(world, tick);
-    WorldSnapshot { tick, components }
+    WorldSnapshot {
+        tick,
+        components,
+        input_margins: HashMap::new(),
+    }
 }
 
 /// Apply a network snapshot: sync entity lifecycle, apply component state, update tick.
