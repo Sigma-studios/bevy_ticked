@@ -25,11 +25,51 @@ struct PendingSnapshot {
     snapshot: crate::snapshot::WorldSnapshot,
 }
 
-/// How many ticks ahead of the server the client should run.
+/// How many ticks ahead of the server the client runs (its prediction lead).
 ///
-/// This buffer ensures that client inputs arrive at the server before the
-/// server reaches the tick they're intended for.
-const CLIENT_TICK_BUFFER: u64 = 10;
+/// The client must lead the server by enough that its inputs arrive before the
+/// server reaches the tick they're for. Since the latest snapshot is already
+/// one-way-latency stale *and* the client must sit one-way ahead of the server,
+/// the required lead is ~one full round-trip (plus a jitter margin) — so this
+/// should scale with the peer's RTT rather than be a fixed constant.
+///
+/// The client uses this both for the initial jump-ahead and as the steady-state
+/// target it re-converges toward (one tick per snapshot), so it can be updated
+/// live (e.g. from measured RTT) without causing visible tick jumps. Update it
+/// via [`ClientTickBuffer::set_from_rtt`], or set `target_ticks` directly.
+#[derive(Resource, Clone, Copy, Debug)]
+pub struct ClientTickBuffer {
+    /// Target lead, in ticks, of the client over the server.
+    pub target_ticks: u64,
+}
+
+impl Default for ClientTickBuffer {
+    fn default() -> Self {
+        // Safe fallback until a measured RTT is available (~covers up to ~60ms RTT).
+        Self { target_ticks: 6 }
+    }
+}
+
+impl ClientTickBuffer {
+    /// Extra ticks of lead beyond the raw RTT, to absorb network jitter and
+    /// once-per-frame delivery/scheduling.
+    pub const JITTER_MARGIN_TICKS: u64 = 2;
+    /// Never lead by less than this (avoids thrashing on tiny/zero RTT samples).
+    pub const MIN_TICKS: u64 = 2;
+    /// Cap the lead so a pathological RTT can't make prediction explode.
+    pub const MAX_TICKS: u64 = 32;
+
+    /// Size the target lead from a measured round-trip time (seconds).
+    ///
+    /// The lead needs to be about one RTT (see the type docs) plus a margin.
+    pub fn set_from_rtt(&mut self, rtt_seconds: f64) {
+        let rtt_ticks = (rtt_seconds.max(0.0)
+            / bevy_ticked::tick::SECONDS_PER_TICK as f64)
+            .ceil() as u64;
+        self.target_ticks =
+            (rtt_ticks + Self::JITTER_MARGIN_TICKS).clamp(Self::MIN_TICKS, Self::MAX_TICKS);
+    }
+}
 
 /// Plugin for the client side of multiplayer tick networking.
 ///
@@ -62,6 +102,7 @@ impl<T: TickedInput> Default for TickedClientPlugin<T> {
 impl<T: TickedInput> Plugin for TickedClientPlugin<T> {
     fn build(&self, app: &mut App) {
         app.init_resource::<InputQueue<T>>()
+            .init_resource::<ClientTickBuffer>()
             .add_observer(receive_snapshot)
             .add_systems(
                 Update,
@@ -104,7 +145,7 @@ fn handle_server_snapshot<T: TickedInput>(world: &mut World) {
     let was_paused = world.get_resource::<TicksPaused>().is_some();
     let current_tick = world.resource::<CurrentTick>().0;
     let snapshot_tick = pending.snapshot.tick;
-    let tick_buffer = CLIENT_TICK_BUFFER;
+    let tick_buffer = world.resource::<ClientTickBuffer>().target_ticks;
 
     let registry = world.resource::<TickedComponentRegistry>().clone();
 
@@ -136,14 +177,28 @@ fn handle_server_snapshot<T: TickedInput>(world: &mut World) {
         return;
     }
 
-    // Snapshot is behind us — rollback and replay predicted ticks
+    // Snapshot is behind us — rollback and replay predicted ticks.
     registry.truncate_all_after(world, snapshot_tick);
 
-    for tick in (snapshot_tick + 1)..=current_tick {
+    // Adaptive lead maintenance: nudge the replay end (and thus the lead) one tick
+    // toward `target_ticks` so the client re-converges as RTT changes, without a
+    // visible jump. A deadband of [target, target+1] avoids thrashing on ±1 snapshot
+    // jitter while never dropping below the target (which would risk late inputs).
+    let lead = current_tick - snapshot_tick;
+    let end_tick = if lead > tick_buffer + 1 {
+        current_tick - 1 // too far ahead: drop one predicted tick
+    } else if lead < tick_buffer {
+        current_tick + 1 // not far enough ahead: predict one extra tick
+    } else {
+        current_tick
+    };
+
+    for tick in (snapshot_tick + 1)..=end_tick {
         world.resource_mut::<CurrentTick>().0 = tick;
         world.run_schedule(TickedSimulation);
         registry.capture_all(world, tick);
     }
+    world.resource_mut::<CurrentTick>().0 = end_tick;
 }
 
 /// PostTick: send the local player's input for the current tick to the server.
