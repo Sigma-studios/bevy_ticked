@@ -1,3 +1,4 @@
+pub mod interpolation;
 pub mod prelude;
 pub mod registry;
 pub mod rollback;
