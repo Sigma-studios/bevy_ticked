@@ -11,9 +11,9 @@ transport-steam = ["bevy_ensemble_steam"]
 [dependencies]
 bevy = "0.19"
 bevy_ticked = { path = "../.." }
-bevy_ensemble = { path = "../../../bevy_ensemble" }
-bevy_ensemble_webrtc = { path = "../../../bevy_ensemble/crates/bevy_ensemble_webrtc", optional = true }
-bevy_ensemble_steam = { path = "../../../bevy_ensemble/crates/bevy_ensemble_steam", optional = true }
+bevy_ensemble = { git = "https://github.com/Sigma-studios/bevy_ensemble", branch = "feature/netdebug-extras" }
+bevy_ensemble_webrtc = { git = "https://github.com/Sigma-studios/bevy_ensemble", branch = "feature/netdebug-extras", optional = true }
+bevy_ensemble_steam = { git = "https://github.com/Sigma-studios/bevy_ensemble", branch = "feature/netdebug-extras", optional = true }
 serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
