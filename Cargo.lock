@@ -601,7 +601,7 @@ dependencies = [
 [[package]]
 name = "bevy-steamworks"
 version = "0.17.0"
-source = "git+https://github.com/Sigma-studios/bevy_steamworks?branch=chore%2Fupgraded#399cb9bbdc43f29f02a71a2a8db047db8b78f2a2"
+source = "git+https://github.com/HouraiTeahouse/bevy_steamworks?branch=main#649838f9fec757703a817b08d6fdfd66ad88cb3c"
 dependencies = [
  "bevy_app",
  "bevy_ecs",
@@ -993,10 +993,11 @@ dependencies = [
 [[package]]
 name = "bevy_elan"
 version = "0.1.0"
-source = "git+https://github.com/Sigma-dev/bevy_elan?rev=44d312910e4320931b9872a12065fbb60ad33cf6#44d312910e4320931b9872a12065fbb60ad33cf6"
+source = "git+https://github.com/Sigma-dev/bevy_elan?branch=master#fb453b3275ae914b4e6a81e813ff1c011bffbcab"
 dependencies = [
  "avian3d",
  "bevy",
+ "serde",
 ]
 
 [[package]]
@@ -1012,6 +1013,7 @@ dependencies = [
 [[package]]
 name = "bevy_ensemble"
 version = "0.1.0"
+source = "git+https://github.com/Sigma-studios/bevy_ensemble?branch=feature%2Fnetdebug-extras#762c983e9a1863e71beacabcf9a8b3335c9b2dda"
 dependencies = [
  "bevy",
  "postcard",
@@ -1021,6 +1023,7 @@ dependencies = [
 [[package]]
 name = "bevy_ensemble_sockets"
 version = "0.1.0"
+source = "git+https://github.com/Sigma-studios/bevy_ensemble?branch=feature%2Fnetdebug-extras#762c983e9a1863e71beacabcf9a8b3335c9b2dda"
 dependencies = [
  "bytes",
  "js-sys",
@@ -1037,17 +1040,19 @@ dependencies = [
 [[package]]
 name = "bevy_ensemble_steam"
 version = "0.1.0"
+source = "git+https://github.com/Sigma-studios/bevy_ensemble?branch=feature%2Fnetdebug-extras#762c983e9a1863e71beacabcf9a8b3335c9b2dda"
 dependencies = [
  "bevy",
  "bevy-steamworks",
  "bevy_ensemble",
  "serde",
- "steamworks-sys",
+ "steamworks-sys 0.13.0 (git+https://github.com/Noxime/steamworks-rs?rev=ee85258d2b9965f5d29082e7c104b183d8fda7c9)",
 ]
 
 [[package]]
 name = "bevy_ensemble_webrtc"
 version = "0.1.0"
+source = "git+https://github.com/Sigma-studios/bevy_ensemble?branch=feature%2Fnetdebug-extras#762c983e9a1863e71beacabcf9a8b3335c9b2dda"
 dependencies = [
  "async-tungstenite",
  "bevy",
@@ -6814,7 +6819,7 @@ checksum = "5ff29921f6a7e8c85b0c971ec3c42002b9f535e3b8f4358cb22911d43709739a"
 dependencies = [
  "bitflags 2.11.1",
  "paste",
- "steamworks-sys",
+ "steamworks-sys 0.13.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "thiserror 2.0.18",
 ]
 
@@ -6823,6 +6828,11 @@ name = "steamworks-sys"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ae139f051204a4af015d4f0ed3a1f7a51020d03a44c7cf249168c543d88131e9"
+
+[[package]]
+name = "steamworks-sys"
+version = "0.13.0"
+source = "git+https://github.com/Noxime/steamworks-rs?rev=ee85258d2b9965f5d29082e7c104b183d8fda7c9#ee85258d2b9965f5d29082e7c104b183d8fda7c9"
 
 [[package]]
 name = "strict-num"
