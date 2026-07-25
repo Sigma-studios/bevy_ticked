@@ -103,6 +103,11 @@ struct UiText;
 #[derive(Component)]
 struct MenuCamera;
 
+/// Marks the local player once its first-person camera has been attached, so
+/// `attach_local_camera` doesn't add a second one.
+#[derive(Component)]
+struct CameraAttached;
+
 /// Locally accumulated look, integrated from raw mouse motion each frame and sent
 /// as the absolute `look` in `PlayerInput`.
 #[derive(Resource, Default)]
@@ -127,7 +132,7 @@ fn main() {
             display_name: "Player".into(),
             ..default()
         })
-        .add_plugins(TickedPlugin)
+        .add_plugins(TickedPlugin::default())
         .add_plugins(PhysicsPlugins::new(TickedSimulation))
         .insert_resource(Gravity(Vec3::NEG_Y * 9.81))
         // bevy_elan in driven mode: every controller system runs chained inside
@@ -150,6 +155,10 @@ fn main() {
         .register_networked_ticked_component::<SpawnPoint>()
         .register_networked_ticked_component::<ShootCooldown>()
         .register_networked_ticked_component::<PlayerUuid>()
+        // elan's persistent jump timers: rolling these back keeps the local
+        // player's predicted jump from mispredicting and snapping on correction.
+        .register_networked_ticked_component::<LastGrounded>()
+        .register_networked_ticked_component::<LastJump>()
         // Startup
         .add_systems(Startup, setup)
         // Per-frame (Update)
@@ -164,15 +173,17 @@ fn main() {
                 on_lobby_ready,
                 server_spawn_players,
                 capture_local_input,
+                attach_local_camera,
                 manage_cameras,
                 sync_visuals,
+                sync_camera_pitch,
                 update_ui,
             ),
         )
         // Simulation systems (run inside TickedSimulation).
-        // set_controller_time + apply_inputs feed elan before its ControllerSet;
-        // the controller runs before avian's Prepare so the yaw it writes reaches
-        // the physics Rotation; bullets move after physics writeback.
+        // set_controller_time + apply_inputs (which yaws the body via Rotation)
+        // feed elan before its ControllerSet; the controller runs before avian's
+        // Prepare so forces apply this step; bullets move after physics writeback.
         .add_systems(
             TickedSimulation,
             (set_controller_time, apply_inputs)
@@ -196,14 +207,21 @@ fn setup(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    // Ground: a large flat unlit cube whose top face sits at y = 0.
+    // Ground visual: a large flat unlit cube whose top face sits at y = 0.
     let ground_size = ARENA_HALF * 2.0;
     commands.spawn((
         Mesh3d(meshes.add(Cuboid::new(ground_size, 1.0, ground_size))),
         MeshMaterial3d(materials.add(unlit(Color::srgb(0.12, 0.13, 0.16)))),
         Transform::from_xyz(0.0, -0.5, 0.0),
+    ));
+    // Ground collider: an infinite half-space with its surface at y = 0. A thin
+    // box collider is unreliable here — the floating-capsule controller relies on
+    // a downward raycast hitting the ground to hover, and both the ray and solid
+    // contact can miss a thin box, letting the body fall straight through.
+    commands.spawn((
         RigidBody::Static,
-        Collider::cuboid(ground_size, 1.0, ground_size),
+        Collider::half_space(Vec3::Y),
+        Transform::from_xyz(0.0, 0.0, 0.0),
     ));
 
     // Pillars: tall unlit cubes used as cover.
@@ -243,7 +261,7 @@ fn setup(
         UiText,
     ));
 
-    // Crosshair: a small white square centred on screen.
+    // Crosshair: a small hollow white circle centred on screen.
     commands
         .spawn(Node {
             position_type: PositionType::Absolute,
@@ -256,11 +274,13 @@ fn setup(
         .with_children(|parent| {
             parent.spawn((
                 Node {
-                    width: Val::Px(6.0),
-                    height: Val::Px(6.0),
+                    width: Val::Px(14.0),
+                    height: Val::Px(14.0),
+                    border: UiRect::all(Val::Px(2.0)),
+                    border_radius: BorderRadius::MAX,
                     ..default()
                 },
-                BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.8)),
+                BorderColor::all(Color::srgba(1.0, 1.0, 1.0, 0.85)),
             ));
         });
 }
@@ -470,13 +490,20 @@ fn set_controller_time(tick: Res<CurrentTick>, mut controller_time: ResMut<Contr
 }
 
 /// Apply this tick's inputs to each player: drive elan's `ControllerInput`,
-/// update `Aim`, mirror it into elan's `Look`, and tick down the shoot cooldown.
+/// update `Aim`, yaw the physics body, and tick down the shoot cooldown.
+///
+/// The body's yaw is written to avian's `Rotation` (not the `Transform`): avian
+/// owns the body Transform, so we let it sync `Rotation -> Transform`, and elan's
+/// `handle_movement` then moves relative to `transform.rotation` — i.e. relative
+/// to where the player is looking. Writing the Transform directly would fight
+/// avian's transform sync and clobber the rolled-back `Position`. Pitch is
+/// view-only and handled per-frame on the camera child by `sync_camera_pitch`.
 fn apply_inputs(
     tick: Res<CurrentTick>,
     input_queue: Res<InputQueue<PlayerInput>>,
     mut players: Query<(
         &mut ControllerInput,
-        &mut Look,
+        &mut Rotation,
         &mut Aim,
         &mut ShootCooldown,
         &PlayerUuid,
@@ -487,7 +514,7 @@ fn apply_inputs(
         return;
     };
 
-    for (mut input, mut look, mut aim, mut cooldown, uuid, kind) in players.iter_mut() {
+    for (mut input, mut rotation, mut aim, mut cooldown, uuid, kind) in players.iter_mut() {
         if *kind != EntityKind::Player {
             continue;
         }
@@ -496,9 +523,7 @@ fn apply_inputs(
             input.jump = player_input.jump;
             aim.yaw = player_input.look[0];
             aim.pitch = player_input.look[1];
-            // elan's apply_look turns Look into the body yaw + camera pitch.
-            look.yaw = aim.yaw;
-            look.pitch = aim.pitch;
+            rotation.0 = Quat::from_rotation_y(aim.yaw);
 
             if cooldown.0 > 0 {
                 cooldown.0 -= 1;
@@ -510,6 +535,14 @@ fn apply_inputs(
 fn move_bullets(world: &mut World) {
     let dt = SECONDS_PER_TICK;
     let tick = world.resource::<CurrentTick>().0;
+
+    // Bullets are spawned only on the host and replicated to clients via
+    // snapshots. If every peer spawned its own bullets during the rolled-back
+    // sim, the shared entity-id counter would diverge (the host has every
+    // player's input, a client only its own), so a host bullet's id would
+    // collide with a client's predicted bullet and never replicate. Clients
+    // still ADVANCE existing bullets below for smooth motion between snapshots.
+    let is_host = world.get_resource::<LocalServerPlayer>().is_some();
 
     // Collect this tick's shooting requests.
     let mut shoot_requests: Vec<u128> = Vec::new();
@@ -560,7 +593,7 @@ fn move_bullets(world: &mut World) {
     }
 
     let mut spawns: Vec<(u128, TickTrackedEntity, Vec3, Aim)> = Vec::new();
-    {
+    if is_host {
         let mut counter = world.resource_mut::<TickTrackedEntityCounter>();
         for uuid in &shoot_requests {
             if let Some((_, pos, aim, cooldown)) = players.iter().find(|(u, ..)| u == uuid) {
@@ -604,6 +637,13 @@ fn hits_pillar(p: Vec3) -> bool {
 }
 
 fn bullet_collision(world: &mut World) {
+    // Hits and respawns are authoritative on the host; clients receive the
+    // resulting despawns/respawns via snapshots. This avoids a client
+    // mispredicting a respawn off its snapshot-lagged copy of a bullet.
+    if world.get_resource::<LocalServerPlayer>().is_none() {
+        return;
+    }
+
     let mut bullets: Vec<(Entity, Vec3, u128)> = Vec::new();
     {
         let mut query = world.query::<(Entity, &Position, &PlayerUuid, &EntityKind)>();
@@ -662,22 +702,22 @@ fn on_entity_spawned(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    query: Query<(&EntityKind, &PlayerUuid)>,
-    local_client: Option<Res<LocalClientPlayer>>,
-    local_server: Option<Res<LocalServerPlayer>>,
+    query: Query<&EntityKind>,
 ) {
     let entity = trigger.entity;
-    let Ok((kind, uuid)) = query.get(entity) else {
+    let Ok(kind) = query.get(entity) else {
         return;
     };
 
     match kind {
         EntityKind::Player => {
             commands.entity(entity).insert((
-                // Controller bundle + Look are needed on every peer so clients can
+                // The controller bundle is needed on every peer so clients can
                 // predict the body locally (snapshots only carry networked state).
+                // Rotation is present up front so apply_inputs can yaw the body
+                // from the first tick.
                 character_controller_bundle(),
-                Look::default(),
+                Rotation::default(),
                 Mesh3d(meshes.add(Cuboid::new(0.4, 1.3, 0.4))),
                 MeshMaterial3d(materials.add(unlit(Color::srgb(0.2, 0.7, 0.35)))),
                 Transform::default(),
@@ -689,20 +729,9 @@ fn on_entity_spawned(
                 move_speed: PLAYER_MOVE_SPEED,
                 ..default()
             });
-
-            let my_uuid = local_client
-                .as_ref()
-                .map(|p| p.0)
-                .or_else(|| local_server.as_ref().map(|p| p.0));
-            if my_uuid == Some(uuid.0) {
-                // The local player owns the first-person camera (an eye-height child).
-                commands.entity(entity).with_children(|parent| {
-                    parent.spawn((
-                        FpsCamera::new(0.1),
-                        Transform::from_xyz(0.0, EYE_HEIGHT, 0.0),
-                    ));
-                });
-            }
+            // The first-person camera is attached separately by
+            // `attach_local_camera`, which retries every frame until the local
+            // player resource is known (it may not be set yet when this fires).
         }
         EntityKind::Bullet => {
             commands.entity(entity).insert((
@@ -715,15 +744,54 @@ fn on_entity_spawned(
 }
 
 /// Copy simulated `Position` onto the render `Transform` for bullets. Player
-/// bodies and the camera are oriented by avian (`Rotation`) and elan's
-/// `apply_look` inside the sim, so we deliberately do not touch their transforms
-/// here (writing them would fight avian's transform sync during rollback).
+/// bodies are oriented (yaw) by avian's `Rotation -> Transform` sync inside the
+/// sim, so we deliberately do not touch their transforms here (writing them would
+/// fight avian's transform sync and clobber the rolled-back position).
 fn sync_visuals(
     mut bullets: Query<(&Position, &EntityKind, &mut Transform), With<TickTrackedEntity>>,
 ) {
     for (pos, kind, mut transform) in bullets.iter_mut() {
         if *kind == EntityKind::Bullet {
             transform.translation = pos.0;
+        }
+    }
+}
+
+/// Pitch the local first-person camera from the locally-accumulated look. Yaw
+/// comes from the parent body (avian `Rotation`), so the camera child only needs
+/// the view pitch. Done per-frame for a smooth view, independent of tick rate.
+fn sync_camera_pitch(local_look: Res<LocalLook>, mut cameras: Query<&mut Transform, With<FpsCamera>>) {
+    for mut transform in cameras.iter_mut() {
+        transform.rotation = Quat::from_rotation_x(local_look.pitch);
+    }
+}
+
+/// Attach the first-person camera to the local player. Runs every frame and
+/// retries until the local-player resource exists and the local body has spawned,
+/// so a joiner whose entity arrives before its `LocalClientPlayer` is set still
+/// gets a camera (instead of being stuck on the menu view). The `CameraAttached`
+/// marker makes it idempotent.
+fn attach_local_camera(
+    mut commands: Commands,
+    local_client: Option<Res<LocalClientPlayer>>,
+    local_server: Option<Res<LocalServerPlayer>>,
+    players: Query<(Entity, &PlayerUuid, &EntityKind), Without<CameraAttached>>,
+) {
+    let Some(my_uuid) = local_client
+        .as_ref()
+        .map(|p| p.0)
+        .or_else(|| local_server.as_ref().map(|p| p.0))
+    else {
+        return;
+    };
+    for (entity, uuid, kind) in &players {
+        if *kind == EntityKind::Player && uuid.0 == my_uuid {
+            commands
+                .entity(entity)
+                .insert(CameraAttached)
+                .with_children(|parent| {
+                    parent.spawn((FpsCamera::new(0.1), Transform::from_xyz(0.0, EYE_HEIGHT, 0.0)));
+                });
         }
     }
 }
