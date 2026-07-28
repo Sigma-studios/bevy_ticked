@@ -3,7 +3,7 @@ use std::marker::PhantomData;
 use bevy::prelude::*;
 
 use bevy_ticked::{
-    TickedSet, TickedSimulation,
+    TickedLoop, TickedSimulation, TickedSystems,
     registry::TickedComponentRegistry,
     tick::{CurrentTick, TicksPaused},
     time::run_tick_schedule,
@@ -118,10 +118,10 @@ impl<T: TickedInput> Plugin for TickedClientPlugin<T> {
                 reset_on_join::<T>.run_if(resource_added::<LocalClientPlayer>),
             )
             .add_systems(
-                FixedUpdate,
+                TickedLoop,
                 (
-                    handle_server_snapshot::<T>.in_set(TickedSet::PreTick),
-                    send_local_input::<T>.in_set(TickedSet::PostTick),
+                    handle_server_snapshot::<T>.in_set(TickedSystems::PreTick),
+                    send_local_input::<T>.in_set(TickedSystems::PostTick),
                 ),
             );
     }

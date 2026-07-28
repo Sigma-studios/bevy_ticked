@@ -21,7 +21,7 @@ pub fn insert_actions_into_tracker<A>(
 
 /// Flush pending local actions into the tracker (host) or send to host (client).
 ///
-/// Runs in `FixedUpdate::TickedSet::PreTick`. Each invocation corresponds to one
+/// Runs in `FixedUpdate::TickedSystems::PreTick`. Each invocation corresponds to one
 /// upcoming tick advancement. Actions are scheduled `buffer` ticks ahead.
 pub fn flush_pending_actions<A: LockstepAction, S: JoinSnapshot>(
     ticks_paused: Option<Res<TicksPaused>>,

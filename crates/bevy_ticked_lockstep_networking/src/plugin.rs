@@ -15,7 +15,7 @@ use crate::{
 };
 use bevy::prelude::*;
 use bevy_ensemble::{EnsembleAppExt, Lobby};
-use bevy_ticked::TickedSet;
+use bevy_ticked::{TickedLoop, TickedSystems};
 use std::marker::PhantomData;
 
 #[derive(Resource, Clone, Copy, Debug)]
@@ -115,15 +115,15 @@ where
             .register_ensemble_message_type::<crate::AuthoritativeTick<A>>()
             .register_ensemble_message_type::<crate::ParticipantJoined>()
             .add_systems(
-                FixedUpdate,
+                TickedLoop,
                 (
                     sync_lockstep_pause_state::<A, S>
-                        .in_set(TickedSet::PreTick)
+                        .in_set(TickedSystems::PreTick)
                         .before(flush_pending_actions::<A, S>),
-                    flush_pending_actions::<A, S>.in_set(TickedSet::PreTick),
-                    broadcast_authoritative_actions::<A>.in_set(TickedSet::PostTick),
+                    flush_pending_actions::<A, S>.in_set(TickedSystems::PreTick),
+                    broadcast_authoritative_actions::<A>.in_set(TickedSystems::PostTick),
                     cleanup_old_tracker_entries::<A>
-                        .in_set(TickedSet::PostTick)
+                        .in_set(TickedSystems::PostTick)
                         .after(broadcast_authoritative_actions::<A>),
                 ),
             )

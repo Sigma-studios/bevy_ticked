@@ -4,7 +4,7 @@ use std::marker::PhantomData;
 use bevy::prelude::*;
 
 use bevy_ticked::{
-    TickedSet,
+    TickedLoop, TickedSystems,
     registry::TickedComponentRegistry,
     tick::{CurrentTick, TicksPaused},
     tracked_entity::TickTrackedEntityCounter,
@@ -64,8 +64,8 @@ impl<T: TickedInput> Plugin for TickedServerPlugin<T> {
                 reset_on_host::<T>.run_if(resource_added::<LocalServerPlayer>),
             )
             .add_systems(
-                FixedUpdate,
-                broadcast_snapshot.in_set(TickedSet::PostTick),
+                TickedLoop,
+                broadcast_snapshot.in_set(TickedSystems::PostTick),
             );
     }
 }
