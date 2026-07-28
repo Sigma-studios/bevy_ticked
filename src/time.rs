@@ -38,12 +38,14 @@ use crate::tick::SECONDS_PER_TICK;
 #[derive(Debug, Clone, Copy)]
 pub struct Ticked {
     timestep: Duration,
+    overstep: Duration,
 }
 
 impl Default for Ticked {
     fn default() -> Self {
         Self {
             timestep: Duration::from_secs_f32(SECONDS_PER_TICK),
+            overstep: Duration::ZERO,
         }
     }
 }
@@ -73,6 +75,26 @@ pub trait TickedTime {
 
     /// Simulation time elapsed at the end of `tick`, i.e. `tick * timestep`.
     fn elapsed_at_tick(&self, tick: u64) -> Duration;
+
+    /// Time accumulated toward the next tick but not yet consumed by one.
+    fn overstep(&self) -> Duration;
+
+    /// [`overstep`](Self::overstep) as a fraction of one timestep, clamped to
+    /// `[0, 1]`.
+    ///
+    /// This is the blend factor for interpolating a visual between its
+    /// previous-tick and current-tick states.
+    fn overstep_fraction(&self) -> f32;
+
+    /// Add to the accumulator. Normally only the tick driver calls this.
+    fn accumulate(&mut self, delta: Duration);
+
+    /// Take one timestep out of the accumulator if there is one, reporting
+    /// whether a tick is owed.
+    fn expend(&mut self) -> bool;
+
+    /// Throw away accumulated time without running ticks for it.
+    fn discard_overstep(&mut self);
 }
 
 impl TickedTime for Time<Ticked> {
@@ -100,6 +122,38 @@ impl TickedTime for Time<Ticked> {
     #[inline]
     fn elapsed_at_tick(&self, tick: u64) -> Duration {
         elapsed_at(self.timestep(), tick)
+    }
+
+    #[inline]
+    fn overstep(&self) -> Duration {
+        self.context().overstep
+    }
+
+    #[inline]
+    fn overstep_fraction(&self) -> f32 {
+        (self.overstep().as_secs_f32() / self.timestep().as_secs_f32()).clamp(0.0, 1.0)
+    }
+
+    #[inline]
+    fn accumulate(&mut self, delta: Duration) {
+        self.context_mut().overstep += delta;
+    }
+
+    #[inline]
+    fn expend(&mut self) -> bool {
+        let timestep = self.timestep();
+        match self.context().overstep.checked_sub(timestep) {
+            Some(remaining) => {
+                self.context_mut().overstep = remaining;
+                true
+            }
+            None => false,
+        }
+    }
+
+    #[inline]
+    fn discard_overstep(&mut self) {
+        self.context_mut().overstep = Duration::ZERO;
     }
 }
 
