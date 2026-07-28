@@ -1,18 +1,26 @@
 //! Sub-tick interpolation.
 //!
-//! The simulation only advances on fixed ticks, but rendering runs every frame.
-//! To avoid visible stutter, a visual that tracks a simulated value blends
-//! between its previous- and current-tick states using the fraction of the way
-//! through the pending tick (`Time<Fixed>::overstep_fraction`).
+//! The simulation only advances on ticks, but rendering runs every frame. To
+//! avoid visible stutter, a visual that tracks a simulated value blends between
+//! its previous- and current-tick states using the fraction of the way through
+//! the pending tick.
+//!
+//! That fraction comes from [`Time<Ticked>`], the crate's own clock, not from
+//! `Time<Fixed>`. Under [`TickSource::FixedUpdate`] the two are mirrored and the
+//! result is identical; under any other source `Time<Fixed>` is unrelated to the
+//! tick rate, and reading it would blend against the wrong clock entirely.
 //!
 //! [`TickInterpolation`] bundles [`CurrentTick`] with that always-clamped
 //! fraction behind one consistent API, so interpolated visuals can't drift out
 //! of sync with each other or re-derive the idiom by hand.
+//!
+//! [`TickSource::FixedUpdate`]: crate::TickSource::FixedUpdate
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
 use crate::tick::CurrentTick;
+use crate::time::{Ticked, TickedTime};
 
 /// Read-only access to the current sub-tick interpolation state.
 ///
@@ -22,7 +30,7 @@ use crate::tick::CurrentTick;
 #[derive(SystemParam)]
 pub struct TickInterpolation<'w> {
     current_tick: Res<'w, CurrentTick>,
-    fixed_time: Res<'w, Time<Fixed>>,
+    ticked_time: Res<'w, Time<Ticked>>,
 }
 
 impl TickInterpolation<'_> {
@@ -31,7 +39,7 @@ impl TickInterpolation<'_> {
     /// This is the blend factor for a two-point interpolation between a value's
     /// previous-tick and current-tick states.
     pub fn fraction(&self) -> f32 {
-        self.fixed_time.overstep_fraction().clamp(0.0, 1.0)
+        self.ticked_time.overstep_fraction()
     }
 
     /// The current simulation tick.

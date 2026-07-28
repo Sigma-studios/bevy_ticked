@@ -7,7 +7,7 @@ pub mod time;
 pub mod tracked_entity;
 pub mod world_actions;
 
-use bevy::app::{MainScheduleOrder, RunFixedMainLoop};
+use bevy::app::{MainScheduleOrder, RunFixedMainLoop, RunFixedMainLoopSystems};
 use bevy::ecs::schedule::ScheduleLabel;
 use bevy::prelude::*;
 
@@ -163,7 +163,11 @@ impl Plugin for TickedPlugin {
 
         match self.source {
             TickSource::FixedUpdate => {
-                app.add_systems(FixedUpdate, drive_ticked_loop_from_fixed_update);
+                app.add_systems(FixedUpdate, drive_ticked_loop_from_fixed_update)
+                    .add_systems(
+                        RunFixedMainLoop,
+                        mirror_fixed_clock.in_set(RunFixedMainLoopSystems::AfterFixedMainLoop),
+                    );
             }
             TickSource::Hz(hz) => {
                 app.world_mut()
@@ -196,6 +200,22 @@ fn install_run_ticked_loop(app: &mut App) {
 /// interleave with ticks exactly as before.
 fn drive_ticked_loop_from_fixed_update(world: &mut World) {
     world.run_schedule(TickedLoop);
+}
+
+/// Under [`TickSource::FixedUpdate`] the fixed clock *is* the tick clock, so
+/// copy its timestep and leftover accumulator onto [`Time<Ticked>`].
+///
+/// This is what lets [`TickInterpolation`](interpolation::TickInterpolation)
+/// read one clock in every mode. It runs after the last fixed step of the frame,
+/// so the overstep it publishes is the final one for this frame — exactly what a
+/// render system interpolating toward the next tick needs.
+///
+/// Mirroring the timestep too removes an old footgun: the simulation used to
+/// integrate by the `SECONDS_PER_TICK` constant while `Time<Fixed>` could be set
+/// to some other rate, with nothing reporting the mismatch.
+fn mirror_fixed_clock(fixed: Res<Time<Fixed>>, mut ticked: ResMut<Time<Ticked>>) {
+    ticked.set_timestep(fixed.timestep());
+    ticked.set_overstep(fixed.overstep());
 }
 
 /// Run [`TickedLoop`] as many times as the accumulator has whole ticks for.

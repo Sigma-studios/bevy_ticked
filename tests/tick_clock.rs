@@ -30,9 +30,22 @@ fn observe(time: Res<Time>, tick: Res<CurrentTick>, mut observed: ResMut<Observe
 
 /// `frame_delta` is what each `app.update()` is told has elapsed in real time.
 fn app(frame_delta: Duration) -> App {
+    source_app(TickSource::FixedUpdate, frame_delta)
+}
+
+/// An app where nothing advances the clock, so every tick comes from an explicit
+/// `StepForward`.
+fn manual_app(frame_delta: Duration) -> App {
+    source_app(TickSource::Manual, frame_delta)
+}
+
+fn source_app(source: TickSource, frame_delta: Duration) -> App {
     let mut app = App::new();
     app.add_plugins(MinimalPlugins)
-        .add_plugins(TickedPlugin::default())
+        .add_plugins(TickedPlugin {
+            source,
+            ..default()
+        })
         .init_resource::<Observed>()
         .insert_resource(TimeUpdateStrategy::ManualDuration(frame_delta))
         .add_systems(TickedSimulation, observe);
@@ -69,13 +82,10 @@ fn auto_advance_runs_the_simulation_at_the_tick_timestep() {
 
 #[test]
 fn manual_step_integrates_by_a_tick_not_by_the_frame() {
-    // A deliberately absurd frame delta, and a fixed timestep large enough that
-    // FixedUpdate never fires: every tick here comes from StepForward alone. If
-    // the simulation read the frame clock, it would see 250ms.
-    let mut app = app(Duration::from_millis(250));
-    app.world_mut()
-        .resource_mut::<Time<Fixed>>()
-        .set_timestep(Duration::from_secs(3600));
+    // A deliberately absurd frame delta, and nothing driving the clock: every
+    // tick here comes from StepForward alone. If the simulation read the frame
+    // clock, it would see 250ms.
+    let mut app = manual_app(Duration::from_millis(250));
     let timestep = timestep(&app);
 
     for _ in 0..5 {
@@ -98,10 +108,7 @@ fn tick_delta_is_independent_of_frame_rate() {
     // The same number of ticks, driven at wildly different frame rates, must
     // integrate identically. This is the property rollback determinism rests on.
     let run = |frame_delta: Duration| {
-        let mut app = app(frame_delta);
-        app.world_mut()
-            .resource_mut::<Time<Fixed>>()
-            .set_timestep(Duration::from_secs(3600));
+        let mut app = manual_app(frame_delta);
         for _ in 0..8 {
             step_forward(&mut app);
             app.update();
@@ -118,10 +125,7 @@ fn tick_delta_is_independent_of_frame_rate() {
 
 #[test]
 fn simulation_time_is_derived_from_the_tick_counter() {
-    let mut app = app(Duration::from_millis(250));
-    app.world_mut()
-        .resource_mut::<Time<Fixed>>()
-        .set_timestep(Duration::from_secs(3600));
+    let mut app = manual_app(Duration::from_millis(250));
     let timestep = timestep(&app);
 
     for _ in 0..6 {
@@ -237,10 +241,7 @@ fn catch_up_is_bounded_by_max_ticks_per_frame() {
 fn the_outer_clock_is_restored_after_a_tick() {
     // Systems outside the simulation must not observe the tick clock leaking.
     let frame_delta = Duration::from_millis(250);
-    let mut app = app(frame_delta);
-    app.world_mut()
-        .resource_mut::<Time<Fixed>>()
-        .set_timestep(Duration::from_secs(3600));
+    let mut app = manual_app(frame_delta);
 
     #[derive(Resource, Default)]
     struct OuterDelta(Duration);
