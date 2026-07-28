@@ -171,6 +171,27 @@ impl TickedTime for Time<Ticked> {
     }
 }
 
+/// Multiplier applied to the time fed into the tick accumulator.
+///
+/// Present only under [`TickSource::Hz`](crate::TickSource::Hz), which is the
+/// only source that owns an accumulator to stretch. `1.0` runs at the nominal
+/// rate; `1.02` runs 2% fast, `0.98` 2% slow.
+///
+/// This is how a networked client steers its prediction lead. Nudging the rate
+/// by a couple of percent moves the client relative to the server continuously
+/// and invisibly, where adding or dropping a whole tick to correct the same
+/// error is a visible discontinuity in everything the simulation drives. Keep
+/// the deviation small: this is a control input to a feedback loop, and large
+/// gains make it hunt.
+#[derive(Resource, Debug, Clone, Copy, PartialEq)]
+pub struct TickRateDilation(pub f64);
+
+impl Default for TickRateDilation {
+    fn default() -> Self {
+        Self(1.0)
+    }
+}
+
 /// `tick * timestep`, computed in integer nanoseconds so it is exact and
 /// reproducible rather than drifting with repeated float accumulation.
 fn elapsed_at(timestep: Duration, tick: u64) -> Duration {
