@@ -6,6 +6,7 @@ use bevy_ticked::{
     TickedSet, TickedSimulation,
     registry::TickedComponentRegistry,
     tick::{CurrentTick, TicksPaused},
+    time::run_tick_schedule,
     tracked_entity::TickTrackedEntityCounter,
 };
 
@@ -170,7 +171,7 @@ fn handle_server_snapshot<T: TickedInput>(world: &mut World) {
             let target_tick = snapshot_tick + tick_buffer;
             for tick in (snapshot_tick + 1)..=target_tick {
                 world.resource_mut::<CurrentTick>().0 = tick;
-                world.run_schedule(TickedSimulation);
+                run_tick_schedule(world, tick, TickedSimulation);
                 registry.capture_all(world, tick);
             }
             world.remove_resource::<TicksPaused>();
@@ -212,7 +213,7 @@ fn handle_server_snapshot<T: TickedInput>(world: &mut World) {
 
     for tick in (snapshot_tick + 1)..=end_tick {
         world.resource_mut::<CurrentTick>().0 = tick;
-        world.run_schedule(TickedSimulation);
+        run_tick_schedule(world, tick, TickedSimulation);
         registry.capture_all(world, tick);
     }
     world.resource_mut::<CurrentTick>().0 = end_tick;

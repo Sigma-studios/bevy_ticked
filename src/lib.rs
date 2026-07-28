@@ -3,6 +3,7 @@ pub mod prelude;
 pub mod registry;
 pub mod rollback;
 pub mod tick;
+pub mod time;
 pub mod tracked_entity;
 pub mod world_actions;
 
@@ -14,6 +15,7 @@ use rollback::rollback_and_resimulate;
 use tick::{
     CurrentTick, HistoryBufferTicks, ResetToTick, StepBackward, StepForward, TicksPaused,
 };
+use time::{run_tick_schedule, Ticked};
 use tracked_entity::{TickTrackedEntity, TickTrackedEntityCounter};
 
 /// The schedule where all tick-driven simulation systems run.
@@ -69,6 +71,7 @@ impl Plugin for TickedPlugin {
             .init_resource::<TickedComponentRegistry>()
             .init_resource::<TickTrackedEntityCounter>()
             .init_resource::<HistoryBufferTicks>()
+            .init_resource::<Time<Ticked>>()
             .init_schedule(TickedSimulation)
             .add_message::<StepForward>()
             .add_message::<StepBackward>()
@@ -127,7 +130,7 @@ fn advance_one_tick(world: &mut World) {
         current.0
     };
 
-    world.run_schedule(TickedSimulation);
+    run_tick_schedule(world, tick, TickedSimulation);
     let registry = world.resource::<TickedComponentRegistry>().clone();
     registry.capture_all(world, tick);
 
