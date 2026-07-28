@@ -16,7 +16,7 @@ use rollback::rollback_and_resimulate;
 use tick::{
     CurrentTick, HistoryBufferTicks, ResetToTick, StepBackward, StepForward, TicksPaused,
 };
-use time::{run_tick_schedule, Ticked, TickedTime};
+use time::{run_tick_schedule, TickRateDilation, Ticked, TickedTime};
 use tracked_entity::{TickTrackedEntity, TickTrackedEntityCounter};
 
 /// The schedule where all tick-driven simulation systems run.
@@ -174,7 +174,8 @@ impl Plugin for TickedPlugin {
                     .resource_mut::<Time<Ticked>>()
                     .set_timestep_hz(hz);
                 install_run_ticked_loop(app);
-                app.add_systems(RunTickedLoop, drive_ticked_loop_from_accumulator);
+                app.init_resource::<TickRateDilation>()
+                    .add_systems(RunTickedLoop, drive_ticked_loop_from_accumulator);
             }
             TickSource::Manual => {
                 // The schedule exists so consumers can drive TickedLoop from it
@@ -225,7 +226,8 @@ fn mirror_fixed_clock(fixed: Res<Time<Fixed>>, mut ticked: ResMut<Time<Ticked>>)
 /// contribution. [`MaxTicksPerFrame`] bounds it a second time, because a tick
 /// here can pull a rollback resimulation along with it.
 fn drive_ticked_loop_from_accumulator(world: &mut World) {
-    let delta = world.resource::<Time<Virtual>>().delta();
+    let dilation = world.resource::<TickRateDilation>().0;
+    let delta = world.resource::<Time<Virtual>>().delta().mul_f64(dilation);
     world.resource_mut::<Time<Ticked>>().accumulate(delta);
 
     let max = world.resource::<MaxTicksPerFrame>().0;

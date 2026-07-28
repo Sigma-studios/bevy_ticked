@@ -6,7 +6,7 @@ use bevy_ticked::{
     TickedLoop, TickedSimulation, TickedSystems,
     registry::TickedComponentRegistry,
     tick::{CurrentTick, TicksPaused},
-    time::run_tick_schedule,
+    time::{run_tick_schedule, TickRateDilation},
     tracked_entity::TickTrackedEntityCounter,
 };
 
@@ -33,9 +33,9 @@ struct PendingSnapshot {
 /// timeliness, self-contained in this crate: the server measures how many ticks
 /// early/late each client's inputs arrive and reports it in every snapshot (see
 /// [`WorldSnapshot::input_margins`](crate::snapshot::WorldSnapshot)); the client
-/// then solves directly for the lead that keeps a small positive margin, and
-/// re-converges toward it one tick per snapshot (no transport RTT needed, no
-/// visible tick jumps). `target_ticks` is exposed for read-only display.
+/// then solves directly for the lead that keeps a small positive margin and
+/// converges toward it by dilating its tick rate (no transport RTT needed).
+/// `target_ticks` is exposed for read-only display.
 #[derive(Resource, Clone, Copy, Debug)]
 pub struct ClientTickBuffer {
     /// Target lead, in ticks, of the client over the server.
@@ -200,16 +200,7 @@ fn handle_server_snapshot<T: TickedInput>(world: &mut World) {
         }
     }
     let target = world.resource::<ClientTickBuffer>().target_ticks;
-
-    // Re-converge one tick toward the target lead (deadband [target, target+1];
-    // never below target, which would risk late inputs) — no visible jump.
-    let end_tick = if lead > target + 1 {
-        current_tick - 1 // too far ahead: drop one predicted tick
-    } else if lead < target {
-        current_tick + 1 // not far enough ahead: predict one extra tick
-    } else {
-        current_tick
-    };
+    let end_tick = converge_lead(world, current_tick, lead, target);
 
     for tick in (snapshot_tick + 1)..=end_tick {
         world.resource_mut::<CurrentTick>().0 = tick;
@@ -217,6 +208,63 @@ fn handle_server_snapshot<T: TickedInput>(world: &mut World) {
         registry.capture_all(world, tick);
     }
     world.resource_mut::<CurrentTick>().0 = end_tick;
+}
+
+/// Largest deviation from the nominal tick rate used to steer the lead.
+///
+/// 2% is under the threshold where a rate change reads as motion artifact, and
+/// small enough to stay stable on top of [`ClientTickBuffer`]'s EWMA — the two
+/// together are a feedback loop, and a high gain here makes it hunt.
+const MAX_DILATION: f64 = 0.02;
+
+/// Lead error, in ticks, tolerated before correcting at all.
+const LEAD_DEADBAND: f64 = 0.5;
+
+/// Proportional gain: fraction of nominal rate corrected per tick of error.
+const DILATION_GAIN: f64 = 0.01;
+
+/// Tick-rate multiplier that corrects a lead error of `error` ticks.
+///
+/// Leading too much means running slow so the server catches up, and vice versa.
+fn dilation_for(error: f64) -> f64 {
+    if error.abs() < LEAD_DEADBAND {
+        1.0
+    } else {
+        (1.0 - error * DILATION_GAIN).clamp(1.0 - MAX_DILATION, 1.0 + MAX_DILATION)
+    }
+}
+
+/// Steer the prediction lead toward `target`, returning the tick to replay to.
+///
+/// Where an accumulator exists ([`TickSource::Hz`]), the correction is applied
+/// as a small change to the tick *rate*: the client runs a couple of percent
+/// fast or slow until the lead is right. That moves it relative to the server
+/// continuously, and nothing in the simulation can tell. Adding or dropping a
+/// whole tick corrects the same error in one frame, but every visual driven by
+/// the simulation jumps by a tick when it happens.
+///
+/// Under [`TickSource::FixedUpdate`] there is no accumulator to stretch, so fall
+/// back to the one-tick nudge rather than never converging.
+///
+/// [`TickSource::Hz`]: bevy_ticked::TickSource::Hz
+/// [`TickSource::FixedUpdate`]: bevy_ticked::TickSource::FixedUpdate
+fn converge_lead(world: &mut World, current_tick: u64, lead: u64, target: u64) -> u64 {
+    let error = lead as f64 - target as f64;
+
+    if let Some(mut dilation) = world.get_resource_mut::<TickRateDilation>() {
+        dilation.0 = dilation_for(error);
+        return current_tick;
+    }
+
+    // Deadband [target, target+1]; never drop below target, which would risk
+    // inputs arriving after the server has passed their tick.
+    if lead > target + 1 {
+        current_tick - 1
+    } else if lead < target {
+        current_tick + 1
+    } else {
+        current_tick
+    }
 }
 
 /// Number of recent ticks of input included in each packet. Input for tick T
@@ -245,4 +293,45 @@ fn send_local_input<T: TickedInput>(
         return;
     }
     commands.trigger(SendNetworkInput { inputs });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn small_lead_errors_are_ignored() {
+        assert_eq!(dilation_for(0.0), 1.0);
+        assert_eq!(dilation_for(0.4), 1.0);
+        assert_eq!(dilation_for(-0.4), 1.0);
+    }
+
+    #[test]
+    fn leading_too_much_slows_the_client_down() {
+        assert!(dilation_for(1.0) < 1.0, "must run slow to shed lead");
+        assert!(dilation_for(-1.0) > 1.0, "must run fast to gain lead");
+    }
+
+    #[test]
+    fn correction_is_proportional_to_the_error() {
+        let small = 1.0 - dilation_for(1.0);
+        let large = 1.0 - dilation_for(2.0);
+        assert!(large > small, "a bigger error must pull harder");
+    }
+
+    #[test]
+    fn dilation_stays_within_the_clamp() {
+        for error in [-1000.0, -50.0, -3.0, 3.0, 50.0, 1000.0] {
+            let d = dilation_for(error);
+            assert!(
+                (1.0 - MAX_DILATION..=1.0 + MAX_DILATION).contains(&d),
+                "error {error} produced {d}, outside the +/-2% clamp"
+            );
+        }
+    }
+
+    #[test]
+    fn a_huge_error_never_stops_or_reverses_the_clock() {
+        assert!(dilation_for(1e9) > 0.0, "the clock must keep moving forward");
+    }
 }
