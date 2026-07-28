@@ -993,7 +993,7 @@ dependencies = [
 [[package]]
 name = "bevy_elan"
 version = "0.1.0"
-source = "git+https://github.com/Sigma-dev/bevy_elan?branch=master#26412bf98a71172a725eae0f50fff38cc7a18a3b"
+source = "git+https://github.com/Sigma-dev/bevy_elan?rev=26412bf#26412bf98a71172a725eae0f50fff38cc7a18a3b"
 dependencies = [
  "avian3d",
  "bevy",
@@ -1013,7 +1013,7 @@ dependencies = [
 [[package]]
 name = "bevy_ensemble"
 version = "0.1.0"
-source = "git+https://github.com/Sigma-studios/bevy_ensemble?branch=feature%2Fnetdebug-extras#990331835cb80b39103ab6e5966c8c28e0ce5474"
+source = "git+https://github.com/Sigma-studios/bevy_ensemble?branch=master#990331835cb80b39103ab6e5966c8c28e0ce5474"
 dependencies = [
  "bevy",
  "postcard",
@@ -1023,7 +1023,7 @@ dependencies = [
 [[package]]
 name = "bevy_ensemble_sockets"
 version = "0.1.0"
-source = "git+https://github.com/Sigma-studios/bevy_ensemble?branch=feature%2Fnetdebug-extras#990331835cb80b39103ab6e5966c8c28e0ce5474"
+source = "git+https://github.com/Sigma-studios/bevy_ensemble?branch=master#990331835cb80b39103ab6e5966c8c28e0ce5474"
 dependencies = [
  "bytes",
  "js-sys",
@@ -1040,7 +1040,7 @@ dependencies = [
 [[package]]
 name = "bevy_ensemble_steam"
 version = "0.1.0"
-source = "git+https://github.com/Sigma-studios/bevy_ensemble?branch=feature%2Fnetdebug-extras#990331835cb80b39103ab6e5966c8c28e0ce5474"
+source = "git+https://github.com/Sigma-studios/bevy_ensemble?branch=master#990331835cb80b39103ab6e5966c8c28e0ce5474"
 dependencies = [
  "bevy",
  "bevy-steamworks",
@@ -1052,7 +1052,7 @@ dependencies = [
 [[package]]
 name = "bevy_ensemble_webrtc"
 version = "0.1.0"
-source = "git+https://github.com/Sigma-studios/bevy_ensemble?branch=feature%2Fnetdebug-extras#990331835cb80b39103ab6e5966c8c28e0ce5474"
+source = "git+https://github.com/Sigma-studios/bevy_ensemble?branch=master#990331835cb80b39103ab6e5966c8c28e0ce5474"
 dependencies = [
  "async-tungstenite",
  "bevy",
