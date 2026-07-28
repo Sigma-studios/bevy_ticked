@@ -16,10 +16,13 @@ use bevy_ticked::prelude::*;
 #[derive(Resource, Default)]
 struct Order(Vec<&'static str>);
 
-fn app(auto_advance: bool) -> App {
+fn app(source: TickSource) -> App {
     let mut app = App::new();
     app.add_plugins(MinimalPlugins)
-        .add_plugins(TickedPlugin { auto_advance })
+        .add_plugins(TickedPlugin {
+            source,
+            ..default()
+        })
         .init_resource::<Order>()
         .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
             1.0 / 64.0,
@@ -36,7 +39,7 @@ fn app(auto_advance: bool) -> App {
 
 #[test]
 fn lifecycle_sets_are_ordered_when_auto_advancing() {
-    let mut app = app(true);
+    let mut app = app(TickSource::FixedUpdate);
     for _ in 0..4 {
         app.update();
     }
@@ -50,11 +53,11 @@ fn lifecycle_sets_are_ordered_when_auto_advancing() {
 }
 
 #[test]
-fn lifecycle_sets_are_configured_even_without_the_fixed_update_driver() {
-    // The regression: with no auto-advance the sets used to be unconfigured, so
-    // membership silently bought no ordering at all. The driver is gone here, so
-    // the loop should not run on its own...
-    let mut app = app(false);
+fn lifecycle_sets_are_configured_in_manual_mode() {
+    // The regression: in manual mode the sets used to be unconfigured, so
+    // membership silently bought no ordering at all. Nothing drives the clock
+    // here, so the loop should not run on its own...
+    let mut app = app(TickSource::Manual);
     for _ in 0..4 {
         app.update();
     }

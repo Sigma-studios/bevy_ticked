@@ -7,6 +7,7 @@ pub mod time;
 pub mod tracked_entity;
 pub mod world_actions;
 
+use bevy::app::{MainScheduleOrder, RunFixedMainLoop};
 use bevy::ecs::schedule::ScheduleLabel;
 use bevy::prelude::*;
 
@@ -15,7 +16,7 @@ use rollback::rollback_and_resimulate;
 use tick::{
     CurrentTick, HistoryBufferTicks, ResetToTick, StepBackward, StepForward, TicksPaused,
 };
-use time::{run_tick_schedule, Ticked};
+use time::{run_tick_schedule, Ticked, TickedTime};
 use tracked_entity::{TickTrackedEntity, TickTrackedEntityCounter};
 
 /// The schedule where all tick-driven simulation systems run.
@@ -54,29 +55,73 @@ pub enum TickedSystems {
     PostTick,
 }
 
+/// The schedule that drives [`TickedLoop`] when the tick rate is decoupled from
+/// Bevy's fixed timestep.
+///
+/// Inserted immediately after `RunFixedMainLoop`, so ticks occupy the same slot
+/// in the frame that `FixedMain` does and input latency is unchanged. Only
+/// present for [`TickSource::Hz`] and [`TickSource::Manual`].
+#[derive(ScheduleLabel, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct RunTickedLoop;
+
+/// What advances the tick clock.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TickSource {
+    /// One tick per Bevy `FixedUpdate` step, at Bevy's fixed timestep.
+    ///
+    /// The default, and the right choice unless you need otherwise: every tick
+    /// stays bracketed by `FixedMain`, so systems in `FixedPreUpdate` /
+    /// `FixedPostUpdate` interleave with ticks the way they always have.
+    FixedUpdate,
+    /// Own accumulator, running `hz` ticks per second of virtual time.
+    ///
+    /// Fed from `Time<Virtual>`, so pausing, `set_relative_speed` (slow motion,
+    /// fast forward) and the spiral-of-death guard of `Time<Virtual>::max_delta`
+    /// all apply for free. This is the mode that decouples the simulation rate
+    /// from Bevy's fixed timestep and the only one where the accumulator can be
+    /// dilated to steer a networked client's prediction lead.
+    Hz(f64),
+    /// Nothing advances the clock automatically.
+    ///
+    /// Ticks move only via [`StepForward`] / [`StepBackward`] / [`ResetToTick`],
+    /// or by running [`TickedLoop`] yourself. For playback, scrubbing and
+    /// frame-by-frame debugging.
+    Manual,
+}
+
 /// Plugin that installs the deterministic tick simulation.
 ///
-/// By default it auto-advances one tick per `FixedUpdate` step (frame-rate
-/// independent, catch-up on lag — the classic fixed-timestep behavior). Set
-/// [`auto_advance`](Self::auto_advance) to `false` to take full control of the
-/// clock yourself: the plugin then never touches `FixedUpdate`, and ticks only
-/// move when you send [`StepForward`] / [`StepBackward`] / [`ResetToTick`]
-/// messages. This is what lets a consumer build playback (variable speed,
-/// slow-motion, reverse) and scrubbing on top, using its own accumulator and
-/// its own choice of in-game-seconds-per-tick, without the built-in driver
-/// fighting it.
+/// Defaults to one tick per `FixedUpdate` step, which is the classic
+/// fixed-timestep behavior. Change [`source`](Self::source) to decouple the
+/// simulation rate from Bevy's fixed timestep.
 pub struct TickedPlugin {
-    /// When `true` (default), advance one tick per `FixedUpdate` step unless
-    /// [`TicksPaused`] is present. When `false`, the tick clock is entirely
-    /// driven by the manual step/reset messages.
-    pub auto_advance: bool,
+    /// What advances the tick clock. Defaults to [`TickSource::FixedUpdate`].
+    pub source: TickSource,
+    /// Ceiling on how many ticks one frame may run to catch up, for
+    /// [`TickSource::Hz`].
+    ///
+    /// `Time<Virtual>::max_delta` already bounds the accumulated time, but a
+    /// tick here can drag a rollback resimulation behind it and so is far more
+    /// expensive than a plain fixed step. When the ceiling is hit the remaining
+    /// accumulated time is dropped rather than queued, trading a small time
+    /// discontinuity for not spiralling.
+    pub max_ticks_per_frame: u32,
 }
 
 impl Default for TickedPlugin {
     fn default() -> Self {
-        Self { auto_advance: true }
+        Self {
+            source: TickSource::FixedUpdate,
+            // 250ms of catch-up at 64Hz, matching Time<Virtual>'s default
+            // max_delta.
+            max_ticks_per_frame: 16,
+        }
     }
 }
+
+/// Runtime copy of [`TickedPlugin::max_ticks_per_frame`].
+#[derive(Resource, Clone, Copy, Debug)]
+pub struct MaxTicksPerFrame(pub u32);
 
 impl Plugin for TickedPlugin {
     fn build(&self, app: &mut App) {
@@ -114,10 +159,34 @@ impl Plugin for TickedPlugin {
         )
         .add_systems(TickedLoop, advance_tick_system.in_set(TickedSystems::Tick));
 
-        if self.auto_advance {
-            app.add_systems(FixedUpdate, drive_ticked_loop_from_fixed_update);
+        app.insert_resource(MaxTicksPerFrame(self.max_ticks_per_frame));
+
+        match self.source {
+            TickSource::FixedUpdate => {
+                app.add_systems(FixedUpdate, drive_ticked_loop_from_fixed_update);
+            }
+            TickSource::Hz(hz) => {
+                app.world_mut()
+                    .resource_mut::<Time<Ticked>>()
+                    .set_timestep_hz(hz);
+                install_run_ticked_loop(app);
+                app.add_systems(RunTickedLoop, drive_ticked_loop_from_accumulator);
+            }
+            TickSource::Manual => {
+                // The schedule exists so consumers can drive TickedLoop from it
+                // on their own terms, but nothing is registered to advance time.
+                install_run_ticked_loop(app);
+            }
         }
     }
+}
+
+/// Give [`RunTickedLoop`] the frame slot immediately after `FixedMain`.
+fn install_run_ticked_loop(app: &mut App) {
+    app.init_schedule(RunTickedLoop);
+    app.world_mut()
+        .resource_mut::<MainScheduleOrder>()
+        .insert_after(RunFixedMainLoop, RunTickedLoop);
 }
 
 /// Run one pass of [`TickedLoop`] per `FixedUpdate` step.
@@ -127,6 +196,30 @@ impl Plugin for TickedPlugin {
 /// interleave with ticks exactly as before.
 fn drive_ticked_loop_from_fixed_update(world: &mut World) {
     world.run_schedule(TickedLoop);
+}
+
+/// Run [`TickedLoop`] as many times as the accumulator has whole ticks for.
+///
+/// The accumulator is fed from `Time<Virtual>`, so pause and relative speed are
+/// inherited, and `Time<Virtual>::max_delta` already bounds a single frame's
+/// contribution. [`MaxTicksPerFrame`] bounds it a second time, because a tick
+/// here can pull a rollback resimulation along with it.
+fn drive_ticked_loop_from_accumulator(world: &mut World) {
+    let delta = world.resource::<Time<Virtual>>().delta();
+    world.resource_mut::<Time<Ticked>>().accumulate(delta);
+
+    let max = world.resource::<MaxTicksPerFrame>().0;
+    let mut ran = 0;
+    while world.resource_mut::<Time<Ticked>>().expend() {
+        world.run_schedule(TickedLoop);
+        ran += 1;
+        if ran >= max {
+            // Give up on the rest of this frame's backlog rather than fall
+            // further behind every frame.
+            world.resource_mut::<Time<Ticked>>().discard_overstep();
+            break;
+        }
+    }
 }
 
 /// Capture the initial world state at tick 0 exactly once, as soon as any

@@ -139,6 +139,100 @@ fn simulation_time_is_derived_from_the_tick_counter() {
     }
 }
 
+/// An app whose ticks come from the crate's own accumulator, not FixedUpdate.
+fn hz_app(hz: f64, frame_delta: Duration, max_ticks_per_frame: u32) -> App {
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins)
+        .add_plugins(TickedPlugin {
+            source: TickSource::Hz(hz),
+            max_ticks_per_frame,
+        })
+        .init_resource::<Observed>()
+        .insert_resource(TimeUpdateStrategy::ManualDuration(frame_delta))
+        .add_systems(TickedSimulation, observe);
+    app
+}
+
+#[test]
+fn hz_source_uses_the_requested_timestep() {
+    let app = hz_app(30.0, Duration::from_secs_f64(1.0 / 30.0), 16);
+    assert_eq!(
+        app.world().resource::<Time<Ticked>>().timestep(),
+        Duration::from_secs_f64(1.0 / 30.0),
+        "TickSource::Hz must set the simulation timestep, not just the rate"
+    );
+}
+
+#[test]
+fn hz_source_runs_one_tick_per_frame_at_matching_rates() {
+    let mut app = hz_app(30.0, Duration::from_secs_f64(1.0 / 30.0), 16);
+    // Bevy's first frame reports a zero delta, so it produces no tick.
+    for _ in 0..11 {
+        app.update();
+    }
+
+    let observed = app.world().resource::<Observed>();
+    assert_eq!(observed.ticks, (1..=10).collect::<Vec<_>>());
+    assert!(
+        observed
+            .deltas
+            .iter()
+            .all(|d| *d == Duration::from_secs_f64(1.0 / 30.0)),
+        "every tick must be worth 1/30s at 30Hz, saw {:?}",
+        observed.deltas
+    );
+}
+
+#[test]
+fn hz_source_catches_up_within_one_frame() {
+    // Four ticks' worth of time arrives in a single frame; all four must run,
+    // rather than three being dropped.
+    let mut app = hz_app(64.0, Duration::from_secs_f64(4.0 / 64.0), 16);
+    app.update();
+    app.update();
+
+    assert_eq!(
+        app.world().resource::<Observed>().ticks,
+        vec![1, 2, 3, 4],
+        "the accumulator must spend all whole ticks it has banked"
+    );
+}
+
+#[test]
+fn hz_source_does_not_run_at_bevys_fixed_rate() {
+    // The point of the whole exercise: the simulation rate is independent of
+    // Bevy's fixed timestep, which stays at its 64Hz default here.
+    let mut app = hz_app(10.0, Duration::from_secs_f64(1.0 / 10.0), 16);
+    for _ in 0..6 {
+        app.update();
+    }
+
+    let observed = app.world().resource::<Observed>();
+    assert_eq!(observed.ticks.len(), 5, "10Hz over 5 real frames is 5 ticks");
+    assert!(
+        observed
+            .deltas
+            .iter()
+            .all(|d| *d == Duration::from_secs_f64(0.1)),
+        "ticks must be 100ms, not Bevy's 15.625ms fixed step"
+    );
+}
+
+#[test]
+fn catch_up_is_bounded_by_max_ticks_per_frame() {
+    // A long frame must not be allowed to run unbounded ticks; a tick here can
+    // drag a rollback resimulation behind it.
+    let mut app = hz_app(64.0, Duration::from_millis(100), 2);
+    app.update();
+    app.update();
+
+    let ran = app.world().resource::<Observed>().ticks.len();
+    assert_eq!(
+        ran, 2,
+        "100ms at 64Hz is 6 ticks of backlog; the ceiling of 2 must hold"
+    );
+}
+
 #[test]
 fn the_outer_clock_is_restored_after_a_tick() {
     // Systems outside the simulation must not observe the tick clock leaking.
