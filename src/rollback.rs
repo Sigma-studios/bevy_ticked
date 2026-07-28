@@ -1,7 +1,7 @@
 use bevy::ecs::schedule::ScheduleLabel;
 use bevy::prelude::*;
 
-use crate::{registry::TickedComponentRegistry, tick::CurrentTick};
+use crate::{registry::TickedComponentRegistry, tick::CurrentTick, time::run_tick_schedule};
 
 /// Restore world state to a previous tick from WorldActions history.
 ///
@@ -37,7 +37,7 @@ pub fn rollback_and_resimulate(
     // Re-simulate forward
     for tick in (target_tick + 1)..=end_tick {
         world.resource_mut::<CurrentTick>().0 = tick;
-        world.run_schedule(simulation_schedule.intern());
+        run_tick_schedule(world, tick, simulation_schedule.intern());
         registry.capture_all(world, tick);
     }
 }
