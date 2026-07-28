@@ -89,6 +89,15 @@ pub trait TickedTime {
     /// Add to the accumulator. Normally only the tick driver calls this.
     fn accumulate(&mut self, delta: Duration);
 
+    /// Set the accumulator directly.
+    ///
+    /// Used to mirror `Time<Fixed>` under [`TickSource::FixedUpdate`], and
+    /// available to consumers driving their own clock who want to control the
+    /// interpolation blend factor (e.g. scrubbing to a sub-tick position).
+    ///
+    /// [`TickSource::FixedUpdate`]: crate::TickSource::FixedUpdate
+    fn set_overstep(&mut self, overstep: Duration);
+
     /// Take one timestep out of the accumulator if there is one, reporting
     /// whether a tick is owed.
     fn expend(&mut self) -> bool;
@@ -137,6 +146,11 @@ impl TickedTime for Time<Ticked> {
     #[inline]
     fn accumulate(&mut self, delta: Duration) {
         self.context_mut().overstep += delta;
+    }
+
+    #[inline]
+    fn set_overstep(&mut self, overstep: Duration) {
+        self.context_mut().overstep = overstep;
     }
 
     #[inline]
