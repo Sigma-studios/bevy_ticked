@@ -1,5 +1,5 @@
 pub use crate::{
-    TickedPlugin, TickedSet, TickedSimulation,
+    TickedLoop, TickedPlugin, TickedSimulation, TickedSystems,
     interpolation::TickInterpolation,
     registry::{TickedAppExt, TickedComponent, TickedComponentRegistry},
     rollback::{rollback_and_resimulate, rollback_to_tick},

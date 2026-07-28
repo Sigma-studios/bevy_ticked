@@ -30,9 +30,22 @@ use tracked_entity::{TickTrackedEntity, TickTrackedEntityCounter};
 #[derive(ScheduleLabel, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct TickedSimulation;
 
-/// System sets for ordering relative to tick advancement in `FixedUpdate`.
+/// The schedule that hosts one tick's lifecycle.
+///
+/// This is the stable attachment point for anything that needs to run around
+/// tick advancement: it always contains [`TickedSystems`] in order, no matter
+/// what is driving the clock. Register here rather than in `FixedUpdate`, and
+/// your systems keep working if the tick rate is later decoupled from Bevy's
+/// fixed timestep.
+///
+/// Distinct from [`TickedSimulation`], which holds the game simulation itself
+/// and is run once per tick from inside this schedule.
+#[derive(ScheduleLabel, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct TickedLoop;
+
+/// System sets for ordering relative to tick advancement, within [`TickedLoop`].
 #[derive(SystemSet, Clone, Debug, PartialEq, Eq, Hash)]
-pub enum TickedSet {
+pub enum TickedSystems {
     /// Runs before tick advancement (e.g. client rollback on snapshot).
     PreTick,
     /// The core tick advancement: increment, run TickedSimulation, capture.
@@ -73,6 +86,7 @@ impl Plugin for TickedPlugin {
             .init_resource::<HistoryBufferTicks>()
             .init_resource::<Time<Ticked>>()
             .init_schedule(TickedSimulation)
+            .init_schedule(TickedLoop)
             .add_message::<StepForward>()
             .add_message::<StepBackward>()
             .add_message::<ResetToTick>()
@@ -84,14 +98,35 @@ impl Plugin for TickedPlugin {
                 (ensure_initial_capture, apply_manual_controls).chain(),
             );
 
-        if self.auto_advance {
-            app.configure_sets(
-                FixedUpdate,
-                (TickedSet::PreTick, TickedSet::Tick, TickedSet::PostTick).chain(),
+        // The tick lifecycle lives in `TickedLoop` unconditionally, so that
+        // downstream ordering against `TickedSystems` holds whatever drives the
+        // clock. Previously these sets were only configured when auto-advancing,
+        // which silently left the whole networking stack unordered in manual
+        // mode -- `.after(set)` on a set with no members is a no-op, not an error.
+        app.configure_sets(
+            TickedLoop,
+            (
+                TickedSystems::PreTick,
+                TickedSystems::Tick,
+                TickedSystems::PostTick,
             )
-            .add_systems(FixedUpdate, advance_tick_system.in_set(TickedSet::Tick));
+                .chain(),
+        )
+        .add_systems(TickedLoop, advance_tick_system.in_set(TickedSystems::Tick));
+
+        if self.auto_advance {
+            app.add_systems(FixedUpdate, drive_ticked_loop_from_fixed_update);
         }
     }
+}
+
+/// Run one pass of [`TickedLoop`] per `FixedUpdate` step.
+///
+/// Keeping the driver inside `FixedUpdate` means every tick stays bracketed by
+/// `FixedMain`, so consumer systems in `FixedPreUpdate`/`FixedPostUpdate` still
+/// interleave with ticks exactly as before.
+fn drive_ticked_loop_from_fixed_update(world: &mut World) {
+    world.run_schedule(TickedLoop);
 }
 
 /// Capture the initial world state at tick 0 exactly once, as soon as any
