@@ -7,7 +7,7 @@ use bevy_ticked::{
     registry::TickedComponentRegistry,
     tick::{CurrentTick, TicksPaused},
     time::{run_tick_schedule, TickRateDilation},
-    tracked_entity::TickTrackedEntityCounter,
+    tracked_entity::{TickTrackedEntity, TickTrackedEntityCounter},
 };
 
 use crate::{
@@ -110,8 +110,9 @@ impl<T: TickedInput> Default for TickedClientPlugin<T> {
 
 impl<T: TickedInput> Plugin for TickedClientPlugin<T> {
     fn build(&self, app: &mut App) {
-        app.init_resource::<InputQueue<T>>()
-            .init_resource::<ClientTickBuffer>()
+        crate::input::install_input_queue::<T>(app);
+        app.init_resource::<ClientTickBuffer>()
+            .add_message::<SnapshotApplied>()
             .add_observer(receive_snapshot)
             .add_systems(
                 Update,
@@ -136,7 +137,27 @@ fn receive_snapshot(trigger: On<ReceivedNetworkSnapshot>, mut commands: Commands
 
 /// When `LocalClientPlayer` is inserted, reset tick state and pause
 /// until the first server snapshot arrives.
+///
+/// Tracked entities are despawned here, and that is not tidiness. Zeroing the
+/// counter while entities minted from the old one are still standing means the next
+/// `next()` hands out an id that is already in use — and `apply_snapshot` keys the
+/// whole world by id, so two entities sharing one id have their components merged
+/// into whichever the client happens to hold. Whatever this peer built while it
+/// thought it was playing alone is about to be replaced by the host's world in any
+/// case, so there is nothing here worth keeping and every reason not to keep it.
+///
+/// [`reset_on_host`](crate::server::reset_on_host) closes the same hole the other
+/// way, by raising the counter instead of despawning, because a solo player opening
+/// their world to friends does have a claim on it.
 fn reset_on_join<T: TickedInput>(world: &mut World) {
+    let stale: Vec<Entity> = {
+        let mut tracked = world.query_filtered::<Entity, With<TickTrackedEntity>>();
+        tracked.iter(world).collect()
+    };
+    for entity in stale {
+        world.despawn(entity);
+    }
+
     world.insert_resource(CurrentTick(0));
     world.insert_resource(TicksPaused);
     world.insert_resource(TickTrackedEntityCounter::default());
@@ -145,11 +166,43 @@ fn reset_on_join<T: TickedInput>(world: &mut World) {
     registry.clear_all(world);
 }
 
+/// Written once a snapshot has been applied to the world.
+///
+/// A [`ReceivedNetworkSnapshot`](crate::messages::ReceivedNetworkSnapshot) says a
+/// packet arrived; this says the world now reflects it, and — the part a consumer
+/// cannot work out for itself — whether it was the initial sync.
+///
+/// The two are not alike and anything that eases, animates or announces has to
+/// treat them differently: a correction moves a body centimetres, an initial sync
+/// moves every body from wherever this peer imagined it to wherever it actually is.
+/// Without this, consumers guess from the magnitude of the jump, which also catches
+/// respawns and teleports and so is wrong in both directions.
+#[derive(Message, Clone, Copy, Debug)]
+pub struct SnapshotApplied {
+    /// The tick the snapshot described.
+    pub tick: u64,
+    /// True for the initial sync, false for a steady-state correction.
+    pub first: bool,
+}
+
 /// PreTick: if a server snapshot arrived, rollback and replay local inputs to now.
 fn handle_server_snapshot<T: TickedInput>(world: &mut World) {
     let Some(pending) = world.remove_resource::<PendingSnapshot>() else {
         return;
     };
+
+    // Not a client (yet). Applying the host's world at a peer that still thinks it
+    // is playing alone gets everything downstream of the local player's uuid wrong
+    // — which body is mine, which gets the camera, which is drawn as somebody else
+    // — and this stack makes it likely rather than merely possible, because the
+    // data channel comes up before the lobby is promoted.
+    //
+    // Dropped rather than held: the resource is removed above, so a snapshot that
+    // arrives too early is discarded instead of waiting to be applied stale. They
+    // are unreliable by construction, so losing one costs nothing.
+    if !world.contains_resource::<LocalClientPlayer>() {
+        return;
+    }
 
     let was_paused = world.get_resource::<TicksPaused>().is_some();
     let current_tick = world.resource::<CurrentTick>().0;
@@ -160,6 +213,13 @@ fn handle_server_snapshot<T: TickedInput>(world: &mut World) {
 
     // Apply the authoritative snapshot (sets CurrentTick to snapshot_tick)
     apply_snapshot(world, &pending.snapshot);
+    // `was_paused` is exactly "this is the initial sync". It used to be computed
+    // here, used to decide whether to skip ahead, and thrown away; consumers were
+    // left to infer it from how far bodies moved.
+    world.write_message(SnapshotApplied {
+        tick: snapshot_tick,
+        first: was_paused,
+    });
 
     if snapshot_tick >= current_tick {
         // Snapshot is at or ahead of us — jump forward.

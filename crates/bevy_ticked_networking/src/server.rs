@@ -7,7 +7,7 @@ use bevy_ticked::{
     TickedLoop, TickedSystems,
     registry::TickedComponentRegistry,
     tick::{CurrentTick, TicksPaused},
-    tracked_entity::TickTrackedEntityCounter,
+    tracked_entity::{TickTrackedEntity, TickTrackedEntityCounter},
 };
 
 use crate::{
@@ -56,8 +56,8 @@ impl<T: TickedInput> Default for TickedServerPlugin<T> {
 
 impl<T: TickedInput> Plugin for TickedServerPlugin<T> {
     fn build(&self, app: &mut App) {
-        app.init_resource::<InputQueue<T>>()
-            .init_resource::<InputMargins>()
+        crate::input::install_input_queue::<T>(app);
+        app.init_resource::<InputMargins>()
             .add_observer(collect_network_inputs::<T>)
             .add_systems(
                 Update,
@@ -72,12 +72,32 @@ impl<T: TickedInput> Plugin for TickedServerPlugin<T> {
 
 /// When `LocalServerPlayer` is inserted, reset tick state so the
 /// multiplayer session starts fresh from tick 0.
+///
+/// The counter is set to the world's **high-water mark**, not to zero, and that is
+/// the whole point of this function's shape. Zeroing it while tracked entities are
+/// still standing hands the next `next()` an id that is already in use, and
+/// `apply_snapshot` keys the entire world by id — so a rope that collides with a
+/// player has its components merged onto that player and no rope is ever created.
+/// The host sees a rope; the joiner watches the shot freeze and nothing appear.
+///
+/// Despawning instead would also close the hole, but it is the wrong trade here: a
+/// solo player opening their world to friends would lose it. A client has no such
+/// claim, which is why [`reset_on_join`] does despawn.
+///
+/// The invariant either way: **no id is ever issued twice in a session.**
 fn reset_on_host<T: TickedInput>(world: &mut World) {
+    let highest = highest_tracked_id(world);
     world.insert_resource(CurrentTick(0));
-    world.insert_resource(TickTrackedEntityCounter::default());
+    world.insert_resource(TickTrackedEntityCounter(highest));
     world.resource_mut::<InputQueue<T>>().inputs.clear();
     let registry = world.resource::<TickedComponentRegistry>().clone();
     registry.clear_all(world);
+}
+
+/// The largest `TickTrackedEntity` id currently in the world, or 0 if there are none.
+pub(crate) fn highest_tracked_id(world: &mut World) -> u64 {
+    let mut tracked = world.query::<&TickTrackedEntity>();
+    tracked.iter(world).map(|tracked| tracked.0).max().unwrap_or(0)
 }
 
 /// Observer: collect incoming network inputs into the InputQueue.
