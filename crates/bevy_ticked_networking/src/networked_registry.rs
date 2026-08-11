@@ -23,21 +23,64 @@ impl<T> NetworkedTickedComponent for T where
 /// Extension trait for registering networked ticked components.
 pub trait NetworkedTickedAppExt {
     /// Register a component for tick-based tracking with network serialization support.
+    ///
+    /// **The order of these calls is a wire format.** Indices are assigned by
+    /// position as `u16` and travel in every snapshot; reorder two registrations
+    /// and a peer reads one component's bytes as another's, with no error of any
+    /// kind. Append only, never reorder, never delete.
+    ///
+    /// Prefer [`register_networked_ticked_component_as`] for anything long-lived:
+    /// it gives the type a stable name for the join handshake, so two peers built
+    /// from different commits find out at the join rather than an hour later.
+    ///
+    /// [`register_networked_ticked_component_as`]: Self::register_networked_ticked_component_as
     fn register_networked_ticked_component<T: NetworkedTickedComponent>(&mut self) -> &mut Self;
+
+    /// As [`register_networked_ticked_component`], with an explicit wire name.
+    ///
+    /// The name is what [`TickedComponentRegistry::wire_hash`] hashes, so it must
+    /// be the same string on every peer and must not change once a build is in
+    /// anybody's hands. Without one the type's `type_name` is used, which is fine
+    /// for a prototype and wrong for a shipped game: `std::any::type_name` is
+    /// explicitly not stable across compiler versions, so a peer on a newer rustc
+    /// could be reported as having a different registry when it does not.
+    ///
+    /// Renaming the Rust type is then free; changing this string is a wire break.
+    ///
+    /// [`register_networked_ticked_component`]: Self::register_networked_ticked_component
+    fn register_networked_ticked_component_as<T: NetworkedTickedComponent>(
+        &mut self,
+        wire_name: &'static str,
+    ) -> &mut Self;
 }
 
 impl NetworkedTickedAppExt for App {
     fn register_networked_ticked_component<T: NetworkedTickedComponent>(&mut self) -> &mut Self {
-        self.init_resource::<TickedComponentRegistry>();
-        self.init_resource::<WorldActions<T>>();
-        let mut registry = self.world_mut().resource_mut::<TickedComponentRegistry>();
-        registry.register_with_serialization::<T>(
-            serialize_component::<T>,
-            deserialize_and_apply_component::<T>,
-            deserialize_and_insert_one_component::<T>,
-        );
-        self
+        register_networked::<T>(self, None)
     }
+
+    fn register_networked_ticked_component_as<T: NetworkedTickedComponent>(
+        &mut self,
+        wire_name: &'static str,
+    ) -> &mut Self {
+        register_networked::<T>(self, Some(wire_name))
+    }
+}
+
+fn register_networked<'a, T: NetworkedTickedComponent>(
+    app: &'a mut App,
+    wire_name: Option<&'static str>,
+) -> &'a mut App {
+    app.init_resource::<TickedComponentRegistry>();
+    app.init_resource::<WorldActions<T>>();
+    let mut registry = app.world_mut().resource_mut::<TickedComponentRegistry>();
+    registry.register_with_serialization::<T>(
+        wire_name,
+        serialize_component::<T>,
+        deserialize_and_apply_component::<T>,
+        deserialize_and_insert_one_component::<T>,
+    );
+    app
 }
 
 // --- Serialization dispatch functions ---

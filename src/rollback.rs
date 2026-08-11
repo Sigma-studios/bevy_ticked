@@ -1,7 +1,10 @@
 use bevy::ecs::schedule::ScheduleLabel;
 use bevy::prelude::*;
 
-use crate::{registry::TickedComponentRegistry, tick::CurrentTick, time::run_tick_schedule};
+use crate::{
+    events::TickedEventRegistry, registry::TickedComponentRegistry, tick::CurrentTick,
+    time::run_tick_schedule,
+};
 
 /// Restore world state to a previous tick from WorldActions history.
 ///
@@ -33,6 +36,9 @@ pub fn rollback_and_resimulate(
 
     // Truncate any history after target_tick (it's now invalid)
     registry.truncate_all_after(world, target_tick);
+    // Including the per-tick event logs, or a prediction that never happened stays
+    // presented and its correction is swallowed as "already shown".
+    TickedEventRegistry::truncate_all_after(world, target_tick);
 
     // Re-simulate forward
     for tick in (target_tick + 1)..=end_tick {
