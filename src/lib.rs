@@ -1,3 +1,4 @@
+pub mod events;
 pub mod interpolation;
 pub mod prelude;
 pub mod registry;
@@ -337,6 +338,7 @@ fn apply_manual_controls(world: &mut World) {
                 let target = current_tick - 1;
                 let registry = world.resource::<TickedComponentRegistry>().clone();
                 registry.restore_all(world, target);
+                events::TickedEventRegistry::truncate_all_after(world, target);
                 world.resource_mut::<CurrentTick>().0 = target;
             }
             ManualControlAction::Reset(target) => {
@@ -344,6 +346,7 @@ fn apply_manual_controls(world: &mut World) {
                 if target <= current_tick {
                     let registry = world.resource::<TickedComponentRegistry>().clone();
                     registry.restore_all(world, target);
+                    events::TickedEventRegistry::truncate_all_after(world, target);
                     world.resource_mut::<CurrentTick>().0 = target;
                 } else {
                     rollback_and_resimulate(world, current_tick, target, TickedSimulation);
