@@ -101,6 +101,27 @@ fn deserialize_and_apply_component<T: NetworkedTickedComponent>(
             world.entity_mut(*entity).insert(component.clone());
         }
     }
+
+    // Absence is authoritative. `capture_component` always calls `set_tick`, so a
+    // type that appears in the snapshot with no entry for a tracked entity means
+    // the authority does not have it -- not that it said nothing. Without this a
+    // removal is never replicated and no later snapshot can correct it, and
+    // `restore_component` already answers the same question the other way for the
+    // local rollback path.
+    //
+    // Filtered on `With<T>` rather than folded into the loop above: most tracked
+    // entities never carry most registered types, and `entity_mut().remove::<T>()`
+    // on every (entity, type) pair would make applying a snapshot cost
+    // `entities x types` archetype lookups instead of one query per type.
+    let mut carriers = world.query_filtered::<(Entity, &TickTrackedEntity), With<T>>();
+    let stale: Vec<Entity> = carriers
+        .iter(world)
+        .filter(|(_, net_id)| !state.contains_key(&net_id.0))
+        .map(|(entity, _)| entity)
+        .collect();
+    for entity in stale {
+        world.entity_mut(entity).remove::<T>();
+    }
 }
 
 fn deserialize_and_insert_one_component<T: NetworkedTickedComponent>(
