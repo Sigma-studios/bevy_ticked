@@ -99,6 +99,7 @@ pub fn receive_join_snapshot_responses<S: JoinSnapshot>(
     mut messages: MessageReader<ReceivedEnsembleMessage<JoinSnapshotResponse<S>>>,
     client_lobbies: Query<(), (With<Lobby>, Without<Host>)>,
     mut snapshot_state: ResMut<ClientSnapshotState<S>>,
+    mut last_scheduled: ResMut<crate::LastScheduledTick>,
     mut apply_messages: MessageWriter<ApplyJoinSnapshot<S>>,
 ) {
     if client_lobbies.is_empty() {
@@ -107,6 +108,10 @@ pub fn receive_join_snapshot_responses<S: JoinSnapshot>(
 
     for message in messages.read() {
         snapshot_state.ready = false;
+        // The snapshot moves this peer's clock, so any tick it scheduled before belongs to a
+        // different timeline. Starting the sequence afresh is what keeps the first flush after a
+        // join from trying to bridge a gap that is not real.
+        last_scheduled.0 = None;
         apply_messages.write(ApplyJoinSnapshot {
             snapshot_tick: message.message.snapshot_tick,
             snapshot: message.message.snapshot.clone(),

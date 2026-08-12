@@ -22,16 +22,30 @@ pub fn tracker_has_actions_for_player<A>(
         .is_some_and(|players_actions| players_actions.contains_key(&player_uuid))
 }
 
+/// Catch a newly-loaded client up on the ticks it missed between its snapshot and now.
+///
+/// Only ticks the host has actually *simulated* are sent, because only those are complete. The
+/// host advances a tick once every established participant's actions for it are in, so
+/// `current_tick` is the newest tick guaranteed whole; anything past it is still being filled in.
+///
+/// This used to send up to `current_tick + host_tick_buffer`, handing the joining client tick
+/// after tick that looked authoritative but was missing whichever peers had not reported in yet.
+/// The client simulated those half-populated ticks, the host later simulated the complete
+/// versions, and the two worlds disagreed from the join onwards — silently, and for ever. It only
+/// showed up with three peers, because with two the only other participant is the host itself,
+/// whose actions are always already in the tracker.
+///
+/// The client is not left short: everything past `current_tick` reaches it through the ordinary
+/// [`broadcast_authoritative_actions`] path, which waits for completeness by design.
 pub fn broadcast_buffered_authoritative_actions_to_loaded_clients<A: LockstepAction>(
     mut commands: Commands,
     current_tick: Res<CurrentTick>,
-    config: Res<LockstepConfig>,
     tracker: Res<ActionTracker<A>>,
     mut pending_client_joins: ResMut<PendingClientJoins>,
     lobby_clients: Query<(Entity, &LobbyClientPlayerUuid), With<LobbyClient>>,
     mut messages: MessageReader<ReceivedEnsembleMessage<crate::ClientLoaded>>,
 ) {
-    let end_tick = current_tick.0 + config.host_tick_buffer;
+    let end_tick = current_tick.0;
     for loaded_client in messages.read().filter_map(|message| message.sender) {
         let Some((client_entity, _)) = lobby_clients
             .iter()
@@ -47,16 +61,24 @@ pub fn broadcast_buffered_authoritative_actions_to_loaded_clients<A: LockstepAct
             .unwrap_or_else(|| current_tick.0 + 1);
 
         for tick in start_tick..=end_tick {
-            let Some(players_actions) = tracker.ticks.get(&tick) else {
-                continue;
-            };
+            // A tick with no entry is an *empty* tick, not an absent one, and the difference is a
+            // hung session: a host's first `host_tick_buffer` ticks have no entries at all,
+            // because its own flush schedules that far ahead. Skipping them left a client whose
+            // snapshot landed in that window waiting on a tick that would never be sent.
+            let players_actions = tracker
+                .ticks
+                .get(&tick)
+                .map(|players_actions| {
+                    players_actions
+                        .iter()
+                        .map(|(k, v)| (*k, v.clone()))
+                        .collect()
+                })
+                .unwrap_or_default();
 
             let message = AuthoritativeTick {
                 tick,
-                players_actions: players_actions
-                    .iter()
-                    .map(|(k, v)| (*k, v.clone()))
-                    .collect(),
+                players_actions,
             };
             commands
                 .entity(client_entity)
@@ -90,9 +112,14 @@ pub fn broadcast_authoritative_actions<A: LockstepAction>(
     }
 
     for tick in (last_broadcast_tick.0 + 1)..=current_tick.0 {
-        let Some(players_actions) = tracker.ticks.get(&tick) else {
-            break;
-        };
+        // An absent entry is an *empty* tick, not an unfinished one. The host simulated this tick,
+        // so by definition nothing was outstanding for it — and its own first `host_tick_buffer`
+        // ticks have no entries at all, because its flush schedules that far ahead. Breaking here
+        // meant those ticks were never broadcast, so a client whose snapshot landed in that window
+        // waited on a tick that would never be sent. The per-participant check below still decides
+        // whether the tick is genuinely ready to go out.
+        let empty = Default::default();
+        let players_actions = tracker.ticks.get(&tick).unwrap_or(&empty);
 
         let mut has_missing_established = false;
         let mut broadcast_actions: Vec<(u128, Vec<A>)> = players_actions

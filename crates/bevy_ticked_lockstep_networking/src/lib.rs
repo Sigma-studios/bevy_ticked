@@ -8,7 +8,9 @@ pub mod plugin;
 pub mod prelude;
 pub mod resources;
 
-pub use actions::{flush_pending_actions, insert_actions_into_tracker, receive_client_actions};
+pub use actions::{
+    LastScheduledTick, flush_pending_actions, insert_actions_into_tracker, receive_client_actions,
+};
 pub use authoritative::{
     broadcast_authoritative_actions, broadcast_buffered_authoritative_actions_to_loaded_clients,
     cleanup_old_tracker_entries, receive_authoritative_actions,
