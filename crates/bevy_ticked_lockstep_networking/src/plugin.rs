@@ -1,5 +1,6 @@
 use crate::{
-    ActionTracker, ClientSnapshotState, JoinSnapshot, LastBroadcastTick, LocalPendingActions,
+    ActionTracker, ClientSnapshotState, JoinSnapshot, LastBroadcastTick, LastScheduledTick,
+    LocalPendingActions,
     LockstepAction, PendingClientJoins, PendingJoinSnapshotFlushes,
     PendingLockstepParticipantJoins, StashedAuthoritativeTicks,
     activate_loaded_client_participants, add_host_participant,
@@ -62,6 +63,7 @@ fn reset_lockstep_state_on_lobby_removed<A: LockstepAction, S: JoinSnapshot>(
     mut pending_participant_joins: ResMut<PendingLockstepParticipantJoins>,
     mut stashed_ticks: ResMut<StashedAuthoritativeTicks<A>>,
     mut last_broadcast_tick: ResMut<LastBroadcastTick>,
+    mut last_scheduled_tick: ResMut<LastScheduledTick>,
     mut snapshot_state: ResMut<ClientSnapshotState<S>>,
     mut pending_snapshot_flushes: ResMut<PendingJoinSnapshotFlushes<S>>,
 ) {
@@ -76,6 +78,8 @@ fn reset_lockstep_state_on_lobby_removed<A: LockstepAction, S: JoinSnapshot>(
     pending_participant_joins.0.clear();
     stashed_ticks.0.clear();
     last_broadcast_tick.0 = 0;
+    // There is no sequence left to stay contiguous with.
+    last_scheduled_tick.0 = None;
     snapshot_state.ready = true;
     pending_snapshot_flushes.pending.clear();
 }
@@ -93,6 +97,7 @@ where
             .init_resource::<PendingLockstepParticipantJoins>()
             .init_resource::<StashedAuthoritativeTicks<A>>()
             .init_resource::<LastBroadcastTick>()
+            .init_resource::<LastScheduledTick>()
             .insert_resource(ClientSnapshotState::<S>::default())
             .init_resource::<PendingJoinSnapshotFlushes<S>>()
             .add_message::<crate::CaptureJoinSnapshot<S>>()
