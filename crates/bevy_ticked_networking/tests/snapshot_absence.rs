@@ -66,6 +66,14 @@ fn entity_with<C: Component>(app: &mut App) -> Entity {
     q.iter(app.world()).next().unwrap()
 }
 
+fn entity_by_id(app: &mut App, id: u64) -> Entity {
+    let mut q = app.world_mut().query::<(Entity, &TickTrackedEntity)>();
+    q.iter(app.world())
+        .find(|(_, tracked)| tracked.0 == id)
+        .map(|(entity, _)| entity)
+        .expect("no tracked entity with that id")
+}
+
 fn tracked_ids(app: &mut App) -> Vec<u64> {
     let mut q = app.world_mut().query::<&TickTrackedEntity>();
     let mut ids: Vec<u64> = q.iter(app.world()).map(|t| t.0).collect();
@@ -196,14 +204,17 @@ fn an_entity_spawned_by_the_same_snapshot_keeps_its_components() {
     );
 }
 
-// ── limits the fix does not remove ───────────────────────────────────────────
+// ── limits the fix used to leave behind ──────────────────────────────────────
 
-/// An entity whose networked components are *all* gone disappears entirely,
-/// because `apply_snapshot` derives entity existence from the union of the
-/// component maps. So a consumer still cannot strip a tracked entity bare and
-/// expect it to survive -- "removal replicates" stops one tick short of that.
+/// **Closed.** An entity whose networked components are all gone used to disappear entirely,
+/// because existence was inferred from the union of the component maps — so "removal replicates"
+/// stopped one tick short of stripping an entity bare, and a consumer that did it watched the
+/// entity vanish from every peer while still holding it on the host.
+///
+/// `WorldSnapshot::entities` is the authority on existence now, so the two questions are asked
+/// separately and answered separately.
 #[test]
-fn an_entity_stripped_of_every_networked_component_is_despawned_not_stripped() {
+fn an_entity_stripped_of_every_networked_component_survives() {
     let mut host = peer();
     let mut client = peer();
 
@@ -219,10 +230,16 @@ fn an_entity_stripped_of_every_networked_component_is_despawned_not_stripped() {
 
     assert_eq!(
         tracked_ids(&mut client),
-        vec![1],
-        "the entity is gone from the client while still alive on the host"
+        vec![1, 2],
+        "the entity still exists on the client, because the host still has it"
     );
-    assert!(host.world().get_entity(entity).is_ok(), "...and the host still has it");
+    assert!(host.world().get_entity(entity).is_ok(), "...as it does");
+
+    // Stripped, not despawned: it is there and it carries nothing.
+    let stripped = entity_by_id(&mut client, 2);
+    let stripped = client.world().entity(stripped);
+    assert!(stripped.get::<Pos>().is_none(), "Pos was removed, not merely stale");
+    assert!(stripped.get::<Ride>().is_none(), "and so was Ride");
 }
 
 /// §3.3's precondition, checked rather than assumed: a tracked entity whose whole

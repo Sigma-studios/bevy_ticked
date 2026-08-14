@@ -6,7 +6,11 @@ use std::{
 
 use bevy::prelude::*;
 
-use crate::{tracked_entity::TickTrackedEntity, world_actions::WorldActions};
+use crate::{
+    lifetimes::{capture_lifetimes, despawn_entities_that_did_not_exist, TrackedEntityLifetimes},
+    tracked_entity::TickTrackedEntity,
+    world_actions::WorldActions,
+};
 
 /// Trait bound for components that can be tracked by the tick system.
 ///
@@ -58,8 +62,6 @@ struct RegisteredTickedComponent {
     prune_before: fn(&mut World, u64),
     clear: fn(&mut World),
     has_tick: fn(&World, u64) -> bool,
-    /// Which tracked-entity ids this type has saved state for at a tick.
-    saved_ids: fn(&World, u64) -> Vec<u64>,
     /// Optional serialization support, populated by the networking crate.
     serialize_at: Option<fn(&mut World, u64) -> Option<HashMap<u64, Vec<u8>>>>,
     deserialize_and_apply: Option<fn(&mut World, u64, &HashMap<u64, Vec<u8>>)>,
@@ -119,7 +121,6 @@ impl TickedComponentRegistry {
             prune_before: prune_component::<T>,
             clear: clear_component::<T>,
             has_tick: has_tick_component::<T>,
-            saved_ids: saved_ids_component::<T>,
             serialize_at,
             deserialize_and_apply,
             deserialize_and_insert_one,
@@ -189,79 +190,59 @@ impl TickedComponentRegistry {
     }
 
     /// Capture all registered components at the given tick.
+    ///
+    /// Also records **which tracked entities existed**, which is not derivable from any of the
+    /// component histories — see [`crate::lifetimes`]. The two are captured together on purpose:
+    /// a lifetime record that can disagree with the state it describes is worse than none, and
+    /// the only way to guarantee they agree is to write them at the same instant.
     pub fn capture_all(&self, world: &mut World, tick: u64) {
         for entry in &self.inner.entries {
             (entry.capture)(world, tick);
         }
+        capture_lifetimes(world, tick);
     }
 
-    /// Restore all registered components from the given tick.
+    /// Restore all registered components from the given tick, and undo the spawns.
     ///
-    /// Rewinding past a spawn leaves a **husk**, and this reports it. `restore_all`
-    /// iterates entities that *currently* carry [`TickTrackedEntity`] and, per type,
-    /// inserts the saved value or removes the component when that entity is absent
-    /// from the tick's map. An entity spawned after the target tick is in no saved
-    /// map at all, so every registered component is stripped from it — and nothing
-    /// despawns it. What is left still carries its marker, its collider and its
-    /// visuals, but none of its state, and nothing will ever put them back.
+    /// Rewinding past a spawn used to leave a **husk**: `restore_all` walks the entities that
+    /// *currently* carry [`TickTrackedEntity`] and, per type, inserts the saved value or removes
+    /// the component when that entity is absent from the tick's map. An entity spawned after the
+    /// target tick is in no saved map at all, so every registered component was stripped from it
+    /// and nothing despawned it — still tracked, still drawn, carrying none of its state, and
+    /// captured into every future tick for the rest of the session.
     ///
-    /// The real fix is entity lifecycle in the history, so a rewind despawns what
-    /// did not exist. Until then the least this can do is not be silent: a
-    /// determinism harness that can quietly corrupt the world it is testing is the
-    /// worst possible shape for an instrument.
+    /// The lifetime history closes that: existence is recorded per tick independently of any
+    /// component, so an entity that did not exist at `tick` is despawned rather than hollowed
+    /// out. This is done **before** the per-type restores, so nothing is spent stripping state
+    /// from entities that are about to go.
     ///
-    /// Reported rather than repaired, and deliberately not guessed at: an entity
-    /// that legitimately carries none of the registered types at the target tick is
-    /// indistinguishable from one that did not exist, so a
-    /// despawn-what-has-no-state heuristic would kill it.
+    /// What this still does not do is *resurrect*. An entity despawned after `tick` does not come
+    /// back, because its unregistered parts — colliders, meshes, markers, the relationships it
+    /// stood in — were never in the history to restore. Spawns roll back; despawns do not.
     pub fn restore_all(&self, world: &mut World, tick: u64) {
+        let undone = despawn_entities_that_did_not_exist(world, tick);
+        if !undone.is_empty() {
+            debug!(
+                "rolled back to tick {tick} past the spawn of {} tracked {}: net {:?} \
+                 did not exist at that tick and {} been despawned.",
+                undone.len(),
+                if undone.len() == 1 { "entity" } else { "entities" },
+                undone,
+                if undone.len() == 1 { "has" } else { "have" },
+            );
+        }
         for entry in &self.inner.entries {
             (entry.restore)(world, tick);
         }
-        self.report_husks(world, tick);
-    }
-
-    /// Warn about tracked entities with no saved state at `tick`.
-    fn report_husks(&self, world: &mut World, tick: u64) {
-        // Only meaningful if the tick was captured at all; restoring an unknown
-        // tick is a no-op for every type, so nothing was stripped.
-        if !self.has_tick_captured(world, tick) {
-            return;
-        }
-        let present: Vec<(Entity, u64)> = {
-            let mut tracked = world.query::<(Entity, &TickTrackedEntity)>();
-            tracked.iter(world).map(|(e, t)| (e, t.0)).collect()
-        };
-        let saved: Vec<u64> = self
-            .inner
-            .entries
-            .iter()
-            .flat_map(|entry| (entry.saved_ids)(world, tick))
-            .collect();
-
-        let husks: Vec<u64> = present
-            .iter()
-            .map(|(_, net_id)| *net_id)
-            .filter(|net_id| !saved.contains(net_id))
-            .collect();
-        if husks.is_empty() {
-            return;
-        }
-        warn!(
-            "rolled back to tick {tick} past the spawn of {} tracked {}: net {:?} \
-             existed at no point in that tick's history, so every registered \
-             component has just been stripped from them and nothing will put them \
-             back. They are still tracked, still drawn, and now stateless.",
-            husks.len(),
-            if husks.len() == 1 { "entity" } else { "entities" },
-            husks
-        );
     }
 
     /// Truncate all WorldActions history after the given tick.
     pub fn truncate_all_after(&self, world: &mut World, tick: u64) {
         for entry in &self.inner.entries {
             (entry.truncate_after)(world, tick);
+        }
+        if let Some(mut lifetimes) = world.get_resource_mut::<TrackedEntityLifetimes>() {
+            lifetimes.truncate_after(tick);
         }
     }
 
@@ -270,12 +251,18 @@ impl TickedComponentRegistry {
         for entry in &self.inner.entries {
             (entry.prune_before)(world, tick);
         }
+        if let Some(mut lifetimes) = world.get_resource_mut::<TrackedEntityLifetimes>() {
+            lifetimes.prune_before(tick);
+        }
     }
 
     /// Clear all WorldActions history for all registered components.
     pub fn clear_all(&self, world: &mut World) {
         for entry in &self.inner.entries {
             (entry.clear)(world);
+        }
+        if let Some(mut lifetimes) = world.get_resource_mut::<TrackedEntityLifetimes>() {
+            lifetimes.clear();
         }
     }
 
@@ -402,14 +389,6 @@ fn prune_component<T: TickedComponent>(world: &mut World, tick: u64) {
 
 fn clear_component<T: TickedComponent>(world: &mut World) {
     world.resource_mut::<WorldActions<T>>().clear();
-}
-
-fn saved_ids_component<T: TickedComponent>(world: &World, tick: u64) -> Vec<u64> {
-    world
-        .resource::<WorldActions<T>>()
-        .at_tick(tick)
-        .map(|state| state.keys().copied().collect())
-        .unwrap_or_default()
 }
 
 fn has_tick_component<T: TickedComponent>(world: &World, tick: u64) -> bool {
