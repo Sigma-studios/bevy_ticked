@@ -6,7 +6,10 @@ use std::{
 
 use bevy::prelude::*;
 
-use crate::{tracked_entity::TickTrackedEntity, world_actions::WorldActions};
+use crate::{
+    resource_registry::TickedResourceRegistry, tracked_entity::TickTrackedEntity,
+    world_actions::WorldActions,
+};
 
 /// Trait bound for components that can be tracked by the tick system.
 ///
@@ -188,10 +191,25 @@ impl TickedComponentRegistry {
             .any(|entry| (entry.has_tick)(world, tick))
     }
 
-    /// Capture all registered components at the given tick.
+    /// Capture all registered components at the given tick — **and all registered resources**.
+    ///
+    /// The resource half rides along here rather than being a call of its own, and that is worth
+    /// a sentence because it is surprising. There are fifteen places in this workspace that drive
+    /// the component history, and a resource history that is driven from fourteen of them is worse
+    /// than no resource history at all: it would be *nearly* right, and the tick it was wrong on
+    /// would be a rollback that restored half a world. Riding along makes forgetting impossible,
+    /// and it is the same reason both halves are captured at the same instant rather than by two
+    /// systems that happen to be ordered.
+    ///
+    /// The same applies to [`restore_all`](Self::restore_all),
+    /// [`truncate_all_after`](Self::truncate_all_after),
+    /// [`prune_all_before`](Self::prune_all_before) and [`clear_all`](Self::clear_all).
     pub fn capture_all(&self, world: &mut World, tick: u64) {
         for entry in &self.inner.entries {
             (entry.capture)(world, tick);
+        }
+        if let Some(resources) = world.get_resource::<TickedResourceRegistry>().cloned() {
+            resources.capture_all(world, tick);
         }
     }
 
@@ -217,6 +235,9 @@ impl TickedComponentRegistry {
     pub fn restore_all(&self, world: &mut World, tick: u64) {
         for entry in &self.inner.entries {
             (entry.restore)(world, tick);
+        }
+        if let Some(resources) = world.get_resource::<TickedResourceRegistry>().cloned() {
+            resources.restore_all(world, tick);
         }
         self.report_husks(world, tick);
     }
@@ -263,6 +284,9 @@ impl TickedComponentRegistry {
         for entry in &self.inner.entries {
             (entry.truncate_after)(world, tick);
         }
+        if let Some(resources) = world.get_resource::<TickedResourceRegistry>().cloned() {
+            resources.truncate_all_after(world, tick);
+        }
     }
 
     /// Remove all WorldActions history before the given tick.
@@ -270,12 +294,18 @@ impl TickedComponentRegistry {
         for entry in &self.inner.entries {
             (entry.prune_before)(world, tick);
         }
+        if let Some(resources) = world.get_resource::<TickedResourceRegistry>().cloned() {
+            resources.prune_all_before(world, tick);
+        }
     }
 
     /// Clear all WorldActions history for all registered components.
     pub fn clear_all(&self, world: &mut World) {
         for entry in &self.inner.entries {
             (entry.clear)(world);
+        }
+        if let Some(resources) = world.get_resource::<TickedResourceRegistry>().cloned() {
+            resources.clear_all(world);
         }
     }
 

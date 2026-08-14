@@ -6,6 +6,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use bevy_ticked::{
     tracked_entity::TickTrackedEntity,
     registry::{TickedComponent, TickedComponentRegistry},
+    resource_registry::{ResourceActions, TickedResource, TickedResourceRegistry},
     world_actions::WorldActions,
 };
 
@@ -64,6 +65,96 @@ impl NetworkedTickedAppExt for App {
         wire_name: &'static str,
     ) -> &mut Self {
         register_networked::<T>(self, Some(wire_name))
+    }
+}
+
+/// Trait bound for resources that can be rolled back AND serialized over the network.
+pub trait NetworkedTickedResource: TickedResource + Serialize + DeserializeOwned {}
+
+impl<R> NetworkedTickedResource for R where R: TickedResource + Serialize + DeserializeOwned {}
+
+/// Extension trait for registering networked ticked resources.
+///
+/// The point of these, and why the game-side shape they replace was a workaround: a fact that
+/// belongs to the *world* rather than to any entity — the round number, the score, whose turn it
+/// is — had no way to be rolled back or replicated, so it had to be a component, so it needed an
+/// entity to live on. Consumers invented a "world state singleton" for that and wrote a house rule
+/// telling everybody to remember it.
+pub trait NetworkedTickedResourceAppExt {
+    /// Captured, rolled back **and** serialised into snapshots.
+    ///
+    /// **The order of these calls is a wire format**, exactly as for components — resources have
+    /// their own `u16` index space, and reordering two registrations makes a peer read one
+    /// resource's bytes as another's. Append only.
+    fn register_networked_ticked_resource<R: NetworkedTickedResource>(&mut self) -> &mut Self;
+
+    /// As above, with an explicit wire name for the join handshake.
+    fn register_networked_ticked_resource_as<R: NetworkedTickedResource>(
+        &mut self,
+        wire_name: &'static str,
+    ) -> &mut Self;
+}
+
+impl NetworkedTickedResourceAppExt for App {
+    fn register_networked_ticked_resource<R: NetworkedTickedResource>(&mut self) -> &mut Self {
+        register_networked_resource::<R>(self, None)
+    }
+
+    fn register_networked_ticked_resource_as<R: NetworkedTickedResource>(
+        &mut self,
+        wire_name: &'static str,
+    ) -> &mut Self {
+        register_networked_resource::<R>(self, Some(wire_name))
+    }
+}
+
+fn register_networked_resource<'a, R: NetworkedTickedResource>(
+    app: &'a mut App,
+    wire_name: Option<&'static str>,
+) -> &'a mut App {
+    app.init_resource::<TickedResourceRegistry>();
+    app.init_resource::<ResourceActions<R>>();
+    let mut registry = app.world_mut().resource_mut::<TickedResourceRegistry>();
+    registry.register_with_serialization::<R>(
+        wire_name,
+        serialize_resource::<R>,
+        deserialize_and_apply_resource::<R>,
+    );
+    app
+}
+
+fn serialize_resource<R: NetworkedTickedResource>(world: &World, tick: u64) -> Option<Vec<u8>> {
+    let value = world.get_resource::<ResourceActions<R>>()?.at_tick(tick)?;
+    match postcard::to_allocvec(value) {
+        Ok(bytes) => Some(bytes),
+        Err(err) => {
+            error!(
+                "Failed to serialize ticked resource `{}`: {err}",
+                type_name::<R>()
+            );
+            None
+        }
+    }
+}
+
+fn deserialize_and_apply_resource<R: NetworkedTickedResource>(
+    world: &mut World,
+    tick: u64,
+    bytes: &[u8],
+) {
+    match postcard::from_bytes::<R>(bytes) {
+        Ok(value) => {
+            world
+                .get_resource_or_insert_with(ResourceActions::<R>::default)
+                .set_tick(tick, value.clone());
+            world.insert_resource(value);
+        }
+        Err(err) => {
+            error!(
+                "Failed to deserialize ticked resource `{}`: {err}",
+                type_name::<R>()
+            );
+        }
     }
 }
 

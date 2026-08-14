@@ -2,10 +2,12 @@ pub mod events;
 pub mod interpolation;
 pub mod prelude;
 pub mod registry;
+pub mod resource_registry;
 pub mod rollback;
 pub mod tick;
 pub mod time;
 pub mod tracked_entity;
+pub mod tracked_index;
 pub mod world_actions;
 
 use bevy::app::{MainScheduleOrder, RunFixedMainLoop, RunFixedMainLoopSystems};
@@ -128,7 +130,11 @@ impl Plugin for TickedPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<CurrentTick>()
             .init_resource::<TickedComponentRegistry>()
+            .init_resource::<resource_registry::TickedResourceRegistry>()
             .init_resource::<TickTrackedEntityCounter>()
+            .init_resource::<tracked_index::TrackedEntityIndex>()
+            .add_observer(tracked_index::index_tracked)
+            .add_observer(tracked_index::unindex_tracked)
             .init_resource::<HistoryBufferTicks>()
             .init_resource::<Time<Ticked>>()
             .init_schedule(TickedSimulation)

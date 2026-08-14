@@ -119,6 +119,10 @@ impl<T: TickedInput> Plugin for TickedClientPlugin<T> {
                 reset_on_join::<T>.run_if(resource_added::<LocalClientPlayer>),
             )
             .add_systems(
+                Update,
+                crate::reset_on_leave::<T>.run_if(resource_removed::<LocalClientPlayer>),
+            )
+            .add_systems(
                 TickedLoop,
                 (
                     handle_server_snapshot::<T>.in_set(TickedSystems::PreTick),
