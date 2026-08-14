@@ -1,5 +1,7 @@
 pub mod actions;
+pub mod adaptive_buffer;
 pub mod authoritative;
+pub mod checksum;
 pub mod join;
 pub mod messages;
 pub mod participants;
@@ -7,15 +9,19 @@ pub mod pause;
 pub mod plugin;
 pub mod prelude;
 pub mod resources;
+pub mod testing;
 
 pub use actions::{
     LastScheduledTick, flush_pending_actions, insert_actions_into_tracker, receive_client_actions,
 };
+pub use adaptive_buffer::{AdaptiveBufferState, AdaptiveBufferTuning, AdaptiveTickBufferPlugin};
 pub use authoritative::{
-    broadcast_authoritative_actions, broadcast_buffered_authoritative_actions_to_loaded_clients,
-    cleanup_old_tracker_entries, receive_authoritative_actions,
-    replay_stashed_authoritative_actions, tracker_has_actions_for_player,
+    apply_authoritative_tick, broadcast_authoritative_actions,
+    broadcast_buffered_authoritative_actions_to_loaded_clients, cleanup_old_tracker_entries,
+    receive_authoritative_actions, replay_stashed_authoritative_actions,
+    tracker_has_actions_for_player,
 };
+pub use checksum::{ChecksumLog, ChecksumLogPlugin, Divergence, WorldHash, record_checksum};
 pub use join::{
     flush_provided_join_snapshots, receive_join_snapshot_requests, receive_join_snapshot_responses,
     request_join_snapshot_on_client_join, send_client_loaded_after_snapshot_applied,
