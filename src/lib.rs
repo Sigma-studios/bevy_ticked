@@ -1,6 +1,5 @@
 pub mod events;
 pub mod interpolation;
-pub mod lifetimes;
 pub mod prelude;
 pub mod registry;
 pub mod rollback;
@@ -13,7 +12,6 @@ use bevy::app::{MainScheduleOrder, RunFixedMainLoop, RunFixedMainLoopSystems};
 use bevy::ecs::schedule::ScheduleLabel;
 use bevy::prelude::*;
 
-use lifetimes::TrackedEntityLifetimes;
 use registry::TickedComponentRegistry;
 use rollback::rollback_and_resimulate;
 use tick::{
@@ -130,7 +128,6 @@ impl Plugin for TickedPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<CurrentTick>()
             .init_resource::<TickedComponentRegistry>()
-            .init_resource::<TrackedEntityLifetimes>()
             .init_resource::<TickTrackedEntityCounter>()
             .init_resource::<HistoryBufferTicks>()
             .init_resource::<Time<Ticked>>()
