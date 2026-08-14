@@ -10,7 +10,6 @@ use bevy_ensemble::{
 };
 use bevy_ticked::tick::CurrentTick;
 
-
 pub fn tracker_has_actions_for_player<A>(
     tracker: &ActionTracker<A>,
     tick: u64,
@@ -199,10 +198,28 @@ pub fn replay_stashed_authoritative_actions<A: LockstepAction, S: crate::JoinSna
     }
 }
 
-fn apply_authoritative_tick<A: Clone>(
+/// Record a received [`AuthoritativeTick`] in the tracker.
+///
+/// # Why the tick is registered before the loop
+///
+/// The client's pause check asks `tracker.ticks.contains_key(&next_tick)` — "have I received
+/// tick N" — so what the tracker has to hold is the *arrival* of a tick, not just its contents.
+/// Those are different for an empty tick, and inserting only per-player entries would record a
+/// tick nobody acted on as though it had never been sent. The client would then wait on it for
+/// ever: the host has simulated past it and will not repeat it.
+///
+/// `broadcast_authoritative_actions` can already produce such a message — it builds one from an
+/// absent tracker entry deliberately, since an absent entry is an empty tick rather than an
+/// unfinished one. What has kept the wire full so far is only that every participant is
+/// required from `joined_at_tick` onwards, so the host's own entry is always in there. That is a
+/// liveness guarantee resting on the definition of "required participant", one edit away from
+/// spectators or a mid-session leave. Registering the key here does not depend on it.
+pub fn apply_authoritative_tick<A: Clone>(
     tracker: &mut ActionTracker<A>,
     authoritative_tick: &AuthoritativeTick<A>,
 ) {
+    tracker.ticks.entry(authoritative_tick.tick).or_default();
+
     for (player_uuid, actions) in &authoritative_tick.players_actions {
         insert_actions_into_tracker(
             tracker,
@@ -229,4 +246,52 @@ pub fn cleanup_old_tracker_entries<A: LockstepAction>(
         .unwrap_or(current_tick.0)
         .min(current_tick.0);
     tracker.ticks.retain(|tick, _| *tick >= min_keep);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_tick_nobody_acted_on_still_counts_as_received() {
+        let mut tracker = ActionTracker::<u8>::default();
+
+        apply_authoritative_tick(
+            &mut tracker,
+            &AuthoritativeTick {
+                tick: 7,
+                players_actions: Vec::new(),
+            },
+        );
+
+        assert!(
+            tracker.ticks.contains_key(&7),
+            "an empty authoritative tick has to be distinguishable from one that never arrived — \
+             the client's pause check reads exactly this key, and would otherwise wait for ever \
+             on a tick the host has already simulated past"
+        );
+        assert!(
+            tracker.ticks[&7].is_empty(),
+            "registering the tick must not invent an actor for it"
+        );
+    }
+
+    #[test]
+    fn a_tick_with_actions_records_them_as_well_as_the_tick() {
+        let mut tracker = ActionTracker::<u8>::default();
+
+        apply_authoritative_tick(
+            &mut tracker,
+            &AuthoritativeTick {
+                tick: 3,
+                players_actions: vec![(11, vec![1, 2]), (22, Vec::new())],
+            },
+        );
+
+        assert_eq!(tracker.ticks[&3][&11], vec![1, 2]);
+        assert!(
+            tracker.ticks[&3].contains_key(&22),
+            "a participant who acted on nothing is still present for the tick"
+        );
+    }
 }
