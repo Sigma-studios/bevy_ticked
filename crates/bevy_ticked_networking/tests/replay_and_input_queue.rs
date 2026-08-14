@@ -1,8 +1,9 @@
 //! What a client costs, what it keeps, and what it refuses.
 //!
 //! Covers §3.4, §3.6, §3.7 and §3.10 of `shooting_ropes/docs/upstream-needs.md`.
-//! Three of those are fixed; §3.7 is not, and its test measures the cost that is
-//! still there so the number stops being an estimate.
+//! All four are now fixed. §3.7's tests kept their subject when its answer changed: they measure
+//! simulations per frame, which is the quantity the entry was ever about, and they now pin that a
+//! correct prediction costs none and a wrong one still costs the full lead.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -13,7 +14,9 @@ use bevy_ticked::prelude::*;
 use bevy_ticked::registry::TickedComponentRegistry;
 use bevy_ticked::tracked_entity::TickTrackedEntity;
 use bevy_ticked::world_actions::WorldActions;
-use bevy_ticked_networking::client::{ClientTickBuffer, LocalClientPlayer, SnapshotApplied};
+use bevy_ticked_networking::client::{
+    ClientTickBuffer, LocalClientPlayer, PredictionCheck, SnapshotApplied,
+};
 use bevy_ticked_networking::input::InputQueue;
 use bevy_ticked_networking::messages::ReceivedNetworkSnapshot;
 use bevy_ticked_networking::prelude::*;
@@ -261,10 +264,18 @@ fn pruning_inputs_on_the_history_window_cannot_starve_a_replay() {
     );
 }
 
-// ── §3.7, not fixed: the cost, measured ──────────────────────────────────────
+// ── §3.7, fixed: the cost, measured before and after ─────────────────────────
 
+/// The measurement that used to say this cost seven simulations a frame.
+///
+/// It reported `lead=6 per_frame=[7, 7, 7, 7, 7, 7, 7, 7]` — the client replaying its whole
+/// prediction lead against snapshots that were byte-identical to what it had already computed,
+/// on every frame, for ever. With the prediction check it reports `[1, 1, 1, 1, 1, 1, 1, 1]`:
+/// the ordinary forward tick and nothing else.
+///
+/// Kept pointing at the same quantity rather than deleted, because the number is the claim.
 #[test]
-fn a_client_replays_its_whole_lead_on_every_snapshot_even_when_nothing_changed() {
+fn a_client_that_predicted_correctly_does_not_replay_at_all() {
     let mut app = client();
     sync(&mut app);
 
@@ -280,16 +291,71 @@ fn a_client_replays_its_whole_lead_on_every_snapshot_even_when_nothing_changed()
         per_frame.push(app.world().resource::<SimRuns>().0);
     }
 
-    let steady = *per_frame.last().unwrap();
     println!("lead={lead} per_frame={per_frame:?}");
     assert!(
-        steady >= lead as u32,
-        "§3.7: a frame replays the whole lead. lead {lead}, saw {per_frame:?}"
+        per_frame.iter().all(|&runs| runs <= 1),
+        "a snapshot that agrees with the prediction must not cost a replay. \
+         lead {lead}, saw {per_frame:?}"
     );
-    // None of that work changed anything: the snapshot agreed with the prediction
-    // every time.
+    // And the state is still right — skipping the correction is only sound because there was
+    // nothing to correct.
     let mut q = app.world_mut().query::<&Pos>();
     assert_eq!(q.iter(app.world()).next().copied(), Some(Pos(0)));
+}
+
+/// The other half, and the one that would make the optimisation a bug if it failed: a snapshot
+/// that *disagrees* still costs a full replay, and still wins.
+#[test]
+fn a_client_that_predicted_wrongly_still_replays_its_whole_lead() {
+    let mut app = client();
+    sync(&mut app);
+
+    let lead = app.world().resource::<ClientTickBuffer>().target_ticks;
+    let current = app.world().resource::<CurrentTick>().0;
+    let snapshot_tick = current.saturating_sub(lead);
+
+    // Deliver a snapshot the client cannot have predicted.
+    let mut snapshot = snapshot_matching(&mut app, snapshot_tick);
+    for entities in snapshot.components.values_mut() {
+        for bytes in entities.values_mut() {
+            *bytes = postcard::to_allocvec(&Pos(99)).unwrap();
+        }
+    }
+    app.world_mut().trigger(ReceivedNetworkSnapshot(snapshot));
+
+    app.world_mut().resource_mut::<SimRuns>().0 = 0;
+    app.update();
+    let runs = app.world().resource::<SimRuns>().0;
+
+    assert!(
+        runs >= lead as u32,
+        "a correction still replays the lead: lead {lead}, saw {runs}"
+    );
+    let mut q = app.world_mut().query::<&Pos>();
+    assert_eq!(
+        q.iter(app.world()).next().copied(),
+        Some(Pos(99)),
+        "and the correction actually landed"
+    );
+}
+
+/// Turning the check off restores the old behaviour exactly, which is what makes it measurable.
+#[test]
+fn the_prediction_check_can_be_turned_off() {
+    let mut app = client();
+    app.insert_resource(PredictionCheck(false));
+    sync(&mut app);
+
+    let lead = app.world().resource::<ClientTickBuffer>().target_ticks;
+    let current = app.world().resource::<CurrentTick>().0;
+    deliver(&mut app, current.saturating_sub(lead));
+    app.world_mut().resource_mut::<SimRuns>().0 = 0;
+    app.update();
+
+    assert!(
+        app.world().resource::<SimRuns>().0 >= lead as u32,
+        "with the check off, an agreeing snapshot replays the lead as it always did"
+    );
 }
 
 /// §3.7's fix is feasible without new bookkeeping: the client's own prediction for
