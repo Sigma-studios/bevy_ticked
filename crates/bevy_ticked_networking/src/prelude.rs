@@ -5,7 +5,11 @@ pub use crate::{
         NetworkInputPayload, NetworkSnapshotPayload, ReceivedNetworkInput,
         ReceivedNetworkSnapshot, SendNetworkInput, SendNetworkSnapshot,
     },
-    networked_registry::{NetworkedTickedAppExt, NetworkedTickedComponent},
+    networked_registry::{
+        NetworkedTickedAppExt, NetworkedTickedComponent, NetworkedTickedResource,
+        NetworkedTickedResourceAppExt,
+    },
+    reset_on_leave,
     server::{LocalServerPlayer, TickedServerPlugin},
     snapshot::{WorldSnapshot, apply_snapshot, build_snapshot},
 };

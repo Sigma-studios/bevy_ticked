@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use bevy_ticked::{
     registry::TickedComponentRegistry,
+    resource_registry::TickedResourceRegistry,
     tick::CurrentTick,
     tracked_entity::{TickTrackedEntity, TickTrackedEntityCounter},
 };
@@ -19,6 +20,17 @@ pub struct WorldSnapshot {
     pub tick: u64,
     /// component_type_index -> (tracked_entity_id -> serialized_component_bytes)
     pub components: HashMap<u16, HashMap<u64, Vec<u8>>>,
+    /// resource_type_index -> serialized resource bytes.
+    ///
+    /// Its own index space, assigned by registration order in `TickedResourceRegistry`, which is
+    /// as much a wire format as the component one.
+    ///
+    /// Absence means the authority said nothing about that resource, **not** that it removed it.
+    /// The opposite of the rule for components, and deliberately: a resource is one value with no
+    /// entity to be missing from, and "the round has not started" is a value rather than an
+    /// absence.
+    #[serde(default)]
+    pub resources: HashMap<u16, Vec<u8>>,
     /// Per-client input-arrival margin in ticks, measured by the server: how many
     /// ticks *ahead* of the server that client's most recent input arrived
     /// (negative = arrived late). Clients read their own entry to size their
@@ -33,9 +45,15 @@ pub struct WorldSnapshot {
 pub fn build_snapshot(world: &mut World, tick: u64) -> WorldSnapshot {
     let registry = world.resource::<TickedComponentRegistry>().clone();
     let components = registry.serialize_all(world, tick);
+    let resources = world
+        .get_resource::<TickedResourceRegistry>()
+        .cloned()
+        .map(|resources| resources.serialize_all(world, tick))
+        .unwrap_or_default();
     WorldSnapshot {
         tick,
         components,
+        resources,
         input_margins: HashMap::new(),
     }
 }
@@ -60,7 +78,13 @@ pub fn apply_snapshot(world: &mut World, snapshot: &WorldSnapshot) {
         .flat_map(|entities| entities.keys().copied())
         .collect();
 
-    // 2. Query all existing TickTrackedEntity entities
+    // 2. What is already here.
+    //
+    //    Queried rather than read from `TrackedEntityIndex`, deliberately. The index would save
+    //    this walk, but it is only correct if `TickedPlugin`'s observers have run, and this
+    //    function takes a bare `&mut World` — it is called by tests and tools against worlds that
+    //    have the registry and nothing else. Trading a correct answer for a faster one here would
+    //    make `apply_snapshot` silently spawn duplicates in exactly those worlds.
     let mut query = world.query::<(Entity, &TickTrackedEntity)>();
     let existing: Vec<(Entity, u64)> = query
         .iter(world)
@@ -99,6 +123,13 @@ pub fn apply_snapshot(world: &mut World, snapshot: &WorldSnapshot) {
 
     // 5. Apply snapshot to existing (surviving) entities + write into WorldActions
     registry.deserialize_and_apply_all(world, snapshot.tick, &snapshot.components);
+
+    // 5b. And the resources, which have no entity to be attached to.
+    if !snapshot.resources.is_empty() {
+        if let Some(resources) = world.get_resource::<TickedResourceRegistry>().cloned() {
+            resources.deserialize_and_apply_all(world, snapshot.tick, &snapshot.resources);
+        }
+    }
 
     // 6. Reset counter to max snapshot ID so that rollback+replay produces
     //    deterministic entity IDs matching the server.

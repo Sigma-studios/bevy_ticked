@@ -20,6 +20,29 @@ use crate::{
 #[derive(Resource)]
 pub struct LocalServerPlayer(pub u128);
 
+/// How many peers a snapshot built right now would actually reach.
+///
+/// # Why this is a resource and not a query
+///
+/// `broadcast_snapshot` gated on `LocalServerPlayer` and nothing else, and
+/// `BroadcastSnapshotCommand` serialised the entire world *before* the transport discovered there
+/// was nobody to send it to. The recipient test was on the far side of the expensive part.
+///
+/// That is not a small waste, it is a design constraint: it is the reason a peer playing alone
+/// cannot simply insert `LocalServerPlayer` and be a host with no clients. A solo player who did
+/// would postcard the whole world sixty-four times a second and throw every byte away — so solo
+/// play has to hold *neither* role resource, and every consumer with a single-player mode then
+/// needs its own three-valued idea of who it is, because upstream's is two booleans that are both
+/// false. Both games that have a solo mode wrote that enum.
+///
+/// This crate cannot ask "is anyone listening" itself — it has no idea what a lobby is. So the
+/// transport layer answers, here, before anything is serialised.
+///
+/// **Absent means "unknown, send anyway".** A transport that does not maintain this behaves
+/// exactly as before, which is what makes adding it safe.
+#[derive(Resource, Default, Debug, Clone, Copy)]
+pub struct SnapshotRecipients(pub usize);
+
 /// Latest input-arrival margin (in ticks) per client, measured by the server:
 /// `input.tick - server_tick` at arrival. Sent to clients in each snapshot so they
 /// can size their prediction lead from the real thing (see [`WorldSnapshot`]).
@@ -62,6 +85,10 @@ impl<T: TickedInput> Plugin for TickedServerPlugin<T> {
             .add_systems(
                 Update,
                 reset_on_host::<T>.run_if(resource_added::<LocalServerPlayer>),
+            )
+            .add_systems(
+                Update,
+                crate::reset_on_leave::<T>.run_if(resource_removed::<LocalServerPlayer>),
             )
             .add_systems(
                 TickedLoop,
@@ -121,9 +148,14 @@ fn broadcast_snapshot(
     tick: Res<CurrentTick>,
     ticks_paused: Option<Res<TicksPaused>>,
     server_player: Option<Res<LocalServerPlayer>>,
+    recipients: Option<Res<SnapshotRecipients>>,
     mut commands: Commands,
 ) {
     if ticks_paused.is_some() || server_player.is_none() {
+        return;
+    }
+    // Before `build_snapshot`, which is the whole point. See [`SnapshotRecipients`].
+    if recipients.is_some_and(|recipients| recipients.0 == 0) {
         return;
     }
     commands.queue(BroadcastSnapshotCommand(tick.0));

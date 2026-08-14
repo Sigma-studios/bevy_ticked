@@ -9,6 +9,9 @@ pub use crate::{
         TickInterpolation, TickedInterpolation, TickedInterpolationPlugin, TickedInterpolationSet,
     },
     registry::{TickedAppExt, TickedComponent, TickedComponentRegistry},
+    resource_registry::{
+        ResourceActions, TickedResource, TickedResourceAppExt, TickedResourceRegistry,
+    },
     rollback::{rollback_and_resimulate, rollback_to_tick},
     tick::{
         CurrentTick, HISTORY_BUFFER_TICKS, HistoryBufferTicks, ResetToTick, StepBackward,
@@ -16,5 +19,6 @@ pub use crate::{
     },
     time::{run_tick_schedule, TickRateDilation, Ticked, TickedTime},
     tracked_entity::{TickTrackedEntity, TickTrackedEntityCounter},
+    tracked_index::TrackedEntityIndex,
     world_actions::WorldActions,
 };
