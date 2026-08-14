@@ -49,7 +49,11 @@ pub fn sync_lockstep_pause_state<A: LockstepAction, S: JoinSnapshot>(world: &mut
         let buffer = world.resource::<LockstepConfig>().host_tick_buffer;
 
         let required_participants: Vec<(u128, u64)> = world
-            .query::<(&LobbyParticipant, &LockstepLobbyParticipant, &LobbyParticipantOf)>()
+            .query::<(
+                &LobbyParticipant,
+                &LockstepLobbyParticipant,
+                &LobbyParticipantOf,
+            )>()
             .iter(world)
             .filter(|(_, lockstep, pof)| {
                 pof.0 == scoped_lobby && participant_is_required_for_tick(lockstep, next_tick)
@@ -70,9 +74,14 @@ pub fn sync_lockstep_pause_state<A: LockstepAction, S: JoinSnapshot>(world: &mut
             })
         }
     } else {
-        // Client: authoritative ticks from the host are already complete — if the
-        // tracker has any data for `next_tick`, all required players are covered.
-        // Checking per-player would deadlock when `ParticipantJoined` arrives
+        // Client: the question is "have I received tick N", and nothing finer. An
+        // authoritative tick is complete by construction — the host only broadcasts one it
+        // has already simulated — so the presence of the key is the whole answer, and
+        // `apply_authoritative_tick` guarantees the key exists for every tick received,
+        // including one nobody acted on. See `AuthoritativeTick`'s docs for why that has to
+        // be a stated invariant rather than an emergent one.
+        //
+        // Checking per-player instead would deadlock when `ParticipantJoined` arrives
         // before the authoritative ticks that include the new participant.
         let has_any_participant = world
             .query::<(&LockstepLobbyParticipant, &LobbyParticipantOf)>()
