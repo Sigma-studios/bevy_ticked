@@ -1,11 +1,9 @@
-use std::collections::HashMap;
 use std::marker::PhantomData;
 
 use bevy::prelude::*;
 
 use bevy_ticked::{
     TickedLoop, TickedSimulation, TickedSystems,
-    lifetimes::TrackedEntityLifetimes,
     registry::TickedComponentRegistry,
     tick::{CurrentTick, TicksPaused},
     time::{run_tick_schedule, TickRateDilation},
@@ -15,28 +13,8 @@ use bevy_ticked::{
 use crate::{
     input::{InputQueue, TickedInput},
     messages::{ReceivedNetworkSnapshot, SendNetworkInput},
-    snapshot::{apply_snapshot_with, SnapshotBaseline, WorldSnapshot},
+    snapshot::apply_snapshot,
 };
-
-/// Whether the client compares an arriving snapshot against its own prediction before rolling
-/// back to it.
-///
-/// On by default. When the two agree there is nothing to correct, so both the apply and the
-/// replay are skipped — which on a healthy connection is most snapshots, and each one skipped is
-/// a whole prediction lead of simulation not run.
-///
-/// The comparison costs one serialisation of the captured tick per snapshot, so a client whose
-/// prediction is *never* right pays about a tick's work to learn it. Turning it off is for
-/// measuring that, not for correctness: a mismatch of any kind, for any reason, takes the
-/// correction path.
-#[derive(Resource, Clone, Copy, Debug)]
-pub struct PredictionCheck(pub bool);
-
-impl Default for PredictionCheck {
-    fn default() -> Self {
-        Self(true)
-    }
-}
 
 /// Resource identifying the local player on the client.
 #[derive(Resource)]
@@ -134,8 +112,6 @@ impl<T: TickedInput> Plugin for TickedClientPlugin<T> {
     fn build(&self, app: &mut App) {
         crate::input::install_input_queue::<T>(app);
         app.init_resource::<ClientTickBuffer>()
-            .init_resource::<SnapshotBaseline>()
-            .init_resource::<PredictionCheck>()
             .add_message::<SnapshotApplied>()
             .add_observer(receive_snapshot)
             .add_systems(
@@ -186,12 +162,6 @@ fn reset_on_join<T: TickedInput>(world: &mut World) {
     world.insert_resource(TicksPaused);
     world.insert_resource(TickTrackedEntityCounter::default());
     world.resource_mut::<InputQueue<T>>().inputs.clear();
-    // The next session's deltas must not be decoded against the last one's state, and a baseline
-    // carried across is exactly that: it would silently supply components for entity ids that now
-    // belong to somebody else's world.
-    if let Some(mut baseline) = world.get_resource_mut::<SnapshotBaseline>() {
-        baseline.reset();
-    }
     let registry = world.resource::<TickedComponentRegistry>().clone();
     registry.clear_all(world);
 }
@@ -213,13 +183,6 @@ pub struct SnapshotApplied {
     pub tick: u64,
     /// True for the initial sync, false for a steady-state correction.
     pub first: bool,
-    /// Whether the world actually had to change.
-    ///
-    /// False when the snapshot agreed with what this client had already predicted, so nothing was
-    /// applied and nothing was replayed. Counting snapshots and counting corrections used to be
-    /// the same number; they are not any more, and a consumer reporting "corrections applied"
-    /// wants this one.
-    pub corrected: bool,
 }
 
 /// PreTick: if a server snapshot arrived, rollback and replay local inputs to now.
@@ -241,18 +204,6 @@ fn handle_server_snapshot<T: TickedInput>(world: &mut World) {
         return;
     }
 
-    // A delta is meaningless without the keyframe it is a delta from. This is the window a
-    // joiner sits in: it has a lobby and is receiving traffic, but the stream is mid-interval.
-    // Dropped rather than queued — the next keyframe is the sync, and the server can be asked
-    // for one immediately via `ForceKeyframe`.
-    if !pending.snapshot.keyframe
-        && !world
-            .get_resource::<SnapshotBaseline>()
-            .is_some_and(|baseline| baseline.primed())
-    {
-        return;
-    }
-
     let was_paused = world.get_resource::<TicksPaused>().is_some();
     let current_tick = world.resource::<CurrentTick>().0;
     let snapshot_tick = pending.snapshot.tick;
@@ -260,50 +211,14 @@ fn handle_server_snapshot<T: TickedInput>(world: &mut World) {
 
     let registry = world.resource::<TickedComponentRegistry>().clone();
 
-    // Fold the arrival into the baseline. On a keyframe stream this is a copy; on a delta stream
-    // it is where the full state for this tick is reconstituted. Either way what comes out is the
-    // complete component map, because the saving a delta buys is on the wire and not in here.
-    let mut baseline = world.remove_resource::<SnapshotBaseline>().unwrap_or_default();
-    let components = baseline.absorb(&pending.snapshot);
-    world.insert_resource(baseline);
-
-    // Did this snapshot say anything the client had not already worked out for itself?
-    //
-    // The comparison is the whole of the saving: on a healthy connection the answer is usually
-    // yes for the local player and often yes for everything else, and every yes skips a rollback
-    // and a full replay of the prediction lead. It is safe in the direction that matters — bytes
-    // that differ for any reason, including a float that landed differently on another machine,
-    // fall through to the correction path. What cross-machine float determinism costs is how
-    // *often* this fires, not whether it is right.
-    // `current_tick > snapshot_tick` is part of the question, not an optimisation: a client that
-    // has fallen behind the snapshot has to jump forward whatever its state says, and agreeing
-    // about a tick it has not reached yet is not agreement about anything.
-    let agreed = !was_paused
-        && current_tick > snapshot_tick
-        && world.resource::<PredictionCheck>().0
-        && snapshot_matches_prediction(world, &registry, &pending.snapshot, &components);
-
-    if agreed {
-        world.write_message(SnapshotApplied {
-            tick: snapshot_tick,
-            first: false,
-            corrected: false,
-        });
-        // The lead still has to be steered even when nothing was wrong, or a client that predicts
-        // perfectly never adapts its buffer and drifts until it stops predicting perfectly.
-        observe_and_converge(world, current_tick, snapshot_tick, &pending.snapshot);
-        return;
-    }
-
     // Apply the authoritative snapshot (sets CurrentTick to snapshot_tick)
-    apply_snapshot_with(world, &pending.snapshot, &components);
+    apply_snapshot(world, &pending.snapshot);
     // `was_paused` is exactly "this is the initial sync". It used to be computed
     // here, used to decide whether to skip ahead, and thrown away; consumers were
     // left to infer it from how far bodies moved.
     world.write_message(SnapshotApplied {
         tick: snapshot_tick,
         first: was_paused,
-        corrected: true,
     });
 
     if snapshot_tick >= current_tick {
@@ -353,72 +268,6 @@ fn handle_server_snapshot<T: TickedInput>(world: &mut World) {
         registry.capture_all(world, tick);
     }
     world.resource_mut::<CurrentTick>().0 = end_tick;
-}
-
-/// Whether the snapshot says anything this client had not already predicted.
-///
-/// Three things have to agree, and the order is cheapest-first:
-///
-/// 1. **The tick was captured here at all.** A client that never simulated the tick the snapshot
-///    describes has no prediction to compare, which is not agreement.
-/// 2. **Who existed.** A snapshot matching every component but disagreeing about the roster is
-///    still a correction — a zombie the host spawned carries no state on the tick it appears.
-/// 3. **What they held**, byte for byte, in the same encoding the server built the snapshot from.
-///
-/// Byte equality rather than `PartialEq` on the components, because the bytes are what actually
-/// crossed and comparing them needs no bound on the component type beyond the one it already has.
-fn snapshot_matches_prediction(
-    world: &mut World,
-    registry: &TickedComponentRegistry,
-    snapshot: &WorldSnapshot,
-    components: &HashMap<u16, HashMap<u64, Vec<u8>>>,
-) -> bool {
-    if !registry.has_tick_captured(world, snapshot.tick) {
-        return false;
-    }
-
-    if !snapshot.entities.is_empty() {
-        let predicted = world
-            .get_resource::<TrackedEntityLifetimes>()
-            .and_then(|lifetimes| lifetimes.at_tick(snapshot.tick))
-            .map(|alive| {
-                let mut ids: Vec<u64> = alive.iter().copied().collect();
-                ids.sort_unstable();
-                ids
-            });
-        if predicted.as_deref() != Some(snapshot.entities.as_slice()) {
-            return false;
-        }
-    }
-
-    registry.serialize_all(world, snapshot.tick) == *components
-}
-
-/// Steer the prediction lead without rolling anything back.
-///
-/// The convergence half of the correction path, for the case where there was nothing to correct.
-/// It deliberately does **not** touch [`CurrentTick`]: under [`TickRateDilation`] the lead is
-/// corrected by running a couple of percent fast or slow, which needs no tick moved, and under a
-/// fixed timestep the one-tick nudge is applied by replaying — which is exactly what agreeing
-/// means we are not going to do. A client that predicts perfectly for a long stretch therefore
-/// converges its lead only where converging is free, and takes the nudge on the next snapshot it
-/// gets wrong.
-fn observe_and_converge(
-    world: &mut World,
-    current_tick: u64,
-    snapshot_tick: u64,
-    snapshot: &WorldSnapshot,
-) {
-    let lead = current_tick.saturating_sub(snapshot_tick);
-    if let Some(uuid) = world.get_resource::<LocalClientPlayer>().map(|p| p.0) {
-        if let Some(&margin) = snapshot.input_margins.get(&uuid) {
-            world.resource_mut::<ClientTickBuffer>().observe(lead, margin);
-        }
-    }
-    let target = world.resource::<ClientTickBuffer>().target_ticks;
-    if let Some(mut dilation) = world.get_resource_mut::<TickRateDilation>() {
-        dilation.0 = dilation_for(lead as f64 - target as f64);
-    }
 }
 
 /// Largest deviation from the nominal tick rate used to steer the lead.
