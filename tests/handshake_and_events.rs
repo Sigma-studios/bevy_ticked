@@ -32,6 +32,39 @@ fn the_wire_hash_notices_a_reorder() {
     // registrations changes nothing that compiles, nothing that warns, and every
     // component read after the swap.
     let forward = registry(|app| {
+        app.register_ticked_component_as::<Position>("Position");
+        app.register_ticked_component_as::<Velocity>("Velocity");
+    });
+    let reversed = registry(|app| {
+        app.register_ticked_component_as::<Velocity>("Velocity");
+        app.register_ticked_component_as::<Position>("Position");
+    });
+
+    assert_ne!(
+        forward.wire_hash(),
+        reversed.wire_hash(),
+        "the same types in a different order must not hash the same"
+    );
+}
+
+/// The one reorder the hash deliberately cannot see, and the reason that is not a hole.
+///
+/// This test used to be the one above, registering both types unnamed. It stopped detecting the
+/// swap when `wire_hash` stopped folding `std::any::type_name` — which it had to, because that
+/// string is not specified across compiler versions and a handshake built on it fires on a rustc
+/// upgrade.
+///
+/// What is lost is nothing: an unnamed registration comes from `register_ticked_component`, which
+/// has no serialisation, so its index **never appears in a snapshot**. Two peers that disagree
+/// about which of two rollback-only types sits at index 3 disagree about nothing that crosses the
+/// wire. What still matters — a rollback-only type shifting the index of a *networked* one — moves
+/// that networked entry's position and is caught, which
+/// `an_extra_unnamed_registration_still_changes_the_hash` pins.
+///
+/// Name them with `register_ticked_component_as` and they are compared like anything else.
+#[test]
+fn swapping_two_rollback_only_types_is_invisible_and_harmless() {
+    let forward = registry(|app| {
         app.register_ticked_component::<Position>();
         app.register_ticked_component::<Velocity>();
     });
@@ -40,10 +73,10 @@ fn the_wire_hash_notices_a_reorder() {
         app.register_ticked_component::<Position>();
     });
 
-    assert_ne!(
+    assert_eq!(
         forward.wire_hash(),
         reversed.wire_hash(),
-        "the same types in a different order must not hash the same"
+        "neither index reaches a snapshot, so neither ordering is a wire format"
     );
 }
 

@@ -103,6 +103,9 @@ struct ResourceRegistryInner {
 #[derive(Clone)]
 struct RegisteredTickedResource {
     wire_name: &'static str,
+    /// Whether the name was given at registration or defaulted to `type_name`. See
+    /// [`TickedComponentRegistry::wire_hash`](crate::registry::TickedComponentRegistry::wire_hash).
+    named: bool,
     capture: fn(&mut World, u64),
     restore: fn(&mut World, u64),
     truncate_after: fn(&mut World, u64),
@@ -136,6 +139,7 @@ impl TickedResourceRegistry {
         let inner = Arc::make_mut(&mut self.inner);
         let type_id = TypeId::of::<R>();
         let tname = type_name::<R>();
+        let named = wire_name.is_some();
         let wire_name = wire_name.unwrap_or(tname);
 
         if inner.type_indices.contains_key(&type_id) {
@@ -151,6 +155,7 @@ impl TickedResourceRegistry {
 
         inner.entries.push(RegisteredTickedResource {
             wire_name,
+            named,
             capture: capture_resource::<R>,
             restore: restore_resource::<R>,
             truncate_after: truncate_resource::<R>,
@@ -171,6 +176,29 @@ impl TickedResourceRegistry {
     /// As with components, that order **is** a wire format.
     pub fn wire_names(&self) -> impl ExactSizeIterator<Item = &'static str> + '_ {
         self.inner.entries.iter().map(|entry| entry.wire_name)
+    }
+
+    /// A hash of `(index, wire_name)` for every registered resource.
+    ///
+    /// The same scheme as [`TickedComponentRegistry::wire_hash`], including the sentinel for an
+    /// entry whose name defaulted to `type_name`, and **a separate number**: resources have their
+    /// own index space, so a peer that agrees about components can still disagree here. A
+    /// handshake that compared only one of the two would validate the half that changes least.
+    ///
+    /// [`TickedComponentRegistry::wire_hash`]: crate::registry::TickedComponentRegistry::wire_hash
+    pub fn wire_hash(&self) -> u64 {
+        self.inner
+            .entries
+            .iter()
+            .enumerate()
+            .fold(crate::registry::FNV_OFFSET, |hash, (index, entry)| {
+                let hash = crate::registry::fnv_fold(hash, &(index as u16).to_le_bytes());
+                if entry.named {
+                    crate::registry::fnv_fold(hash, entry.wire_name.as_bytes())
+                } else {
+                    crate::registry::fnv_fold(hash, crate::registry::UNNAMED_SENTINEL)
+                }
+            })
     }
 
     pub fn len(&self) -> usize {

@@ -44,6 +44,8 @@ use bevy_ticked::prelude::*;
 use bevy_ticked_networking::client::LocalClientPlayer;
 use bevy_ticked_networking::server::{LocalServerPlayer, SnapshotRecipients};
 
+use crate::handshake::RegistryMismatch;
+
 /// Adopt and release the ticked role from the ensemble lobby, and keep
 /// [`SnapshotRecipients`] current.
 ///
@@ -53,10 +55,12 @@ pub struct TickedEnsembleSessionPlugin;
 
 impl Plugin for TickedEnsembleSessionPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<SnapshotRecipients>().add_systems(
-            Update,
-            (adopt_role, release_role, count_recipients).chain(),
-        );
+        app.init_resource::<SnapshotRecipients>()
+            .add_plugins(crate::handshake::plugin)
+            .add_systems(
+                Update,
+                (adopt_role, release_role, forget_mismatch, count_recipients).chain(),
+            );
     }
 }
 
@@ -104,11 +108,16 @@ fn adopt_role(
     local_player: Option<Res<LocalMultiplayerPlayerId>>,
     server: Option<Res<LocalServerPlayer>>,
     client: Option<Res<LocalClientPlayer>>,
+    mismatch: Option<Res<RegistryMismatch>>,
     tracked: Query<Entity, With<TickTrackedEntity>>,
     hosting: Query<(), (With<Host>, Or<(With<Lobby>, With<PendingLobby>)>)>,
     joined: Query<(), (Without<Host>, Or<(With<Lobby>, With<PendingLobby>)>)>,
 ) {
     if server.is_some() || client.is_some() {
+        return;
+    }
+    // A session this peer cannot speak the language of does not get retried at frame rate.
+    if mismatch.is_some() {
         return;
     }
     let Some(local_player) = local_player else {
@@ -156,6 +165,20 @@ fn release_role(
     // `reset_on_leave` does the rest, keyed off these being removed.
     commands.remove_resource::<LocalServerPlayer>();
     commands.remove_resource::<LocalClientPlayer>();
+}
+
+/// Forget a registry mismatch once the lobby it belonged to is gone.
+///
+/// Joining a *different* lobby is allowed to try again — the peer on the other end of that one may
+/// well have been built from the same commit as this.
+fn forget_mismatch(
+    mut commands: Commands,
+    mismatch: Option<Res<RegistryMismatch>>,
+    lobbies: Query<(), Or<(With<Lobby>, With<PendingLobby>)>>,
+) {
+    if mismatch.is_some() && lobbies.is_empty() {
+        commands.remove_resource::<RegistryMismatch>();
+    }
 }
 
 /// How many peers a snapshot would reach, for [`SnapshotRecipients`].

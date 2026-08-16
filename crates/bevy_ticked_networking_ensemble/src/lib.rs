@@ -1,5 +1,7 @@
+pub mod handshake;
 pub mod session;
 
+pub use handshake::{RegistryMismatch, TickedRegistryHandshake};
 pub use session::{
     is_authoritative, is_solo, may_spawn_tracked, TickedEnsembleSessionPlugin,
 };
