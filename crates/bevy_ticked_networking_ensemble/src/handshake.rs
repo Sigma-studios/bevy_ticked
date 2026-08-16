@@ -33,6 +33,7 @@
 //! lobby entirely — otherwise `adopt_role` would take the role straight back and the pair would
 //! flap at frame rate.
 
+use bevy::platform::collections::HashSet;
 use bevy::prelude::*;
 use bevy_ensemble::prelude::*;
 use bevy_ticked::prelude::*;
@@ -87,36 +88,60 @@ pub(crate) fn plugin(app: &mut App) {
         .add_systems(Update, (announce_registry, check_registry).chain());
 }
 
-/// Tell the lobby what our registries look like, once per lobby.
+/// Tell each peer what our registries look like, once each.
 ///
-/// On an edge rather than every frame, and keyed on the lobby *entity* rather than a bool, so that
-/// leaving one session and joining another announces again — a different lobby has been told
-/// nothing.
+/// # Once per *recipient*, not once per lobby
+///
+/// The obvious version sends to the lobby entity the first time one exists, and it is wrong on a
+/// host in a way that testing against a matching pair cannot show. A host's lobby entity exists
+/// from the moment it starts hosting — before any client has connected — so a single broadcast
+/// there goes to nobody, and every client that joins afterwards is never told. Only the
+/// client→host direction worked, which was enough to *detect* a mismatch (the host always receives)
+/// but left the client sitting in a session that had quietly ended, with no snapshots and no
+/// reason given.
+///
+/// So the address is the recipient: a client tells the lobby, which is the host; a host tells each
+/// [`LobbyClient`] as it appears. `told` is keyed by entity so that leaving one session and joining
+/// another announces again — a new peer has been told nothing.
 ///
 /// `SendMode::Reliable`: this is the one message in this crate that must not be dropped. An
 /// unreliable handshake that goes missing is a session that silently keeps the protection it was
 /// supposed to have proved.
-fn announce_registry(world: &mut World, mut told: Local<Option<Entity>>) {
-    let lobby = {
+fn announce_registry(world: &mut World, mut told: Local<HashSet<Entity>>) {
+    let hosting = {
+        let mut hosts = world.query_filtered::<Entity, (With<Lobby>, With<Host>)>();
+        hosts.iter(world).next().is_some()
+    };
+
+    let recipients: Vec<Entity> = if hosting {
+        let mut clients = world.query_filtered::<Entity, With<LobbyClient>>();
+        clients.iter(world).collect()
+    } else {
         let mut lobbies = world.query_filtered::<Entity, With<Lobby>>();
-        lobbies.iter(world).next()
+        lobbies.iter(world).collect()
     };
-    let Some(lobby) = lobby else {
-        *told = None;
-        return;
-    };
-    if *told == Some(lobby) {
+
+    // Forget peers that have gone, so a reused entity id is told again rather than assumed told.
+    told.retain(|entity| recipients.contains(entity));
+
+    let fresh: Vec<Entity> = recipients
+        .into_iter()
+        .filter(|entity| !told.contains(entity))
+        .collect();
+    if fresh.is_empty() {
         return;
     }
     let Some(ours) = TickedRegistryHandshake::of(world) else {
         return;
     };
-    *told = Some(lobby);
-    world.commands().entity(lobby).trigger(move |entity| LobbyMessage {
-        entity,
-        message: ours,
-        send_mode: SendMode::Reliable,
-    });
+    for entity in fresh {
+        told.insert(entity);
+        world.commands().entity(entity).trigger(move |entity| LobbyMessage {
+            entity,
+            message: ours,
+            send_mode: SendMode::Reliable,
+        });
+    }
 }
 
 /// Compare what arrived against what we hold, and end the session if they differ.
