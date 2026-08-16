@@ -11,6 +11,22 @@ use crate::{
     world_actions::WorldActions,
 };
 
+/// FNV-1a starting value, shared by every registry hash so that the two index spaces are folded
+/// the same way and a reader can reason about one from the other.
+pub(crate) const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+/// What an entry with no explicit wire name contributes instead of its `type_name`.
+pub(crate) const UNNAMED_SENTINEL: &[u8] = b"<unnamed>";
+
+pub(crate) fn fnv_fold(mut hash: u64, bytes: &[u8]) -> u64 {
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
+}
+
 /// Trait bound for components that can be tracked by the tick system.
 ///
 /// Only requires Clone for capture/restore. Automatically implemented.
@@ -55,6 +71,9 @@ struct RegisteredTickedComponent {
     /// rustc upgrade — a loud error for a non-problem, which is how a check gets
     /// ignored within a week.
     wire_name: &'static str,
+    /// Whether [`wire_name`](Self::wire_name) was given at registration or defaulted to
+    /// `type_name`. Only an explicit one may enter [`TickedComponentRegistry::wire_hash`].
+    named: bool,
     capture: fn(&mut World, u64),
     restore: fn(&mut World, u64),
     truncate_after: fn(&mut World, u64),
@@ -73,6 +92,12 @@ struct RegisteredTickedComponent {
 impl TickedComponentRegistry {
     pub fn register<T: TickedComponent>(&mut self) {
         self.register_inner::<T>(None, None, None, None);
+    }
+
+    /// Register for rollback with a stable wire name. See
+    /// [`TickedAppExt::register_ticked_component_as`].
+    pub fn register_as<T: TickedComponent>(&mut self, wire_name: &'static str) {
+        self.register_inner::<T>(Some(wire_name), None, None, None);
     }
 
     /// Register with serialization support. Called by the networking crate.
@@ -101,6 +126,7 @@ impl TickedComponentRegistry {
         let inner = Arc::make_mut(&mut self.inner);
         let type_id = TypeId::of::<T>();
         let tname = type_name::<T>();
+        let named = wire_name.is_some();
         let wire_name = wire_name.unwrap_or(tname);
 
         if inner.type_indices.contains_key(&type_id) {
@@ -116,6 +142,7 @@ impl TickedComponentRegistry {
 
         inner.entries.push(RegisteredTickedComponent {
             wire_name,
+            named,
             capture: capture_component::<T>,
             restore: restore_component::<T>,
             truncate_after: truncate_component::<T>,
@@ -154,23 +181,36 @@ impl TickedComponentRegistry {
     ///
     /// FNV-1a over the names with their positions folded in, so a reorder changes
     /// the hash even though the multiset of names has not.
+    ///
+    /// # Why an unnamed type contributes its position but not its name
+    ///
+    /// [`register_ticked_component`] defaults `wire_name` to `std::any::type_name`, whose output
+    /// is explicitly not specified across compiler versions. Folding that in would make two peers
+    /// built on different rustc releases report disagreeing registries when they agree perfectly
+    /// — a loud error for a non-problem, which is how a check gets switched off.
+    ///
+    /// Skipping such entries outright would be worse than useless: an extra unnamed type on one
+    /// peer shifts every index after it, which is exactly the corruption this exists to catch, and
+    /// the hashes would still match. So an unnamed entry folds its index and a fixed sentinel.
+    /// **Position always counts; an unstable string never does.**
+    ///
+    /// Give a rollback-only type a stable name with [`register_ticked_component_as`] and it
+    /// contributes properly.
+    ///
+    /// [`register_ticked_component`]: TickedAppExt::register_ticked_component
+    /// [`register_ticked_component_as`]: TickedAppExt::register_ticked_component_as
     pub fn wire_hash(&self) -> u64 {
-        const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-        const PRIME: u64 = 0x0000_0100_0000_01b3;
-        fn fold(mut hash: u64, bytes: &[u8]) -> u64 {
-            for byte in bytes {
-                hash ^= u64::from(*byte);
-                hash = hash.wrapping_mul(PRIME);
-            }
-            hash
-        }
         self.inner
             .entries
             .iter()
             .enumerate()
-            .fold(OFFSET, |hash, (index, entry)| {
-                let hash = fold(hash, &(index as u16).to_le_bytes());
-                fold(hash, entry.wire_name.as_bytes())
+            .fold(FNV_OFFSET, |hash, (index, entry)| {
+                let hash = fnv_fold(hash, &(index as u16).to_le_bytes());
+                if entry.named {
+                    fnv_fold(hash, entry.wire_name.as_bytes())
+                } else {
+                    fnv_fold(hash, UNNAMED_SENTINEL)
+                }
             })
     }
 
@@ -365,7 +405,25 @@ impl TickedComponentRegistry {
 /// Extension trait for registering ticked components on the App.
 pub trait TickedAppExt {
     /// Register a component for tick-based state tracking.
+    ///
+    /// Rolled back, never sent. The type contributes its *position* to
+    /// [`wire_hash`](TickedComponentRegistry::wire_hash) but not its name — see
+    /// [`register_ticked_component_as`](Self::register_ticked_component_as) for why that is worth
+    /// changing on anything long-lived.
     fn register_ticked_component<T: TickedComponent>(&mut self) -> &mut Self;
+
+    /// As [`register_ticked_component`](Self::register_ticked_component), with a stable wire name.
+    ///
+    /// The networked path has had this since the registration handshake existed, and the
+    /// rollback-only path did not — so the one kind of type that *could not* opt out of
+    /// `std::any::type_name` was hashed under it. That is why `wire_hash` folds a sentinel for an
+    /// unnamed entry rather than its name, and why anything meant to outlive a single build should
+    /// be registered through here instead: a named entry makes the handshake able to say *which*
+    /// registration differs, rather than only that the shapes do.
+    fn register_ticked_component_as<T: TickedComponent>(
+        &mut self,
+        wire_name: &'static str,
+    ) -> &mut Self;
 }
 
 impl TickedAppExt for App {
@@ -374,6 +432,17 @@ impl TickedAppExt for App {
         self.init_resource::<WorldActions<T>>();
         let mut registry = self.world_mut().resource_mut::<TickedComponentRegistry>();
         registry.register::<T>();
+        self
+    }
+
+    fn register_ticked_component_as<T: TickedComponent>(
+        &mut self,
+        wire_name: &'static str,
+    ) -> &mut Self {
+        self.init_resource::<TickedComponentRegistry>();
+        self.init_resource::<WorldActions<T>>();
+        let mut registry = self.world_mut().resource_mut::<TickedComponentRegistry>();
+        registry.register_as::<T>(wire_name);
         self
     }
 }
