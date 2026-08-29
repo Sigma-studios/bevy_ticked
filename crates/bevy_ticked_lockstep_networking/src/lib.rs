@@ -2,6 +2,7 @@ pub mod actions;
 pub mod adaptive_buffer;
 pub mod authoritative;
 pub mod checksum;
+pub mod checksum_exchange;
 pub mod join;
 pub mod messages;
 pub mod participants;
@@ -22,6 +23,9 @@ pub use authoritative::{
     tracker_has_actions_for_player,
 };
 pub use checksum::{ChecksumLog, ChecksumLogPlugin, Divergence, WorldHash, record_checksum};
+pub use checksum_exchange::{
+    ChecksumExchangePlugin, ChecksumReport, Desync, DesyncDetected, PendingChecksumReports,
+};
 pub use join::{
     flush_provided_join_snapshots, receive_join_snapshot_requests, receive_join_snapshot_responses,
     request_join_snapshot_on_client_join, send_client_loaded_after_snapshot_applied,

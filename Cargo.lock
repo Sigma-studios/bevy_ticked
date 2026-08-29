@@ -1013,7 +1013,7 @@ dependencies = [
 [[package]]
 name = "bevy_ensemble"
 version = "0.1.0"
-source = "git+https://github.com/Sigma-studios/bevy_ensemble?branch=master#990331835cb80b39103ab6e5966c8c28e0ce5474"
+source = "git+https://github.com/Sigma-studios/bevy_ensemble?branch=master#552df9cb33fddb7fae87787ddd59c2afd5db9701"
 dependencies = [
  "bevy",
  "postcard",
@@ -1021,12 +1021,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "bevy_ensemble_loopback"
+version = "0.1.0"
+source = "git+https://github.com/Sigma-studios/bevy_ensemble?branch=master#552df9cb33fddb7fae87787ddd59c2afd5db9701"
+dependencies = [
+ "bevy",
+ "bevy_ensemble",
+]
+
+[[package]]
 name = "bevy_ensemble_sockets"
 version = "0.1.0"
-source = "git+https://github.com/Sigma-studios/bevy_ensemble?branch=master#990331835cb80b39103ab6e5966c8c28e0ce5474"
+source = "git+https://github.com/Sigma-studios/bevy_ensemble?branch=master#552df9cb33fddb7fae87787ddd59c2afd5db9701"
 dependencies = [
  "bytes",
  "js-sys",
+ "log",
  "serde",
  "serde-wasm-bindgen",
  "serde_json",
@@ -1040,7 +1050,7 @@ dependencies = [
 [[package]]
 name = "bevy_ensemble_steam"
 version = "0.1.0"
-source = "git+https://github.com/Sigma-studios/bevy_ensemble?branch=master#990331835cb80b39103ab6e5966c8c28e0ce5474"
+source = "git+https://github.com/Sigma-studios/bevy_ensemble?branch=master#552df9cb33fddb7fae87787ddd59c2afd5db9701"
 dependencies = [
  "bevy",
  "bevy-steamworks",
@@ -1052,7 +1062,7 @@ dependencies = [
 [[package]]
 name = "bevy_ensemble_webrtc"
 version = "0.1.0"
-source = "git+https://github.com/Sigma-studios/bevy_ensemble?branch=master#990331835cb80b39103ab6e5966c8c28e0ce5474"
+source = "git+https://github.com/Sigma-studios/bevy_ensemble?branch=master#552df9cb33fddb7fae87787ddd59c2afd5db9701"
 dependencies = [
  "async-tungstenite",
  "bevy",
@@ -1930,6 +1940,7 @@ dependencies = [
  "avian2d",
  "bevy",
  "bevy_ensemble",
+ "bevy_ensemble_loopback",
  "bevy_ensemble_steam",
  "bevy_ensemble_webrtc",
  "bevy_ticked",
