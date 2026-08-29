@@ -15,7 +15,7 @@ use crate::{
     send_client_loaded_after_snapshot_applied, sync_lockstep_pause_state,
 };
 use bevy::prelude::*;
-use bevy_ensemble::{EnsembleAppExt, Lobby};
+use bevy_ensemble::{EnsembleAppExt, EnsembleSet, Lobby};
 use bevy_ticked::{TickedLoop, TickedSystems};
 use std::marker::PhantomData;
 
@@ -160,12 +160,38 @@ where
                     apply_received_participants,
                     apply_pending_lockstep_participants.after(apply_received_participants),
                     broadcast_buffered_authoritative_actions_to_loaded_clients::<A>,
+                    reset_lockstep_state_on_lobby_removed::<A, S>,
+                ),
+            )
+            // In `PreUpdate`, and this is the whole point of them being here rather than in
+            // `Update` with everything else.
+            //
+            // Bevy's frame runs `First`, `PreUpdate`, `RunFixedMainLoop`, `Update`. The backend
+            // drains the socket in `PreUpdate` (`EnsembleSet::ReceivePackets`), and the tick loop
+            // is inside `RunFixedMainLoop` — so a reader in `Update` sees a packet only *after*
+            // every fixed step of the frame it arrived in has already decided whether to pause.
+            //
+            // That is a whole frame of latency added to each direction, on the two messages the
+            // pause check blocks on. The host had a client's actions sitting in the message queue
+            // and stalled anyway; the client had the authoritative tick and waited. At 60fps it is
+            // ~16.7ms each way, roughly 33ms on the round trip — against the ~12ms of slack a
+            // 50ms link leaves at `host_tick_buffer` 6. It is also invisible to the buffer
+            // controller, because `PeerRtt` measures the socket seam and this happens above it.
+            //
+            // Nothing else moves: the join handshake above is not on the per-tick critical path,
+            // and a frame either way there is not worth the reordering.
+            .add_systems(
+                PreUpdate,
+                (
                     receive_client_actions::<A>,
+                    // Still before `receive_authoritative_actions`, so a tick that arrives in the
+                    // same frame the stash drains lands after the stashed ones rather than in the
+                    // middle of them.
                     replay_stashed_authoritative_actions::<A, S>
                         .before(receive_authoritative_actions::<A, S>),
                     receive_authoritative_actions::<A, S>,
-                    reset_lockstep_state_on_lobby_removed::<A, S>,
-                ),
+                )
+                    .after(EnsembleSet::ReceivePackets),
             );
     }
 }
