@@ -48,7 +48,7 @@
 //! something to size headroom from; a real transport's ping does the same thing by measuring.
 
 use bevy::prelude::*;
-use bevy_ensemble::{Host, Lobby, LobbyClient, PeerRtt};
+use bevy_ensemble::{Host, Lobby, LobbyClient, PeerRtt, PeerRttJitter};
 use bevy_ticked::prelude::SECONDS_PER_TICK;
 
 use crate::LockstepConfig;
@@ -84,14 +84,26 @@ pub struct AdaptiveBufferTuning {
     pub rtt_factor: f32,
     /// Ticks added on top, flat.
     ///
-    /// The measured relation is `tick rate ≈ buffer / (rtt_in_ticks + 2)`, not
-    /// `buffer / rtt_in_ticks`: a peer spends one tick on each side scheduling and applying, on
-    /// top of the wire time. Those two ticks do not shrink when the link is good, so a buffer
-    /// aimed at the RTT alone falls *further* short the better the connection — 50% of real time
-    /// on a LAN, 97% on satellite.
+    /// This was 2, and it was covering two different things — only one of which was ever real
+    /// overhead.
     ///
-    /// This is the knob that fixes that, and it costs two ticks (~31 ms) of input latency to do
-    /// it.
+    /// The first was a peer reading a packet a frame after it landed, because the lockstep
+    /// receivers sat in `Update` while the backend drains the socket in `PreUpdate` and the tick
+    /// loop runs between them. That is a whole frame in each direction and it is now gone; the
+    /// receivers moved. Measured on a steady link, `extra_ticks: 0` used to fall to 48 Hz on 4G
+    /// and now holds 64 Hz from LAN to satellite.
+    ///
+    /// The second was jitter headroom, which it supplied by accident while the term meant to
+    /// supply it read a pre-smoothed series and came out at approximately zero. That term takes
+    /// [`PeerRttJitter`] now, so the headroom is sized from the spread instead of from a constant
+    /// that happened to be about the right size on the links somebody tried.
+    ///
+    /// What is left is one tick of slop, and it is deliberately not zero. The measurement says
+    /// zero holds a full 64 Hz even on badly jittering links — but it is taken on
+    /// `bevy_ensemble_loopback`, which runs exactly one tick per frame. A real client renders at
+    /// 60 fps against a 64 Hz tick, so its frames and its ticks drift through each other, and a
+    /// frame that spikes has nowhere to be absorbed. One tick is ~16 ms against a symptom that
+    /// costs a visible stutter; set it to 0 if you have measured your own frame pacing.
     pub extra_ticks: u64,
     /// Hard ceiling on the buffer, in ticks.
     ///
@@ -104,12 +116,11 @@ impl Default for AdaptiveBufferTuning {
     fn default() -> Self {
         Self {
             rtt_factor: 1.0,
-            // Measured, not guessed. Two ticks is what the round trip costs on top of the wire,
-            // and covering it takes every link from a LAN to a satellite to a flat 64 Hz. It is
-            // close to free in the currency that matters — from 4G onwards it *lowers* felt
-            // latency, because the ticks a lagging simulation is made of are themselves longer in
-            // wall-clock seconds.
-            extra_ticks: 2,
+            // One, down from two. See the field docs: one of those two ticks was a frame of
+            // scheduling latency that has been removed rather than compensated for, and the other
+            // was jitter headroom now sized from a real measurement. What remains is slop for a
+            // frame rate that does not divide the tick rate.
+            extra_ticks: 1,
             // Past ~440 ms RTT the buffer can no longer reach the round trip and the whole
             // simulation runs slower than real time. Capping at 30 did not save the player any
             // input latency — at 1 s RTT they waited 1065 ms either way — it only decided whether
@@ -122,8 +133,6 @@ impl Default for AdaptiveBufferTuning {
 /// EMA smoothing for the RTT estimate. Low enough that a single spike barely moves the buffer,
 /// high enough to follow a genuine latency shift within a second or so.
 const RTT_ALPHA: f32 = 0.15;
-/// EMA smoothing for the jitter (RTT mean deviation) estimate.
-const JITTER_ALPHA: f32 = 0.15;
 /// How many multiples of the jitter estimate to add as headroom, so an occasional late packet
 /// still lands before its scheduled tick.
 const JITTER_SAFETY: f32 = 2.0;
@@ -145,7 +154,9 @@ const SHRINK_COOLDOWN_FRAMES: u32 = 120;
 #[derive(Resource, Default)]
 pub struct AdaptiveBufferState {
     ema_rtt: Option<f32>,
-    ema_jitter: f32,
+    /// The spread the transport reported, as published. Not smoothed again here — see
+    /// [`update_estimates`].
+    jitter: f32,
     frames_since_shrink: u32,
 }
 
@@ -174,18 +185,28 @@ impl Plugin for AdaptiveTickBufferPlugin {
 /// buffer, for the rest of the session.
 ///
 /// Bevy's change detection answers the question actually being asked, so that is what decides now.
-fn update_estimates(state: &mut AdaptiveBufferState, raw_rtt: f32) {
-    match state.ema_rtt {
-        None => {
-            state.ema_rtt = Some(raw_rtt);
-            state.ema_jitter = 0.0;
-        }
-        Some(prev) => {
-            let deviation = (raw_rtt - prev).abs();
-            state.ema_jitter = JITTER_ALPHA * deviation + (1.0 - JITTER_ALPHA) * state.ema_jitter;
-            state.ema_rtt = Some(RTT_ALPHA * raw_rtt + (1.0 - RTT_ALPHA) * prev);
-        }
-    }
+///
+/// # The jitter is taken, not derived
+///
+/// It used to be computed here, as an EMA of `(raw_rtt - previous_ema).abs()`. That looks like a
+/// jitter estimate and is not one, because [`PeerRtt`] is *already smoothed by the transport*: its
+/// variation is the smoothed signal's variation, which is the thing the smoothing removed. A
+/// second EMA on top of that, fed once a second, converged to roughly zero on links with tens of
+/// milliseconds of genuine spread — so `JITTER_SAFETY * jitter` contributed nothing and the buffer
+/// carried no headroom at all, while `rtt_factor: 1.0` left it break-even by design.
+///
+/// What made it survive is that it was invisible from a test: `bevy_ensemble_loopback` published
+/// `PeerRtt` itself, resampling the link's jitter every frame, so the derived estimate worked
+/// perfectly in the harness and only failed on a real transport, where the ping smooths first.
+///
+/// Only the transport sees raw samples, so only the transport can measure this. It arrives as
+/// [`PeerRttJitter`] and is used as given.
+fn update_estimates(state: &mut AdaptiveBufferState, raw_rtt: f32, jitter: f32) {
+    state.jitter = jitter;
+    state.ema_rtt = Some(match state.ema_rtt {
+        None => raw_rtt,
+        Some(prev) => RTT_ALPHA * raw_rtt + (1.0 - RTT_ALPHA) * prev,
+    });
 }
 
 /// Buffer size (in ticks) the current estimates call for.
@@ -197,7 +218,7 @@ fn target_buffer(state: &AdaptiveBufferState, tuning: &AdaptiveBufferTuning) -> 
     //
     // `rtt_factor` of 1.0 makes this exactly break-even, which is why a session sits fractionally
     // under full tick rate on a steady link and dips below it whenever the link is not steady.
-    let latency = tuning.rtt_factor * ema_rtt + JITTER_SAFETY * state.ema_jitter;
+    let latency = tuning.rtt_factor * ema_rtt + JITTER_SAFETY * state.jitter;
     let ticks = (latency / SECONDS_PER_TICK).ceil() as u64 + tuning.extra_ticks;
     Some(ticks.clamp(MIN_BUFFER, tuning.max_buffer))
 }
@@ -235,38 +256,52 @@ fn adapt_tick_buffer(
     mut state: ResMut<AdaptiveBufferState>,
     tuning: Res<AdaptiveBufferTuning>,
     host_lobby: Query<(), (With<Lobby>, With<Host>)>,
-    client_lobby_rtt: Query<Ref<PeerRtt>, (With<Lobby>, Without<Host>)>,
-    client_peers: Query<Ref<PeerRtt>, With<LobbyClient>>,
+    client_lobby_rtt: Query<(Ref<PeerRtt>, Option<&PeerRttJitter>), (With<Lobby>, Without<Host>)>,
+    client_peers: Query<(Ref<PeerRtt>, Option<&PeerRttJitter>), With<LobbyClient>>,
 ) {
     let is_host = !host_lobby.is_empty();
 
     // `Ref` rather than `&` so `is_changed` can say whether this is a *new* ping or the same one
     // being read again on the next frame — see `update_estimates`.
+    //
+    // A backend that publishes no `PeerRttJitter` gets no jitter headroom rather than a guess.
+    // That is the honest reading of "this transport does not measure spread", and it is what every
+    // backend effectively had before it was measured at all.
     let sample = if is_host {
-        // The host must keep up with its slowest peer.
+        // The host must keep up with its slowest peer — and cover its *least steady* one, which
+        // need not be the same peer. Taking the worst of each independently is deliberate: a
+        // buffer sized for the slow link and the steady link's spread stalls on the jittery one.
         client_peers
             .iter()
-            .fold(None::<(f64, bool)>, |slowest, rtt| {
+            .fold(None::<(f64, f64, bool)>, |worst, (rtt, jitter)| {
+                let jitter = jitter.map_or(0.0, |jitter| jitter.0);
                 let fresh = rtt.is_changed();
-                Some(match slowest {
-                    None => (rtt.0, fresh),
-                    Some((worst, was_fresh)) => (worst.max(rtt.0), was_fresh || fresh),
+                Some(match worst {
+                    None => (rtt.0, jitter, fresh),
+                    Some((worst_rtt, worst_jitter, was_fresh)) => (
+                        worst_rtt.max(rtt.0),
+                        worst_jitter.max(jitter),
+                        was_fresh || fresh,
+                    ),
                 })
             })
     } else {
-        client_lobby_rtt
-            .iter()
-            .next()
-            .map(|rtt| (rtt.0, rtt.is_changed()))
+        client_lobby_rtt.iter().next().map(|(rtt, jitter)| {
+            (
+                rtt.0,
+                jitter.map_or(0.0, |jitter| jitter.0),
+                rtt.is_changed(),
+            )
+        })
     };
 
-    let Some((raw_rtt, is_fresh_sample)) = sample else {
+    let Some((raw_rtt, raw_jitter, is_fresh_sample)) = sample else {
         // Single-player, or no RTT sample yet: leave the configured buffer as-is.
         return;
     };
 
     if is_fresh_sample {
-        update_estimates(&mut state, raw_rtt as f32);
+        update_estimates(&mut state, raw_rtt as f32, raw_jitter as f32);
     }
     let Some(target) = target_buffer(&state, &tuning) else {
         return;
@@ -291,7 +326,7 @@ mod tests {
     #[test]
     fn a_perfect_link_still_buffers_the_scheduling_overhead() {
         let mut state = AdaptiveBufferState::default();
-        update_estimates(&mut state, 0.0);
+        update_estimates(&mut state, 0.0, 0.0);
 
         assert_eq!(
             target_buffer(&state, &tuning()),
@@ -304,9 +339,9 @@ mod tests {
     #[test]
     fn the_estimate_converges_on_a_steady_link() {
         let mut state = AdaptiveBufferState::default();
-        update_estimates(&mut state, 5.0);
+        update_estimates(&mut state, 5.0, 0.0);
         for _ in 0..200 {
-            update_estimates(&mut state, 0.010);
+            update_estimates(&mut state, 0.010, 0.0);
         }
 
         let ema_rtt = state.ema_rtt.expect("a sample was integrated");
@@ -339,14 +374,14 @@ mod tests {
         let steady = {
             let mut state = AdaptiveBufferState::default();
             for _ in 0..200 {
-                update_estimates(&mut state, 0.100);
+                update_estimates(&mut state, 0.100, 0.0);
             }
             target_buffer(&state, &tuning()).expect("a sample was integrated")
         };
         let jittery = {
             let mut state = AdaptiveBufferState::default();
-            for sample in 0..200 {
-                update_estimates(&mut state, if sample % 2 == 0 { 0.060 } else { 0.140 });
+            for _ in 0..200 {
+                update_estimates(&mut state, 0.100, 0.040);
             }
             target_buffer(&state, &tuning()).expect("a sample was integrated")
         };
@@ -356,5 +391,17 @@ mod tests {
             "two links averaging 100 ms sized the same buffer ({jittery} vs {steady}) — the \
              point of the jitter term is that the unsteady one needs more"
         );
+    }
+
+    #[test]
+    fn a_transport_that_reports_no_spread_gets_no_headroom_rather_than_a_guess() {
+        // The failure this replaces did not look like this. It reported a *number*, derived from
+        // an already-smoothed series, that was near zero on links with real spread — so it read
+        // as "measured, and small" when it meant "not measured". Absence is now absence.
+        let mut state = AdaptiveBufferState::default();
+        for _ in 0..200 {
+            update_estimates(&mut state, 0.100, 0.0);
+        }
+        assert_eq!(state.jitter, 0.0);
     }
 }
