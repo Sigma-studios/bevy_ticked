@@ -1,7 +1,7 @@
 use crate::{
     ActionTracker, AuthoritativeTick, ClientSnapshotState, LastBroadcastTick, LockstepAction,
     LockstepConfig, LockstepLobbyParticipant, PendingClientJoins, StashedAuthoritativeTicks,
-    insert_actions_into_tracker, participant_is_required_for_tick,
+    participant_is_required_for_tick,
 };
 use bevy::prelude::*;
 use bevy_ensemble::{
@@ -224,19 +224,38 @@ pub fn replay_stashed_authoritative_actions<A: LockstepAction, S: crate::JoinSna
 /// required from `joined_at_tick` onwards, so the host's own entry is always in there. That is a
 /// liveness guarantee resting on the definition of "required participant", one edit away from
 /// spectators or a mid-session leave. Registering the key here does not depend on it.
+///
+/// # Why this replaces where [`insert_actions_into_tracker`] merges
+///
+/// Because a client is told the same tick twice, routinely, and the two functions are answering
+/// different questions.
+///
+/// Merging is right on the host's inbound path: two batches for one tick are two *partial*
+/// statements — a shrinking buffer makes consecutive flushes target the same tick — and dropping
+/// either loses input. An [`AuthoritativeTick`] is not partial. It is the host's complete ruling
+/// on a tick, so a second copy of it is the same ruling, and applying it must leave the tracker
+/// where the first one did.
+///
+/// It arrives twice on every join. A client stashes authoritative ticks while its snapshot is in
+/// flight, replays them once it is ready, and the host *separately* sends
+/// [`broadcast_buffered_authoritative_actions_to_loaded_clients`] covering `snapshot_tick + 1`
+/// onwards — so everything between the snapshot and `ClientLoaded` reaching the host is delivered
+/// down both paths. Ticks that land after `ready` flips are not even stashed; they go straight
+/// into the tracker and are then sent again by the catch-up.
+///
+/// While this extended, that duplicated every action in the window on the joining client alone:
+/// a building placed twice, an item mined twice, a purchase charged twice. Movement hid it —
+/// applying the same direction twice looks like applying it once — which is why it survived
+/// being an obvious bug. Clearing the stash on join is *not* the fix; it closes the stashed half
+/// and leaves the directly-applied half open.
 pub fn apply_authoritative_tick<A: Clone>(
     tracker: &mut ActionTracker<A>,
     authoritative_tick: &AuthoritativeTick<A>,
 ) {
-    tracker.ticks.entry(authoritative_tick.tick).or_default();
+    let players_actions = tracker.ticks.entry(authoritative_tick.tick).or_default();
 
     for (player_uuid, actions) in &authoritative_tick.players_actions {
-        insert_actions_into_tracker(
-            tracker,
-            authoritative_tick.tick,
-            *player_uuid,
-            actions.clone(),
-        );
+        players_actions.insert(*player_uuid, actions.clone());
     }
 }
 
@@ -283,6 +302,27 @@ mod tests {
         assert!(
             tracker.ticks[&7].is_empty(),
             "registering the tick must not invent an actor for it"
+        );
+    }
+
+    #[test]
+    fn the_same_authoritative_tick_twice_is_the_same_tick_once() {
+        // Every join delivers a run of ticks down two paths at once — the stash replay and the
+        // host's catch-up. While this merged, the overlap doubled every action in it on the
+        // joining client: two buildings from one placement, two charges from one purchase.
+        let mut tracker = ActionTracker::<u8>::default();
+        let authoritative = AuthoritativeTick {
+            tick: 5,
+            players_actions: vec![(11, vec![1, 2])],
+        };
+
+        apply_authoritative_tick(&mut tracker, &authoritative);
+        apply_authoritative_tick(&mut tracker, &authoritative);
+
+        assert_eq!(
+            tracker.ticks[&5][&11],
+            vec![1, 2],
+            "the host's ruling on a tick is complete, so hearing it twice must not double it"
         );
     }
 
