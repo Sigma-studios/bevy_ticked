@@ -121,6 +121,16 @@ impl<H: WorldHash> ChecksumLog<H> {
         self.samples.last().copied()
     }
 
+    /// The oldest sample still held, once [`capacity`](Self::capacity) has started dropping them.
+    ///
+    /// The mirror of [`latest`](Self::latest), and it answers a question a comparison against
+    /// another peer has to ask: a tick *below* this one was sampled and then forgotten, which is
+    /// a different thing from a tick that was never sampled at all. Reading the first as the
+    /// second turns ordinary housekeeping into a warning about a mismatched interval.
+    pub fn oldest(&self) -> Option<(u64, H)> {
+        self.samples.first().copied()
+    }
+
     /// The earliest tick both logs sampled where they disagree.
     ///
     /// This is the question worth asking after a desync: not "do we differ now", which is obvious
