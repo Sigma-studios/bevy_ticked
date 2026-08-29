@@ -79,6 +79,12 @@ pub fn broadcast_buffered_authoritative_actions_to_loaded_clients<A: LockstepAct
                 tick,
                 players_actions,
             };
+            // Deliberately the coalescing default, unlike the steady-state broadcast. This loop
+            // emits one message per missed tick and the range is however long the join took, so it
+            // is a burst of hundreds of small messages in one frame -- the one shape Nagle is
+            // actually for. Sending each as its own datagram here invites the loss that a reliable
+            // ordered channel answers with head-of-line blocking, at the exact moment this client
+            // is trying to catch up.
             commands
                 .entity(client_entity)
                 .trigger(move |entity| LobbyClientMessage::new(entity, message));
@@ -152,9 +158,13 @@ pub fn broadcast_authoritative_actions<A: LockstepAction>(
             tick,
             players_actions: broadcast_actions,
         };
+        // Not held back to be packed: every client's simulation is stopped until this lands, and
+        // the next one is a tick away, so a coalescing send waits for company that never comes and
+        // charges every client for it. The catch-up path above is the opposite case and stays on
+        // the default -- see `broadcast_buffered_authoritative_actions_to_loaded_clients`.
         commands
             .entity(*host_lobby)
-            .trigger(move |entity| LobbyMessage::new(entity, message));
+            .trigger(move |entity| LobbyMessage::new_no_delay(entity, message));
         last_broadcast_tick.0 = tick;
     }
 }

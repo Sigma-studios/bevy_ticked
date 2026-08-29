@@ -115,6 +115,11 @@ pub fn flush_pending_actions<A: LockstepAction, S: JoinSnapshot>(
         last_scheduled.0 = Some(scheduled_tick.max(last_scheduled.0.unwrap_or(0)));
 
         if let Some(ref client_lobby) = client_lobby {
+            // `new_no_delay`, here and for the batch below: the host blocks until this arrives,
+            // so it is the definition of a message something is waiting on. A coalescing send
+            // holds it for a few milliseconds hoping to pack it with the next one — which is a
+            // whole tick away and will never come in time — and the host spends that wait
+            // paused. See `bevy_ensemble::SendMode`.
             for tick in filler {
                 let message = ClientScheduledActions::<A> {
                     tick,
@@ -122,7 +127,7 @@ pub fn flush_pending_actions<A: LockstepAction, S: JoinSnapshot>(
                 };
                 commands
                     .entity(**client_lobby)
-                    .trigger(move |entity| LobbyMessage::new(entity, message));
+                    .trigger(move |entity| LobbyMessage::new_no_delay(entity, message));
             }
             let message = ClientScheduledActions {
                 tick: scheduled_tick,
@@ -130,7 +135,7 @@ pub fn flush_pending_actions<A: LockstepAction, S: JoinSnapshot>(
             };
             commands
                 .entity(**client_lobby)
-                .trigger(move |entity| LobbyMessage::new(entity, message));
+                .trigger(move |entity| LobbyMessage::new_no_delay(entity, message));
         } else {
             for tick in filler {
                 insert_actions_into_tracker(&mut tracker, tick, local_player_uuid, Vec::new());
