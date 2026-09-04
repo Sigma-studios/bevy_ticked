@@ -9,6 +9,7 @@ pub use session::{
 use std::marker::PhantomData;
 
 use bevy::prelude::*;
+use bevy_ensemble::EnsembleSet;
 use bevy_ensemble::prelude::*;
 use bevy_ticked_networking::{
     input::TickedInput,
@@ -63,9 +64,17 @@ impl<T: TickedInput + Serialize + for<'de> Deserialize<'de>> Plugin
     fn build(&self, app: &mut App) {
         app.register_ensemble_message_type::<EnsembleSnapshotMessage>()
             .register_ensemble_message_type::<EnsembleInputMessage<T>>()
+            // After the transport has drained its socket, and not merely in the same
+            // schedule. These read `Messages` the backend writes from an exclusive
+            // system, and the multi-threaded executor puts an exclusive system
+            // behind every parallel system that is already ready -- so with no
+            // ordering these ran first, and every packet was read the frame after
+            // it arrived. A frame on the input path and a frame on the snapshot
+            // path, on native, on every frame.
             .add_systems(
                 PreUpdate,
-                (forward_received_snapshots, forward_received_inputs::<T>),
+                (forward_received_snapshots, forward_received_inputs::<T>)
+                    .after(EnsembleSet::ReceivePackets),
             )
             .add_observer(forward_outgoing_snapshots)
             .add_observer(forward_outgoing_inputs::<T>);
@@ -157,4 +166,87 @@ fn forward_outgoing_inputs<T: TickedInput + Serialize + for<'de> Deserialize<'de
             message,
             send_mode: SendMode::Unreliable,
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy_ticked_networking::snapshot::WorldSnapshot;
+
+    #[derive(Clone, Serialize, serde::Deserialize)]
+    struct Input;
+
+    #[derive(Resource, Default)]
+    struct Arrivals(Vec<(u32, u64)>);
+
+    #[derive(Resource, Default)]
+    struct Frame(u32);
+
+    /// Stands in for a backend's receive system: exclusive, in `ReceivePackets`,
+    /// and it writes the snapshot message directly, as `decode_ensemble_packet` does.
+    fn fake_transport(world: &mut World) {
+        let frame = world.resource::<Frame>().0;
+        world.write_message(ReceivedEnsembleMessage {
+            sender: Some(1),
+            message: EnsembleSnapshotMessage {
+                payload: NetworkSnapshotPayload {
+                    snapshot: WorldSnapshot {
+                        tick: u64::from(frame),
+                        components: Default::default(),
+                        resources: Default::default(),
+                        input_margins: Default::default(),
+                    },
+                },
+            },
+            received_at: std::time::Duration::ZERO,
+        });
+    }
+
+    /// A packet has to reach the tick loop the frame it comes off the socket.
+    ///
+    /// The executor is part of what is under test: a handful of unrelated parallel
+    /// systems is what displaces an exclusive one, and without them the schedule
+    /// happens to run in insertion order and the bug does not show.
+    #[test]
+    fn a_packet_is_forwarded_the_frame_it_arrives() {
+        fn busy(mut acc: Local<u64>) {
+            for i in 0..10_000u64 {
+                *acc = acc.wrapping_add(i);
+            }
+        }
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_plugins(EnsemblePlugin)
+            .init_resource::<Arrivals>()
+            .init_resource::<Frame>()
+            .add_systems(PreUpdate, (busy, busy, busy))
+            .add_systems(
+                PreUpdate,
+                fake_transport.in_set(EnsembleSet::ReceivePackets),
+            )
+            .add_plugins(TickedNetworkingEnsemblePlugin::<Input>::new())
+            .add_observer(
+                |snapshot: On<ReceivedNetworkSnapshot>,
+                 frame: Res<Frame>,
+                 mut arrivals: ResMut<Arrivals>| {
+                    arrivals.0.push((frame.0, snapshot.event().0.tick));
+                },
+            )
+            .add_systems(Last, |mut frame: ResMut<Frame>| frame.0 += 1);
+
+        for _ in 0..8 {
+            app.update();
+        }
+
+        let arrivals = &app.world().resource::<Arrivals>().0;
+        assert!(!arrivals.is_empty(), "nothing was forwarded at all");
+        let late: Vec<_> = arrivals
+            .iter()
+            .filter(|(frame, tick)| u64::from(*frame) != *tick)
+            .collect();
+        assert!(
+            late.is_empty(),
+            "snapshots forwarded a frame after they arrived: {late:?}"
+        );
+    }
 }
