@@ -17,7 +17,8 @@
 //!   camera, which is drawn as somebody else — is wrong for its duration.
 //!   [`adopt_role`] keys off [`LocalMultiplayerPlayerId`] instead, which appears the moment the
 //!   signalling server says the lobby was joined, and is strictly earlier than any peer connection
-//!   can exist.
+//!   can exist. Earlier still is the placeholder a host holds between asking to host and the
+//!   lobby being created, and that one is *not* adopted from: see [`adopt_role`].
 //!
 //! - **What to tear down.** Upstream's `reset_on_host` raises the entity counter and
 //!   `reset_on_join` zeroes it, but neither despawns what the peer built while it thought it was
@@ -39,6 +40,7 @@
 //! the despawn above is not something to start doing to somebody's world without being asked.
 
 use bevy::prelude::*;
+use bevy_ensemble::LOCAL_PLAYER_UUID;
 use bevy_ensemble::prelude::*;
 use bevy_ticked::prelude::*;
 use bevy_ticked_networking::client::LocalClientPlayer;
@@ -123,6 +125,15 @@ fn adopt_role(
     let Some(local_player) = local_player else {
         return;
     };
+    // bevy_ensemble gives a host [`LOCAL_PLAYER_UUID`] the frame it asks to host, and the backend
+    // overwrites it with the real identity when the lobby is created. A role adopted in between
+    // keeps the placeholder for the whole session: the roster is patched to the real uuid, this
+    // resource is not, and everything the host does under its role -- every input it queues --
+    // names a player that owns nothing. Waiting costs a host nothing, because the real uuid lands
+    // with the lobby's creation, and no peer can connect to a lobby that does not exist yet.
+    if local_player.0 == LOCAL_PLAYER_UUID {
+        return;
+    }
     let is_host = !hosting.is_empty();
     if !is_host && joined.is_empty() {
         return;
@@ -189,5 +200,97 @@ fn count_recipients(
     let count = clients.iter().count();
     if recipients.0 != count {
         recipients.0 = count;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Adoption against the real lobby crate, with the backend's part played by hand.
+    use super::*;
+    use bevy_ensemble::{RequestLobby, StartHosting};
+    use bevy_ticked_networking::client::TickedClientPlugin;
+    use bevy_ticked_networking::server::TickedServerPlugin;
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Clone, Serialize, Deserialize)]
+    struct Input;
+
+    /// The stack a consumer builds: the lobby crate, the tick loop, both roles, the bridge and
+    /// this plugin. No transport: what a backend would do to the world is done by hand below.
+    fn app() -> App {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_plugins(EnsemblePlugin)
+            .add_plugins(TickedPlugin {
+                source: TickSource::Hz(64.0),
+                ..default()
+            })
+            .add_plugins(TickedServerPlugin::<Input>::new())
+            .add_plugins(TickedClientPlugin::<Input>::new())
+            .add_plugins(crate::TickedNetworkingEnsemblePlugin::<Input>::new())
+            .add_plugins(TickedEnsembleSessionPlugin);
+        app
+    }
+
+    /// What `bevy_ensemble_webrtc` does on `LobbyCreated`: the signalling server's uuid for
+    /// the local player, and the pending host lobby promoted.
+    fn lobby_created(app: &mut App, uuid: u128) {
+        app.world_mut()
+            .insert_resource(LocalMultiplayerPlayerId(uuid));
+        let mut pending = app
+            .world_mut()
+            .query_filtered::<Entity, (With<PendingLobby>, With<Host>)>();
+        let lobby = pending.single(app.world()).expect("a pending host lobby");
+        app.world_mut()
+            .entity_mut(lobby)
+            .remove::<(PendingLobby, RequestLobby)>()
+            .insert(Lobby);
+    }
+
+    fn host_role(world: &World) -> Option<u128> {
+        world.get_resource::<LocalServerPlayer>().map(|role| role.0)
+    }
+
+    /// The uuid the roster gives the host is the one its bodies are owned by, and the one its
+    /// inputs are queued under has to be the same. Between `StartHosting` and the lobby's
+    /// creation the lobby crate holds a placeholder, and a role taken from it kept it for the
+    /// whole session.
+    #[test]
+    fn a_host_is_adopted_from_the_backend_identity_and_not_the_placeholder() {
+        let mut app = app();
+        app.world_mut().write_message(StartHosting);
+        for _ in 0..3 {
+            app.update();
+        }
+        assert_eq!(
+            app.world().resource::<LocalMultiplayerPlayerId>().0,
+            LOCAL_PLAYER_UUID,
+            "until the lobby exists, the lobby crate gives a host its placeholder"
+        );
+        assert_eq!(
+            host_role(app.world()),
+            None,
+            "and no role is taken from that"
+        );
+
+        lobby_created(&mut app, 0xDEAD_BEEF);
+        for _ in 0..3 {
+            app.update();
+        }
+        let mut participants = app.world_mut().query::<&LobbyParticipant>();
+        let roster_uuid = participants
+            .iter(app.world())
+            .find(|participant| participant.is_host)
+            .expect("the host participant")
+            .player_uuid;
+        assert_eq!(
+            roster_uuid, 0xDEAD_BEEF,
+            "the roster carries the backend's uuid"
+        );
+        assert_eq!(
+            host_role(app.world()),
+            Some(roster_uuid),
+            "and so does the role"
+        );
     }
 }
