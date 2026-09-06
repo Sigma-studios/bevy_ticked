@@ -268,7 +268,10 @@ fn a_client_replays_its_whole_lead_on_every_snapshot_even_when_nothing_changed()
     let mut app = client();
     sync(&mut app);
 
-    let lead = app.world().resource::<ClientTickBuffer>().target_ticks;
+    let lead = app
+        .world()
+        .resource::<ClientTickBuffer>()
+        .target_replay_distance;
     assert!(lead >= 2, "the client is supposed to lead the server");
 
     let mut per_frame = Vec::new();
