@@ -58,4 +58,15 @@ pub fn reset_on_leave<T: TickedInput>(world: &mut World) {
     // A peer that leaves mid-sync would otherwise stay paused for ever, waiting for a snapshot
     // from a session it is no longer in.
     world.remove_resource::<TicksPaused>();
+
+    // The clock restarts at zero, so anything remembering *which tick* it last saw from a peer
+    // has to forget it too — otherwise the next session's first inputs all read as older than
+    // the last session's last ones. Cleared in place rather than inserted, so a client-only app
+    // that never added the server plugin does not grow the server's resources on its way out.
+    if let Some(mut newest) = world.get_resource_mut::<server::NewestInputTick>() {
+        newest.0.clear();
+    }
+    if let Some(mut margins) = world.get_resource_mut::<server::InputMargins>() {
+        margins.0.clear();
+    }
 }
