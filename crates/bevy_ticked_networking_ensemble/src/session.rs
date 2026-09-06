@@ -39,11 +39,17 @@
 //! consumer that already adopts roles by hand would otherwise find this crate doing it too — and
 //! the despawn above is not something to start doing to somebody's world without being asked.
 
+use core::time::Duration;
+
 use bevy::prelude::*;
 use bevy_ensemble::LOCAL_PLAYER_UUID;
 use bevy_ensemble::prelude::*;
+// `PeerRtt` / `PeerRttJitter` come in via the prelude above; named here so the reason they are
+// wanted is legible at the import site.
+use bevy_ensemble::{PeerRtt, PeerRttJitter};
 use bevy_ticked::prelude::*;
-use bevy_ticked_networking::client::LocalClientPlayer;
+use bevy_ticked::time::{Ticked, TickedTime};
+use bevy_ticked_networking::client::{ClientTickBuffer, LocalClientPlayer};
 use bevy_ticked_networking::server::{LocalServerPlayer, SnapshotRecipients};
 
 use crate::handshake::RegistryMismatch;
@@ -61,7 +67,14 @@ impl Plugin for TickedEnsembleSessionPlugin {
             .add_plugins(crate::handshake::plugin)
             .add_systems(
                 Update,
-                (adopt_role, release_role, forget_mismatch, count_recipients).chain(),
+                (
+                    adopt_role,
+                    seed_tick_buffer,
+                    release_role,
+                    forget_mismatch,
+                    count_recipients,
+                )
+                    .chain(),
             );
     }
 }
@@ -154,6 +167,68 @@ fn adopt_role(
         // `TicksPaused` stays: `TickedClientPlugin` lifts it once there is a tick to sync to.
         commands.insert_resource(LocalClientPlayer(local_player.0));
     }
+}
+
+/// Size the client's prediction buffer from the connection, before the first input has made
+/// the trip that would let it measure itself.
+///
+/// [`ClientTickBuffer`] adapts from the server's report of how early each client's input
+/// arrives, which is the right signal and the only one that needs no transport — but it is a
+/// signal that does not exist until a client has been playing for a moment. Until then the
+/// buffer is a constant, and a constant is a guess about a link nobody has looked at: the
+/// default six ticks is a 62 ms round trip, and a client whose one-way trip is longer than
+/// that starts the session already behind the authority.
+///
+/// `bevy_ensemble` has both numbers because it pings, so the bridge between the two crates is
+/// where they meet. `bevy_ticked_networking` stays transport-free, which is the property that
+/// makes it usable over anything.
+///
+/// Jitter matters more than the mean here, and is the reason this touches the margin at all.
+/// The margin is headroom for the *unlucky* packet, and it was a hardcoded two ticks — under
+/// water on any link with more than ~30 ms of variation, where every spike costs a keypress.
+///
+/// # The window
+///
+/// Only while the client is still waiting for its first snapshot, which is exactly the span
+/// [`TicksPaused`] covers on a client: after that the buffer holds measurements, and a seed is
+/// a guess that would be overwriting them. Pings start on the first frame a lobby exists, so a
+/// sample is usually there in time — and when it isn't, nothing happens and the default is used.
+/// That is survivable rather than free: it costs one correction shortly after the join.
+fn seed_tick_buffer(
+    client: Option<Res<LocalClientPlayer>>,
+    paused: Option<Res<TicksPaused>>,
+    ticked: Res<Time<Ticked>>,
+    connection: Query<(&PeerRtt, Option<&PeerRttJitter>), With<Lobby>>,
+    mut buffer: ResMut<ClientTickBuffer>,
+    mut seeded: Local<bool>,
+) {
+    if client.is_none() {
+        // Not a client, or no longer one: the next join gets a fresh seed.
+        *seeded = false;
+        return;
+    }
+    if *seeded || paused.is_none() {
+        return;
+    }
+    let Some((rtt, jitter)) = connection.iter().next() else {
+        // No ping has come back yet. Try again next frame, until the first snapshot closes the
+        // window.
+        return;
+    };
+    *seeded = true;
+    buffer.seed_from_rtt(
+        Duration::from_secs_f64(rtt.0.max(0.0)),
+        Duration::from_secs_f64(jitter.map_or(0.0, |jitter| jitter.0.max(0.0))),
+        ticked.timestep(),
+    );
+    debug!(
+        "sized the prediction buffer from the link: rtt {:.0}ms, jitter {:.0}ms -> \
+         replay distance {} ticks, margin {} ticks",
+        rtt.0 * 1000.0,
+        jitter.map_or(0.0, |jitter| jitter.0) * 1000.0,
+        buffer.target_replay_distance,
+        buffer.target_margin,
+    );
 }
 
 /// Give the role back when the lobby goes, however it went.

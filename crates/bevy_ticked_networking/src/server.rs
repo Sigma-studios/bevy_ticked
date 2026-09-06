@@ -51,6 +51,14 @@ pub struct SnapshotRecipients(pub usize);
 #[derive(Resource, Default)]
 pub struct InputMargins(pub HashMap<u128, i64>);
 
+/// The highest input tick seen from each client so far.
+///
+/// Only used to decide whether a late input may be forward-filled onto the next
+/// tick — see [`collect_network_inputs`]. Kept per sender because "newest" is a
+/// question about one client's stream, not about the session.
+#[derive(Resource, Default)]
+pub struct NewestInputTick(pub HashMap<u128, u64>);
+
 /// Plugin for the server side of multiplayer tick networking.
 ///
 /// Hooks into `TickedPlugin`'s tick lifecycle:
@@ -81,6 +89,7 @@ impl<T: TickedInput> Plugin for TickedServerPlugin<T> {
     fn build(&self, app: &mut App) {
         crate::input::install_input_queue::<T>(app);
         app.init_resource::<InputMargins>()
+            .init_resource::<NewestInputTick>()
             .add_observer(collect_network_inputs::<T>)
             .add_systems(
                 Update,
@@ -117,6 +126,10 @@ fn reset_on_host<T: TickedInput>(world: &mut World) {
     world.insert_resource(CurrentTick(0));
     world.insert_resource(TickTrackedEntityCounter(highest));
     world.resource_mut::<InputQueue<T>>().inputs.clear();
+    // The tick counter goes back to zero, so a high-water mark from the last
+    // session would make every input of this one look stale.
+    world.insert_resource(NewestInputTick::default());
+    world.insert_resource(InputMargins::default());
     let registry = world.resource::<TickedComponentRegistry>().clone();
     registry.clear_all(world);
 }
@@ -128,11 +141,33 @@ pub(crate) fn highest_tracked_id(world: &mut World) -> u64 {
 }
 
 /// Observer: collect incoming network inputs into the InputQueue.
+///
+/// # Late input is used, not discarded
+///
+/// The simulation reads `InputQueue::at_tick(current_tick)` and nothing else, so
+/// an input stamped for a tick the server has already run lands where nothing
+/// will ever read it. That is a silent, total loss of a keypress, and on a
+/// jittery link it is a large fraction of them: a spike that pushes one packet
+/// past its tick swallows whatever the player pressed, and the held-input
+/// fallback most consumers use then carries on with the *previous* value — so a
+/// direction change is not merely delayed, it is skipped, and the player feels
+/// the character refuse to turn.
+///
+/// So a late input is also filed on the next tick the server will run. One tick
+/// of staleness in place of a dropped one.
+///
+/// Only from the newest input that sender has produced, which is what
+/// [`NewestInputTick`] is for. Each packet carries a few ticks of redundant
+/// history and packets can arrive out of order, so without that guard a
+/// straggler carrying an *older* input would overwrite the fresher one already
+/// sitting on the next tick — turning a mechanism for recovering input into one
+/// for corrupting it.
 fn collect_network_inputs<T: TickedInput>(
     trigger: On<ReceivedNetworkInput<T>>,
     tick: Res<CurrentTick>,
     mut queue: ResMut<InputQueue<T>>,
     mut margins: ResMut<InputMargins>,
+    mut newest: ResMut<NewestInputTick>,
 ) {
     let event = trigger.event();
     // How many ticks ahead of the server this input arrived (negative = late).
@@ -140,6 +175,15 @@ fn collect_network_inputs<T: TickedInput>(
     let margin = event.tick as i64 - tick.0 as i64;
     margins.0.insert(event.sender, margin);
     queue.insert(event.tick, event.sender, event.input.clone());
+
+    let seen = newest.0.entry(event.sender).or_insert(0);
+    if event.tick <= *seen {
+        return;
+    }
+    *seen = event.tick;
+    if event.tick <= tick.0 {
+        queue.insert(tick.0 + 1, event.sender, event.input.clone());
+    }
 }
 
 /// After the core tick, build and broadcast a snapshot.
