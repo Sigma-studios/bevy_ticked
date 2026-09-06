@@ -35,48 +35,127 @@ struct PendingSnapshot {
 /// [`WorldSnapshot::input_margins`](crate::snapshot::WorldSnapshot)); the client
 /// then solves directly for the lead that keeps a small positive margin and
 /// converges toward it by dilating its tick rate (no transport RTT needed).
-/// `target_ticks` is exposed for read-only display.
+/// `target_replay_distance` is exposed for read-only display.
+///
+/// # It is a replay distance, not a lead
+///
+/// The name is the whole warning. `target_replay_distance` is what
+/// `current_tick - snapshot_tick` should settle at, and a snapshot is one
+/// one-way trip old by the time it is read — so the *lead* this buffer actually
+/// holds is `target_replay_distance - one_way`, and in steady state that is
+/// `one_way + target_margin`. Which is correct: the margin is what matters, and
+/// it lands on [`target_margin`](Self::target_margin) exactly.
+///
+/// It used to be called `target_ticks` and documented as the lead, which it has
+/// never been. Nothing downstream was wrong by it — [`observe`](Self::observe)
+/// solves for the same quantity it is compared against, so the units agree with
+/// each other even though neither matched the name — but every readout built on
+/// it reported a number a third larger than the lead it claimed to be, and the
+/// one test that asserted on it needed an eight-tick tolerance to pass.
 #[derive(Resource, Clone, Copy, Debug)]
 pub struct ClientTickBuffer {
-    /// Target lead, in ticks, of the client over the server.
-    pub target_ticks: u64,
+    /// Target replay distance, in ticks: what `current_tick - snapshot_tick`
+    /// converges to. See the note on the type — this is not the lead.
+    pub target_replay_distance: u64,
+    /// Desired input-arrival margin: inputs should reach the server this many
+    /// ticks early, to absorb jitter and once-per-frame delivery.
+    ///
+    /// A field rather than a constant because the right value is a property of
+    /// the link: it has to cover how late an *unlucky* packet is, not an average
+    /// one, and a link with 40 ms of jitter needs more than two ticks of it. A
+    /// transport that measures jitter can size this with
+    /// [`seed_from_rtt`](Self::seed_from_rtt); [`DEFAULT_MARGIN`](Self::DEFAULT_MARGIN)
+    /// is the floor and the fallback.
+    pub target_margin: i64,
     /// EWMA accumulator for the target, so per-snapshot margin jitter doesn't
-    /// make the lead wander.
+    /// make it wander.
     smoothed: f64,
 }
 
 impl Default for ClientTickBuffer {
     fn default() -> Self {
-        // Starting lead until the first margin measurement arrives.
+        // Until a margin has been measured or a transport has seeded one. Six
+        // ticks of replay distance is a 62 ms round trip — see `seed_from_rtt`
+        // for why guessing here is survivable but not free.
         Self {
-            target_ticks: 6,
+            target_replay_distance: 6,
+            target_margin: Self::DEFAULT_MARGIN,
             smoothed: 6.0,
         }
     }
 }
 
 impl ClientTickBuffer {
-    /// Desired input-arrival margin: inputs should reach the server this many
-    /// ticks early, to absorb jitter and once-per-frame delivery.
-    const TARGET_MARGIN: i64 = 2;
-    /// Never lead by less than this.
+    /// Input-arrival margin used until something measures a better one.
+    pub const DEFAULT_MARGIN: i64 = 2;
+    /// Floor on the margin. Below two ticks there is no room for once-per-frame
+    /// delivery, let alone jitter.
+    pub const MIN_MARGIN: i64 = 2;
+    /// Ceiling on the margin, so a pathological jitter measurement cannot spend
+    /// the whole prediction budget on headroom.
+    pub const MAX_MARGIN: i64 = 12;
+    /// Never target less replay distance than this.
     const MIN_TICKS: u64 = 2;
-    /// Cap the lead so a pathological connection can't make prediction explode.
+    /// Cap it so a pathological connection can't make prediction explode.
     const MAX_TICKS: u64 = 64;
     /// EWMA weight for new observations.
     const SMOOTHING: f64 = 0.1;
 
-    /// Update the target lead from an observed replay distance
+    /// Update the target from an observed replay distance
     /// (`current_tick - snapshot_tick`) and the server-measured input margin.
     ///
-    /// With `replay_distance = lead + one_way` and `margin = lead - one_way`, the
-    /// lead that yields `TARGET_MARGIN` is `replay_distance - margin + TARGET_MARGIN`.
-    /// This is a stable fixed point, EWMA-smoothed against jitter.
-    fn observe(&mut self, replay_distance: u64, margin: i64) {
-        let raw = (replay_distance as i64 - margin + Self::TARGET_MARGIN)
+    /// With `replay_distance = lead + one_way` and `margin = lead - one_way`,
+    /// `replay_distance - margin + target_margin` is `2 * one_way + target_margin`
+    /// — the replay distance at which the margin comes out at `target_margin`.
+    /// A stable fixed point, EWMA-smoothed against jitter.
+    ///
+    /// `replay_distance` is signed because a client that has fallen *behind* the
+    /// authority has a negative one, and that is exactly when this most needs to
+    /// keep tracking. It used to take a `u64`, so the one caller that could
+    /// supply a negative value could not call it at all, and the target froze at
+    /// whatever it last saw for as long as the client was behind — which was
+    /// forever, because being behind is self-sustaining.
+    fn observe(&mut self, replay_distance: i64, margin: i64) {
+        let raw = (replay_distance - margin + self.target_margin)
             .clamp(Self::MIN_TICKS as i64, Self::MAX_TICKS as i64) as f64;
         self.smoothed = (1.0 - Self::SMOOTHING) * self.smoothed + Self::SMOOTHING * raw;
-        self.target_ticks = (self.smoothed.round() as u64).clamp(Self::MIN_TICKS, Self::MAX_TICKS);
+        self.target_replay_distance =
+            (self.smoothed.round() as u64).clamp(Self::MIN_TICKS, Self::MAX_TICKS);
+    }
+
+    /// Size the target from a measured round trip and round-trip jitter, before
+    /// any input has made the trip for [`observe`](Self::observe) to read.
+    ///
+    /// The steady state `observe` converges to is `rtt + target_margin` ticks, so
+    /// that is what this sets — and the margin itself comes from the jitter,
+    /// because the margin's whole job is to cover the packets that arrive late
+    /// rather than the ones that arrive on time.
+    ///
+    /// This crate has no transport and cannot measure either value; a bridge that
+    /// has one calls this. Skipping it is survivable — `observe` converges within
+    /// a second or so of the first input — but the default is a guess, and a link
+    /// whose one-way trip is longer than that guess starts the session with the
+    /// client already behind.
+    ///
+    /// Jitter is passed as *round-trip* variation and used as-is, which is roughly
+    /// twice the one-way figure the margin actually needs. Deliberately generous:
+    /// excess margin costs a little replay depth, and too little costs dropped
+    /// input.
+    pub fn seed_from_rtt(
+        &mut self,
+        round_trip: core::time::Duration,
+        round_trip_jitter: core::time::Duration,
+        timestep: core::time::Duration,
+    ) {
+        let in_ticks = |d: core::time::Duration| {
+            (d.as_secs_f64() / timestep.as_secs_f64().max(f64::EPSILON)).ceil()
+        };
+        self.target_margin =
+            (in_ticks(round_trip_jitter) as i64).clamp(Self::MIN_MARGIN, Self::MAX_MARGIN);
+        let raw = (in_ticks(round_trip) + self.target_margin as f64)
+            .clamp(Self::MIN_TICKS as f64, Self::MAX_TICKS as f64);
+        self.smoothed = raw;
+        self.target_replay_distance = raw.round() as u64;
     }
 }
 
@@ -211,7 +290,6 @@ fn handle_server_snapshot<T: TickedInput>(world: &mut World) {
     let was_paused = world.get_resource::<TicksPaused>().is_some();
     let current_tick = world.resource::<CurrentTick>().0;
     let snapshot_tick = pending.snapshot.tick;
-    let tick_buffer = world.resource::<ClientTickBuffer>().target_ticks;
 
     let registry = world.resource::<TickedComponentRegistry>().clone();
 
@@ -225,25 +303,74 @@ fn handle_server_snapshot<T: TickedInput>(world: &mut World) {
         first: was_paused,
     });
 
+    // Self-adaptive target: update it from the server-reported input margin for
+    // this client (how early or late its inputs are arriving), self-contained in
+    // this crate.
+    //
+    // Before the branch, and not inside the rollback arm where it used to live.
+    // The arm below runs precisely when the client is behind and its inputs are
+    // being dropped, which is when the target most needs to keep moving; leaving
+    // the observation out of it froze the target at its last value for exactly as
+    // long as the problem lasted. Skipped on the initial sync, where the tick
+    // difference is "however long this peer has been running" rather than a
+    // measurement, and no input has been sent for the server to have timed.
+    let replay_distance = current_tick as i64 - snapshot_tick as i64;
+    if !was_paused
+        && let Some(uuid) = world.get_resource::<LocalClientPlayer>().map(|p| p.0)
+        && let Some(&margin) = pending.snapshot.input_margins.get(&uuid)
+    {
+        world
+            .resource_mut::<ClientTickBuffer>()
+            .observe(replay_distance, margin);
+    }
+
     if snapshot_tick >= current_tick {
-        // Snapshot is at or ahead of us — jump forward.
+        // At or behind the authority: there is nothing to roll back, and no
+        // prediction lead left. **Acquire one outright.**
+        //
+        // This arm used to apply the snapshot and return unless it was the
+        // initial sync, and that was the single worst bug in this crate. Every
+        // input a client sends is stamped with its own tick, and the server reads
+        // only the entry for the tick it is about to run — so a client with no
+        // lead has every input it will ever send arrive too late to be read.
+        // Worse, the state is self-sustaining: `apply_snapshot` sets `CurrentTick`
+        // to the snapshot's, so the client is pinned exactly one one-way trip
+        // behind, every subsequent snapshot takes this same arm, and nothing here
+        // ever measured, steered or escaped. One dropped frame — a backgrounded
+        // tab, a shader compile, a collection — and the player could not move
+        // again for the rest of the session while everyone else moved normally.
+        //
+        // Simulating forward is a visible discontinuity and it is the right
+        // trade: the client has genuinely lost this time, and the alternative is
+        // being frozen out of the session permanently. Rate dilation cannot do
+        // this job — at two percent it closes a half-second hole in twenty
+        // seconds, and the next snapshot re-pins it long before then.
+        //
+        // It self-limits. After the jump the client leads again, so the next
+        // snapshot lands behind it and the ordinary rollback path resumes.
         registry.capture_all(world, snapshot_tick);
 
-        // On initial sync, skip ahead by tick_buffer so our inputs
-        // arrive at the server before it reaches those ticks.
-        if was_paused {
-            let target_tick = snapshot_tick + tick_buffer;
-            for tick in (snapshot_tick + 1)..=target_tick {
-                world.resource_mut::<CurrentTick>().0 = tick;
-                run_tick_schedule(world, tick, TickedSimulation);
-                registry.capture_all(world, tick);
-            }
-            world.remove_resource::<TicksPaused>();
+        let target = world.resource::<ClientTickBuffer>().target_replay_distance;
+        for tick in (snapshot_tick + 1)..=(snapshot_tick + target) {
+            world.resource_mut::<CurrentTick>().0 = tick;
+            run_tick_schedule(world, tick, TickedSimulation);
+            registry.capture_all(world, tick);
+        }
+        world.resource_mut::<CurrentTick>().0 = snapshot_tick + target;
+        world.remove_resource::<TicksPaused>();
+        // The lead was just set outright, so there is no error left for the rate
+        // trim to work on. Leaving a stale value here is not harmless: a client
+        // that was shedding lead at 0.98 when it fell behind would keep running
+        // slow, losing the lead it had just been given.
+        if let Some(mut dilation) = world.get_resource_mut::<TickRateDilation>() {
+            dilation.0 = 1.0;
         }
         return;
     }
 
-    // If paused (shouldn't normally happen after initial sync), don't replay
+    // Paused and already ahead of the snapshot. Not reachable after a normal
+    // `reset_on_join`, which zeroes the tick before any snapshot can arrive, but
+    // replaying while paused is not a thing to start doing if it ever is.
     if was_paused {
         registry.capture_all(world, snapshot_tick);
         world.remove_resource::<TicksPaused>();
@@ -253,18 +380,8 @@ fn handle_server_snapshot<T: TickedInput>(world: &mut World) {
     // Snapshot is behind us — rollback and replay predicted ticks.
     registry.truncate_all_after(world, snapshot_tick);
 
-    let lead = current_tick - snapshot_tick;
-
-    // Self-adaptive lead: update the target from the server-reported input margin
-    // for this client (how early/late its inputs are arriving), self-contained in
-    // this crate.
-    if let Some(uuid) = world.get_resource::<LocalClientPlayer>().map(|p| p.0) {
-        if let Some(&margin) = pending.snapshot.input_margins.get(&uuid) {
-            world.resource_mut::<ClientTickBuffer>().observe(lead, margin);
-        }
-    }
-    let target = world.resource::<ClientTickBuffer>().target_ticks;
-    let end_tick = converge_lead(world, current_tick, lead, target);
+    let target = world.resource::<ClientTickBuffer>().target_replay_distance;
+    let end_tick = converge_lead(world, current_tick, replay_distance as u64, target);
 
     for tick in (snapshot_tick + 1)..=end_tick {
         world.resource_mut::<CurrentTick>().0 = tick;
@@ -279,6 +396,11 @@ fn handle_server_snapshot<T: TickedInput>(world: &mut World) {
 /// 2% is under the threshold where a rate change reads as motion artifact, and
 /// small enough to stay stable on top of [`ClientTickBuffer`]'s EWMA — the two
 /// together are a feedback loop, and a high gain here makes it hunt.
+///
+/// It is deliberately *not* the tool for a large error. Two percent of 64 Hz is
+/// 1.28 ticks per second, so an eight-tick hole takes six seconds to close —
+/// during which the client's input is arriving late and being dropped. Raising
+/// the ceiling is the wrong answer to that; [`SNAP_TICKS`] is.
 const MAX_DILATION: f64 = 0.02;
 
 /// Lead error, in ticks, tolerated before correcting at all.
@@ -286,6 +408,19 @@ const LEAD_DEADBAND: f64 = 0.5;
 
 /// Proportional gain: fraction of nominal rate corrected per tick of error.
 const DILATION_GAIN: f64 = 0.01;
+
+/// Deficit, in ticks, past which the lead is taken in one step instead of
+/// dilated toward.
+///
+/// Below this the rate trim converges in about a second and is invisible, which
+/// is what it is for. Above it the trim is slower than the disturbances that
+/// create the error, so it never arrives — and every tick spent short of the
+/// target is a tick of input the server may drop.
+///
+/// Forward only. An *excess* lead costs a deeper replay and nothing else, and
+/// shedding it by rewinding the clock would be a visible jump to fix a problem
+/// nobody can see.
+const SNAP_TICKS: f64 = 4.0;
 
 /// Tick-rate multiplier that corrects a lead error of `error` ticks.
 ///
@@ -298,7 +433,7 @@ fn dilation_for(error: f64) -> f64 {
     }
 }
 
-/// Steer the prediction lead toward `target`, returning the tick to replay to.
+/// Steer the replay distance toward `target`, returning the tick to replay to.
 ///
 /// Where an accumulator exists ([`TickSource::Hz`]), the correction is applied
 /// as a small change to the tick *rate*: the client runs a couple of percent
@@ -312,8 +447,17 @@ fn dilation_for(error: f64) -> f64 {
 ///
 /// [`TickSource::Hz`]: bevy_ticked::TickSource::Hz
 /// [`TickSource::FixedUpdate`]: bevy_ticked::TickSource::FixedUpdate
-fn converge_lead(world: &mut World, current_tick: u64, lead: u64, target: u64) -> u64 {
-    let error = lead as f64 - target as f64;
+fn converge_lead(world: &mut World, current_tick: u64, replay_distance: u64, target: u64) -> u64 {
+    let error = replay_distance as f64 - target as f64;
+
+    // Too far short for the rate trim to close before the next disturbance, or
+    // before falling behind entirely. Take it in one step.
+    if error <= -SNAP_TICKS {
+        if let Some(mut dilation) = world.get_resource_mut::<TickRateDilation>() {
+            dilation.0 = 1.0;
+        }
+        return current_tick + (target - replay_distance);
+    }
 
     if let Some(mut dilation) = world.get_resource_mut::<TickRateDilation>() {
         dilation.0 = dilation_for(error);
@@ -322,9 +466,9 @@ fn converge_lead(world: &mut World, current_tick: u64, lead: u64, target: u64) -
 
     // Deadband [target, target+1]; never drop below target, which would risk
     // inputs arriving after the server has passed their tick.
-    if lead > target + 1 {
+    if replay_distance > target + 1 {
         current_tick - 1
-    } else if lead < target {
+    } else if replay_distance < target {
         current_tick + 1
     } else {
         current_tick
@@ -397,5 +541,89 @@ mod tests {
     #[test]
     fn a_huge_error_never_stops_or_reverses_the_clock() {
         assert!(dilation_for(1e9) > 0.0, "the clock must keep moving forward");
+    }
+
+    #[test]
+    fn a_large_deficit_is_snapped_rather_than_dilated() {
+        // The reason the ceiling above is allowed to stay small. 2% of 64 Hz is 1.28
+        // ticks a second, so anything past a few ticks has to be taken in one step or
+        // the next disturbance arrives before the correction does.
+        const { assert!(SNAP_TICKS > LEAD_DEADBAND) };
+        let saturates_at = MAX_DILATION / DILATION_GAIN;
+        assert!(
+            SNAP_TICKS >= saturates_at,
+            "dilation saturates at {saturates_at} ticks of error, so snapping before that \
+             would take away errors the trim can still handle"
+        );
+    }
+
+    /// A client that has fallen behind, expressed the way `handle_server_snapshot` does.
+    fn behind(one_way: i64, lead: i64) -> (i64, i64) {
+        (lead + one_way, lead - one_way)
+    }
+
+    #[test]
+    fn the_target_keeps_tracking_while_the_client_is_behind() {
+        // The observation used to take a `u64`, so the one caller that could pass a
+        // negative replay distance could not call it at all — and being behind is the
+        // state that most needs the target to keep moving, because it is self-sustaining.
+        let mut buffer = ClientTickBuffer::default();
+        let (replay_distance, margin) = behind(6, -2);
+        for _ in 0..200 {
+            buffer.observe(replay_distance, margin);
+        }
+        // 2 * one_way + margin.
+        assert_eq!(buffer.target_replay_distance, 14);
+    }
+
+    #[test]
+    fn seeding_lands_where_observing_would_have_converged() {
+        // The point of seeding: arrive at the answer the feedback loop would have found,
+        // without waiting for the round trip that teaches it. If these two ever drift
+        // apart, a seeded client gets corrected the moment its first input is timed.
+        let timestep = core::time::Duration::from_secs_f64(1.0 / 64.0);
+        let one_way_ticks = 4;
+        let round_trip = timestep * (one_way_ticks as u32 * 2);
+
+        let mut seeded = ClientTickBuffer::default();
+        seeded.seed_from_rtt(round_trip, core::time::Duration::ZERO, timestep);
+
+        let mut observed = ClientTickBuffer::default();
+        let (replay_distance, margin) = behind(one_way_ticks, seeded.target_margin);
+        for _ in 0..500 {
+            observed.observe(replay_distance, margin);
+        }
+
+        assert_eq!(
+            seeded.target_replay_distance, observed.target_replay_distance,
+            "seeding and observing disagree about the same link"
+        );
+    }
+
+    #[test]
+    fn a_jittery_link_is_given_more_margin_than_a_clean_one() {
+        // The margin is headroom for the *unlucky* packet. Two ticks of it is under water
+        // on a link with 40 ms of variation, which is where the input loss came from.
+        let timestep = core::time::Duration::from_secs_f64(1.0 / 64.0);
+        let round_trip = core::time::Duration::from_millis(60);
+
+        let mut clean = ClientTickBuffer::default();
+        clean.seed_from_rtt(round_trip, core::time::Duration::ZERO, timestep);
+
+        let mut jittery = ClientTickBuffer::default();
+        jittery.seed_from_rtt(round_trip, core::time::Duration::from_millis(40), timestep);
+
+        assert_eq!(clean.target_margin, ClientTickBuffer::MIN_MARGIN);
+        assert!(
+            jittery.target_margin > clean.target_margin,
+            "jitter bought no extra headroom: {} against {}",
+            jittery.target_margin,
+            clean.target_margin
+        );
+        assert!(jittery.target_margin <= ClientTickBuffer::MAX_MARGIN);
+        assert!(
+            jittery.target_replay_distance > clean.target_replay_distance,
+            "the extra margin has to show up in the distance the client actually keeps"
+        );
     }
 }
