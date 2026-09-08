@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-bevy = "0.19"
+bevy = { version = "0.19", default-features = false, features = ["std", "bevy_log"] }
 bevy_ticked = { path = "../.." }
 bevy_ticked_networking = { path = "../bevy_ticked_networking" }
 bevy_ensemble = { git = "https://github.com/Sigma-studios/bevy_ensemble", branch = "master" }
@@ -12,6 +12,8 @@ postcard = { version = "1", features = ["alloc"] }
 serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
+# The tests and examples run whole apps; the library itself only needs the ECS.
+bevy = "0.19"
 avian2d = { version = "0.7", features = ["serialize"] }
 avian3d = { version = "0.7", features = ["serialize"] }
 bevy_ensemble_webrtc = { git = "https://github.com/Sigma-studios/bevy_ensemble", branch = "master" }

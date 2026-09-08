@@ -11,7 +11,7 @@ members = [
 ]
 
 [dependencies]
-bevy = "0.19"
+bevy = { version = "0.19", default-features = false, features = ["std", "bevy_log"] }
 serde = { version = "1", features = ["derive"] }
 log = { version = "0.4", features = [
     "max_level_debug",
@@ -23,6 +23,8 @@ tracing = { version = "0.1", features = [
 ] }
 
 [dev-dependencies]
+# The tests and examples run whole apps; the library itself only needs the ECS.
+bevy = "0.19"
 avian3d = "0.7"
 
 [[example]]
