@@ -20,11 +20,30 @@ use crate::{
 #[derive(Resource)]
 pub struct LocalClientPlayer(pub u128);
 
-/// Resource holding a pending server snapshot that needs to be applied.
-#[derive(Resource)]
-struct PendingSnapshot {
-    snapshot: crate::snapshot::WorldSnapshot,
-}
+/// The newest snapshot that has arrived and not yet been applied.
+///
+/// Written in place from the observer rather than inserted through `Commands`:
+/// two snapshots arriving in one frame have to compare against each other, and
+/// a deferred insert leaves both of them comparing against an empty slot.
+#[derive(Resource, Default)]
+struct PendingSnapshot(Option<crate::snapshot::WorldSnapshot>);
+
+/// The tick of the last snapshot this client applied, so an older one arriving
+/// later is recognised for what it is.
+///
+/// Snapshots go over an unordered, no-retransmit channel — which is right, and
+/// means tick 100 can arrive before tick 99. The late 99 used to be applied as
+/// if it were news: a rollback to a state the authority had already moved past,
+/// a replay from there, a pellet the host despawned at 100 standing again for a
+/// frame, and `TickTrackedEntityCounter` set backwards to 99's high-water mark.
+/// Nothing anybody would attribute to packet reordering. Anything at or before
+/// this tick is dropped at the door now, before it can become the pending one.
+///
+/// `None` until the first snapshot of a session, and reset with the session:
+/// the clock restarts at zero, so a tick remembered from the last session would
+/// make every snapshot of the next one look old.
+#[derive(Resource, Default, Debug, Clone, Copy)]
+pub struct AppliedSnapshotTick(pub Option<u64>);
 
 /// How many ticks ahead of the server the client runs (its prediction lead).
 ///
@@ -191,6 +210,8 @@ impl<T: TickedInput> Plugin for TickedClientPlugin<T> {
     fn build(&self, app: &mut App) {
         crate::input::install_input_queue::<T>(app);
         app.init_resource::<ClientTickBuffer>()
+            .init_resource::<PendingSnapshot>()
+            .init_resource::<AppliedSnapshotTick>()
             .add_message::<SnapshotApplied>()
             .add_observer(receive_snapshot)
             .add_systems(
@@ -212,10 +233,26 @@ impl<T: TickedInput> Plugin for TickedClientPlugin<T> {
 }
 
 /// Observer: store incoming server snapshot for processing before the next tick.
-fn receive_snapshot(trigger: On<ReceivedNetworkSnapshot>, mut commands: Commands) {
-    commands.insert_resource(PendingSnapshot {
-        snapshot: trigger.event().0.clone(),
-    });
+///
+/// Only if it is newer than the last one applied *and* the one already waiting.
+/// Two snapshots can land in one frame in either order, and the waiting slot used
+/// to be "last writer wins" — so 100 then 99 kept 99, and the client rolled back
+/// to a state the authority had already left. See [`AppliedSnapshotTick`].
+fn receive_snapshot(
+    trigger: On<ReceivedNetworkSnapshot>,
+    applied: Res<AppliedSnapshotTick>,
+    mut pending: ResMut<PendingSnapshot>,
+) {
+    let tick = trigger.event().0.tick;
+    let newest_seen = applied
+        .0
+        .into_iter()
+        .chain(pending.0.as_ref().map(|waiting| waiting.tick))
+        .max();
+    if newest_seen.is_some_and(|newest| tick <= newest) {
+        return;
+    }
+    pending.0 = Some(trigger.event().0.clone());
 }
 
 /// When `LocalClientPlayer` is inserted, reset tick state and pause
@@ -244,6 +281,7 @@ fn reset_on_join<T: TickedInput>(world: &mut World) {
     world.insert_resource(CurrentTick(0));
     world.insert_resource(TicksPaused);
     world.insert_resource(TickTrackedEntityCounter::default());
+    world.insert_resource(AppliedSnapshotTick::default());
     world.resource_mut::<InputQueue<T>>().inputs.clear();
     let registry = world.resource::<TickedComponentRegistry>().clone();
     registry.clear_all(world);
@@ -270,7 +308,7 @@ pub struct SnapshotApplied {
 
 /// PreTick: if a server snapshot arrived, rollback and replay local inputs to now.
 fn handle_server_snapshot<T: TickedInput>(world: &mut World) {
-    let Some(pending) = world.remove_resource::<PendingSnapshot>() else {
+    let Some(snapshot) = world.resource_mut::<PendingSnapshot>().0.take() else {
         return;
     };
 
@@ -289,12 +327,13 @@ fn handle_server_snapshot<T: TickedInput>(world: &mut World) {
 
     let was_paused = world.get_resource::<TicksPaused>().is_some();
     let current_tick = world.resource::<CurrentTick>().0;
-    let snapshot_tick = pending.snapshot.tick;
+    let snapshot_tick = snapshot.tick;
 
     let registry = world.resource::<TickedComponentRegistry>().clone();
 
     // Apply the authoritative snapshot (sets CurrentTick to snapshot_tick)
-    apply_snapshot(world, &pending.snapshot);
+    apply_snapshot(world, &snapshot);
+    world.insert_resource(AppliedSnapshotTick(Some(snapshot_tick)));
     // `was_paused` is exactly "this is the initial sync". It used to be computed
     // here, used to decide whether to skip ahead, and thrown away; consumers were
     // left to infer it from how far bodies moved.
@@ -317,7 +356,7 @@ fn handle_server_snapshot<T: TickedInput>(world: &mut World) {
     let replay_distance = current_tick as i64 - snapshot_tick as i64;
     if !was_paused
         && let Some(uuid) = world.get_resource::<LocalClientPlayer>().map(|p| p.0)
-        && let Some(&margin) = pending.snapshot.input_margins.get(&uuid)
+        && let Some(&margin) = snapshot.input_margins.get(&uuid)
     {
         world
             .resource_mut::<ClientTickBuffer>()

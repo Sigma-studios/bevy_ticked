@@ -69,4 +69,9 @@ pub fn reset_on_leave<T: TickedInput>(world: &mut World) {
     if let Some(mut margins) = world.get_resource_mut::<server::InputMargins>() {
         margins.0.clear();
     }
+    // And the same on the receiving side: the last snapshot tick a client applied would
+    // otherwise make every snapshot of the next session read as older than it.
+    if let Some(mut applied) = world.get_resource_mut::<client::AppliedSnapshotTick>() {
+        applied.0 = None;
+    }
 }
