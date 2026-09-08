@@ -1013,7 +1013,7 @@ dependencies = [
 [[package]]
 name = "bevy_ensemble"
 version = "0.1.0"
-source = "git+https://github.com/Sigma-studios/bevy_ensemble?branch=master#6e83745061a9e10259f2f5a661356223602a4b86"
+source = "git+https://github.com/Sigma-studios/bevy_ensemble?branch=master#eef7c524181427786aeeaf1f63ee048129928602"
 dependencies = [
  "bevy",
  "postcard",
@@ -1023,7 +1023,7 @@ dependencies = [
 [[package]]
 name = "bevy_ensemble_loopback"
 version = "0.1.0"
-source = "git+https://github.com/Sigma-studios/bevy_ensemble?branch=master#6e83745061a9e10259f2f5a661356223602a4b86"
+source = "git+https://github.com/Sigma-studios/bevy_ensemble?branch=master#eef7c524181427786aeeaf1f63ee048129928602"
 dependencies = [
  "bevy",
  "bevy_ensemble",
@@ -1032,7 +1032,7 @@ dependencies = [
 [[package]]
 name = "bevy_ensemble_sockets"
 version = "0.1.0"
-source = "git+https://github.com/Sigma-studios/bevy_ensemble?branch=master#6e83745061a9e10259f2f5a661356223602a4b86"
+source = "git+https://github.com/Sigma-studios/bevy_ensemble?branch=master#eef7c524181427786aeeaf1f63ee048129928602"
 dependencies = [
  "bytes",
  "js-sys",
@@ -1050,7 +1050,7 @@ dependencies = [
 [[package]]
 name = "bevy_ensemble_steam"
 version = "0.1.0"
-source = "git+https://github.com/Sigma-studios/bevy_ensemble?branch=master#6e83745061a9e10259f2f5a661356223602a4b86"
+source = "git+https://github.com/Sigma-studios/bevy_ensemble?branch=master#eef7c524181427786aeeaf1f63ee048129928602"
 dependencies = [
  "bevy",
  "bevy-steamworks",
@@ -1062,7 +1062,7 @@ dependencies = [
 [[package]]
 name = "bevy_ensemble_webrtc"
 version = "0.1.0"
-source = "git+https://github.com/Sigma-studios/bevy_ensemble?branch=master#6e83745061a9e10259f2f5a661356223602a4b86"
+source = "git+https://github.com/Sigma-studios/bevy_ensemble?branch=master#eef7c524181427786aeeaf1f63ee048129928602"
 dependencies = [
  "async-tungstenite",
  "bevy",
