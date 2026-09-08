@@ -308,3 +308,81 @@ fn the_client_already_holds_what_a_comparison_would_need() {
         "WorldActions<T>::at_tick(snapshot_tick) is the prediction to compare against"
     );
 }
+
+// ── Reordered snapshots ──────────────────────────────────────────────────────
+//
+// Snapshots travel unordered, so an older one can arrive after a newer one has
+// already been applied -- or in the same frame as it, in either order. Neither
+// used to be noticed.
+
+/// A host-shaped snapshot for `tick` that puts the body at `pos`.
+fn snapshot_placing(app: &mut App, tick: u64, pos: i32) -> WorldSnapshot {
+    let mut snapshot = snapshot_matching(app, tick);
+    let index = app
+        .world()
+        .resource::<TickedComponentRegistry>()
+        .index_of::<Pos>()
+        .unwrap();
+    snapshot.components.insert(
+        index,
+        HashMap::from([(1u64, postcard::to_allocvec(&Pos(pos)).unwrap())]),
+    );
+    snapshot
+}
+
+fn pos(app: &mut App) -> Option<Pos> {
+    let mut q = app.world_mut().query::<&Pos>();
+    q.iter(app.world()).next().copied()
+}
+
+#[test]
+fn a_snapshot_older_than_the_last_applied_one_is_dropped() {
+    let mut app = client();
+    sync(&mut app);
+    applied(&mut app);
+
+    let newer = snapshot_placing(&mut app, 10, 10);
+    app.world_mut().trigger(ReceivedNetworkSnapshot(newer));
+    app.update();
+    assert_eq!(pos(&mut app), Some(Pos(10)));
+    let tick_after_newer = app.world().resource::<CurrentTick>().0;
+
+    // Tick 9 turns up late.
+    let older = snapshot_placing(&mut app, 9, 9);
+    app.world_mut().trigger(ReceivedNetworkSnapshot(older));
+    app.update();
+
+    let seen: Vec<u64> = applied(&mut app).iter().map(|s| s.tick).collect();
+    assert_eq!(
+        seen,
+        vec![10],
+        "only the newer snapshot should have been applied, saw {seen:?}"
+    );
+    assert_eq!(
+        pos(&mut app),
+        Some(Pos(10)),
+        "a late, older snapshot must not roll the world back to a state the authority has left"
+    );
+    assert!(
+        app.world().resource::<CurrentTick>().0 >= tick_after_newer,
+        "and must not move the clock backwards"
+    );
+}
+
+#[test]
+fn two_snapshots_in_one_frame_keep_the_newest_whichever_came_first() {
+    let mut app = client();
+    sync(&mut app);
+    applied(&mut app);
+
+    // Newest first, then the straggler, before the tick loop has looked at either.
+    let newer = snapshot_placing(&mut app, 12, 12);
+    let older = snapshot_placing(&mut app, 11, 11);
+    app.world_mut().trigger(ReceivedNetworkSnapshot(newer));
+    app.world_mut().trigger(ReceivedNetworkSnapshot(older));
+    app.update();
+
+    let seen: Vec<u64> = applied(&mut app).iter().map(|s| s.tick).collect();
+    assert_eq!(seen, vec![12], "the waiting slot kept the older one: {seen:?}");
+    assert_eq!(pos(&mut app), Some(Pos(12)));
+}
