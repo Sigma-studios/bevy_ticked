@@ -8,7 +8,7 @@ use bevy::time::TimeUpdateStrategy;
 use bevy_ticked::diagnostics::TickCost;
 use bevy_ticked::prelude::*;
 use bevy_ticked::registry::TickedComponentRegistry;
-use bevy_ticked::tracked_entity::{TickTrackedEntity, TickTrackedEntityCounter};
+use bevy_ticked::tracked_entity::{TickTrackedEntity, TrackedIdAllocator};
 use bevy_ticked_networking::client::{ClientTickBuffer, LocalClientPlayer};
 use bevy_ticked_networking::diagnostics::{HealthWarnings, InputStats, ReplayStats, SnapshotStats};
 use bevy_ticked_networking::messages::{ReceivedNetworkInput, ReceivedNetworkSnapshot};
@@ -197,11 +197,11 @@ fn a_client_that_mints_a_tracked_id_is_caught_once_and_counted_after() {
     sync(&mut app);
 
     // Something on the client hands out an id. Only the authority may.
-    app.world_mut().resource_mut::<TickTrackedEntityCounter>().0 += 1;
+    app.world_mut().resource_mut::<TrackedIdAllocator>().next_authority();
     app.update();
     assert_eq!(app.world().resource::<HealthWarnings>().client_minted_tracked_id, 1);
 
-    app.world_mut().resource_mut::<TickTrackedEntityCounter>().0 += 1;
+    app.world_mut().resource_mut::<TrackedIdAllocator>().next_authority();
     app.update();
     assert_eq!(app.world().resource::<HealthWarnings>().client_minted_tracked_id, 2);
 }

@@ -30,12 +30,38 @@ use crate::tracked_entity::TickTrackedEntity;
 #[derive(Resource, Default, Debug)]
 pub struct TrackedEntityIndex {
     by_id: HashMap<u64, Entity>,
+    /// Ids that are tombstoned: kept, disabled, not in `by_id`.
+    tombstones: HashMap<u64, Entity>,
 }
 
 impl TrackedEntityIndex {
-    /// The entity carrying `id`, if it is in this world.
+    /// The entity carrying `id`, if it is alive in this world. A tombstone is not.
     pub fn get(&self, id: u64) -> Option<Entity> {
         self.by_id.get(&id).copied()
+    }
+
+    /// The tombstoned entity for `id`, if there is one.
+    pub fn tombstone_of(&self, id: u64) -> Option<Entity> {
+        self.tombstones.get(&id).copied()
+    }
+
+    /// Every `(id, entity)` tombstoned, in no particular order.
+    pub fn tombstones(&self) -> impl Iterator<Item = (Entity, u64)> + '_ {
+        self.tombstones.iter().map(|(id, entity)| (*entity, *id))
+    }
+
+    pub(crate) fn tombstone(&mut self, id: u64, entity: Entity) {
+        if self.by_id.get(&id) == Some(&entity) {
+            self.by_id.remove(&id);
+        }
+        self.tombstones.insert(id, entity);
+    }
+
+    pub(crate) fn revive(&mut self, id: u64, entity: Entity) {
+        if self.tombstones.get(&id) == Some(&entity) {
+            self.tombstones.remove(&id);
+        }
+        self.by_id.insert(id, entity);
     }
 
     pub fn contains(&self, id: u64) -> bool {
@@ -87,5 +113,8 @@ pub(crate) fn unindex_tracked(
     // See the module note: an id can already have been claimed by a different entity.
     if index.by_id.get(&id.0) == Some(&remove.entity) {
         index.by_id.remove(&id.0);
+    }
+    if index.tombstones.get(&id.0) == Some(&remove.entity) {
+        index.tombstones.remove(&id.0);
     }
 }

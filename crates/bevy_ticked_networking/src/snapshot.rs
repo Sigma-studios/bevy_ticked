@@ -26,10 +26,12 @@ use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use bevy_ticked::{
+    lifetimes::{TrackedEntityLifetimes, revive, tombstone_at},
     registry::{TickedComponentRegistry, TypeMask},
     resource_registry::TickedResourceRegistry,
     tick::CurrentTick,
-    tracked_entity::{TickTrackedEntity, TickTrackedEntityCounter},
+    tracked_entity::{TickTrackedEntity, TrackedIdAllocator},
+    tracked_index::TrackedEntityIndex,
 };
 
 /// One snapshot, as sent to one client.
@@ -235,10 +237,14 @@ pub struct Applied {
 
 /// Apply a full body: sync entity lifecycle, apply component state, set the tick.
 ///
-/// Snapshot-implies-existence:
-/// - an id in the body but not local is **spawned**, its components inserted first and
-///   `TickTrackedEntity` last, so an `On<Add, TickTrackedEntity>` observer sees them;
-/// - a local tracked id not in the body is **despawned**;
+/// Snapshot-implies-existence, with the lifetimes deciding what absence means:
+/// - an id in the body but not local is **spawned** — or its tombstone **revived**, if this
+///   peer despawned it and the authority says it is still there — its components inserted
+///   first and `TickTrackedEntity` last, so an `On<Add, TickTrackedEntity>` observer sees them;
+/// - a local tracked id not in the body is **tombstoned** if it was born at or before `tick`
+///   (the authority has seen it and does not have it); one born after `tick` is left to the
+///   rollback, which knows whether the replay spawns it again. That is what lets a client
+///   predict a spawn without the next snapshot deleting it;
 /// - an entity in both gets the body's components, and loses any networked type the body does
 ///   not give it (absence is authoritative).
 ///
@@ -256,12 +262,26 @@ pub fn apply_full_body(world: &mut World, tick: u64, body: &FullBody) -> Applied
     let body_ids: HashSet<u64> = body.entities.iter().map(|record| record.id).collect();
     let mut seen = HashSet::with_capacity(body.entities.len());
 
-    // Despawn what the authority does not have. Immediate, so the walk below never sees them.
+    // What the authority does not have, and has had the chance to see: gone. Immediate, so the
+    // walk below never sees them. A tombstone, not a destruction, so a later word can undo it.
+    let lifetimes = world.get_resource::<TrackedEntityLifetimes>().cloned();
     for (entity, id) in &existing {
-        if !body_ids.contains(id) {
-            world.despawn(*entity);
-            applied.despawned.push(*id);
+        if body_ids.contains(id) {
+            continue;
         }
+        let born_after = lifetimes
+            .as_ref()
+            .and_then(|l| l.born_at(*id))
+            .is_some_and(|born| born > tick);
+        if born_after {
+            continue;
+        }
+        if world.contains_resource::<TrackedEntityIndex>() {
+            tombstone_at(world, *entity, *id, tick);
+        } else {
+            world.despawn(*entity);
+        }
+        applied.despawned.push(*id);
     }
     let mut by_id: std::collections::HashMap<u64, Entity> = existing
         .iter()
@@ -278,9 +298,20 @@ pub fn apply_full_body(world: &mut World, tick: u64, body: &FullBody) -> Applied
         let (entity, fresh) = match by_id.get(&record.id) {
             Some(entity) => (*entity, false),
             None => {
-                let entity = world.spawn_empty().id();
+                // A tombstone this peer left — a predicted despawn the authority contradicts,
+                // a rewind past a spawn the authority confirms — comes back as itself.
+                let tombstoned = world
+                    .get_resource::<TrackedEntityIndex>()
+                    .and_then(|index| index.tombstone_of(record.id));
+                let entity = match tombstoned {
+                    Some(entity) => {
+                        revive(world, entity, record.id, tick);
+                        entity
+                    }
+                    None => world.spawn_empty().id(),
+                };
                 by_id.insert(record.id, entity);
-                (entity, true)
+                (entity, tombstoned.is_none())
             }
         };
         let mut rest: &[u8] = &record.bytes;
@@ -301,15 +332,26 @@ pub fn apply_full_body(world: &mut World, tick: u64, body: &FullBody) -> Applied
     }
     registry.finish_wire_tick(world, tick);
 
+    // Everything the authority named existed at `tick`, whatever this peer had captured.
+    if let Some(mut lifetimes) = world.get_resource_mut::<TrackedEntityLifetimes>() {
+        for id in &body_ids {
+            lifetimes.note_alive(tick, *id);
+        }
+    }
+
     if !body.resources.is_empty()
         && let Some(resources) = world.get_resource::<TickedResourceRegistry>().cloned()
     {
         resources.deserialize_and_apply_all(world, tick, &body.resources);
     }
 
-    // Reset the counter to the highest id so a replay mints the same ids the server will.
-    let max_id = body_ids.iter().max().copied().unwrap_or(0);
-    world.resource_mut::<TickTrackedEntityCounter>().0 = max_id;
+    // Every id the authority named is one nobody may mint again.
+    {
+        let mut allocator = world.resource_mut::<TrackedIdAllocator>();
+        for id in &body_ids {
+            allocator.raise_to(TickTrackedEntity(*id));
+        }
+    }
     world.resource_mut::<CurrentTick>().0 = tick;
     applied
 }

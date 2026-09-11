@@ -7,7 +7,7 @@ use bevy_ensemble::{
 use bevy_ensemble_webrtc::{BevyEnsembleWebrtcPlugin, JoinWebrtcLobby, RefreshLobbyList};
 use bevy_ticked::prelude::*;
 use bevy_ticked_networking::prelude::*;
-use bevy_ticked_networking_ensemble::TickedNetworkingEnsemblePlugin;
+use bevy_ticked_networking_ensemble::{SpawnerSlots, TickedEnsembleSessionPlugin, TickedNetworkingEnsemblePlugin};
 use serde::{Deserialize, Serialize};
 
 // --- Constants ---
@@ -50,6 +50,12 @@ struct SpawnPoint(Vec2);
 #[derive(Component, PartialEq, Clone, Debug, Serialize, Deserialize, Default)]
 struct ShootCooldown(u64);
 
+/// The slot the player's peer mints ids under. On the body, networked, so every peer spawns
+/// this player's bullets under the same ids: the shooter predicts the bullet, the host mints
+/// the same id from the relayed input and confirms it.
+#[derive(Component, PartialEq, Clone, Copy, Debug, Serialize, Deserialize)]
+struct PlayerSlot(u8);
+
 #[derive(Component)]
 struct UiText;
 
@@ -80,6 +86,9 @@ fn main() {
         .add_plugins(TickedServerPlugin::<PlayerInput>::new())
         .add_plugins(TickedClientPlugin::<PlayerInput>::new())
         .add_plugins(TickedNetworkingEnsemblePlugin::<PlayerInput>::new())
+        // The session plugin adopts the roles, runs the registry handshake and hands each
+        // client a spawner slot; the example used to do the first by hand and the rest not at all.
+        .add_plugins(TickedEnsembleSessionPlugin::default())
         // The renderer blends each body between its last two tick states, and a correction
         // to a predicted body slides into place instead of blinking there. Neither touches
         // what the simulation reads.
@@ -95,6 +104,7 @@ fn main() {
         .register_networked_ticked_component::<EntityKind>("EntityKind")
         .register_networked_ticked_component::<SpawnPoint>("SpawnPoint")
         .register_networked_ticked_component::<ShootCooldown>("ShootCooldown")
+        .register_networked_ticked_component::<PlayerSlot>("PlayerSlot")
         // Startup
         .add_systems(Startup, setup)
         // Lobby management (Update)
@@ -106,7 +116,6 @@ fn main() {
                 lobby_refresh_key,
                 lobby_escape_key,
                 cleanup_on_lobby_gone,
-                on_lobby_ready,
                 server_spawn_players,
                 capture_local_input,
                 sync_visuals,
@@ -116,7 +125,13 @@ fn main() {
         // Simulation systems (run inside TickedSimulation)
         .add_systems(
             TickedSimulation,
-            (apply_inputs, move_bullets, bullet_collision, sync_bullet_transforms).chain(),
+            (
+                apply_inputs,
+                move_bullets,
+                bullet_collision,
+                sync_bullet_transforms,
+            )
+                .chain(),
         )
         // React to networked entity lifecycle
         .add_observer(on_entity_spawned)
@@ -255,26 +270,6 @@ fn cleanup_on_lobby_gone(
     commands.remove_resource::<LocalClientPlayer>();
 }
 
-/// When lobby becomes ready, insert the appropriate server/client player resource.
-fn on_lobby_ready(
-    mut commands: Commands,
-    local_player: Option<Res<LocalMultiplayerPlayerId>>,
-    server_player: Option<Res<LocalServerPlayer>>,
-    client_player: Option<Res<LocalClientPlayer>>,
-    host_lobbies: Query<(), (With<Lobby>, With<Host>)>,
-    client_lobbies: Query<(), (With<Lobby>, Without<Host>)>,
-) {
-    let Some(local_player) = local_player else {
-        return;
-    };
-
-    if !host_lobbies.is_empty() && server_player.is_none() {
-        commands.insert_resource(LocalServerPlayer(local_player.0));
-    }
-    if !client_lobbies.is_empty() && client_player.is_none() {
-        commands.insert_resource(LocalClientPlayer(local_player.0));
-    }
-}
 
 // --- Server: spawn player entities when participants join ---
 
@@ -286,7 +281,9 @@ fn server_spawn_players(
         Without<PlayerOwnedEntities>,
     >,
     existing_players: Query<(), (With<EntityKind>, With<PlayerOwned>)>,
-    mut counter: ResMut<TickTrackedEntityCounter>,
+    mut counter: ResMut<TrackedIdAllocator>,
+    slots: Option<Res<SpawnerSlots>>,
+    local_player: Option<Res<LocalMultiplayerPlayerId>>,
 ) {
     let Some(lobby_entity) = host_lobbies.iter().next() else {
         return;
@@ -298,6 +295,16 @@ fn server_spawn_players(
         if participant_of.0 != lobby_entity {
             continue;
         }
+        // A body carries its player's spawner slot, so it waits for the slot: the host's own
+        // is 0, a client's arrives with the registry handshake.
+        let slot = if local_player.as_ref().is_some_and(|me| me.0 == participant.player_uuid) {
+            0
+        } else {
+            match slots.as_ref().and_then(|slots| slots.slot_of(participant.player_uuid)) {
+                Some(slot) => slot,
+                None => continue,
+            }
+        };
 
         // Alternate spawn sides
         let spawn_x = if player_index % 2 == 0 {
@@ -306,7 +313,7 @@ fn server_spawn_players(
             ARENA_HALF_W * 0.6
         };
         let spawn_pos = Vec2::new(spawn_x, 0.0);
-        let tracked_id = counter.next();
+        let tracked_id = counter.next_authority();
 
         commands.spawn((
             tracked_id,
@@ -320,6 +327,7 @@ fn server_spawn_players(
             SpawnPoint(spawn_pos),
             ShootCooldown::default(),
             Owner(participant.player_uuid),
+            PlayerSlot(slot),
             PlayerOwned(participant_entity),
         ));
 
@@ -489,43 +497,45 @@ fn move_bullets(world: &mut World) {
     }
 
     for entity in bullets_to_despawn {
-        world.despawn(entity);
+        world.entity_mut(entity).despawn_ticked();
     }
 
-    // Spawn new bullets
-    let mut player_data: Vec<(u128, Vec2, u64)> = Vec::new();
+    // Spawn new bullets, on every peer, under the shooter's slot. Sorted by uuid so every
+    // peer mints in the same order.
+    let mut player_data: Vec<(u128, Vec2, u64, u8)> = Vec::new();
     {
-        let mut query = world.query::<(&Owner, &Position, &ShootCooldown, &EntityKind)>();
-        for (uuid, pos, cooldown, kind) in query.iter(world) {
+        let mut query =
+            world.query::<(&Owner, &Position, &ShootCooldown, &PlayerSlot, &EntityKind)>();
+        for (uuid, pos, cooldown, slot, kind) in query.iter(world) {
             if *kind == EntityKind::Player {
-                player_data.push((uuid.0, pos.0, cooldown.0));
+                player_data.push((uuid.0, pos.0, cooldown.0, slot.0));
             }
         }
     }
+    shoot_requests.sort_by_key(|(uuid, _)| *uuid);
 
-    let mut counter = world.resource_mut::<TickTrackedEntityCounter>();
     let mut spawns = Vec::new();
-
     for (uuid, aim_angle) in &shoot_requests {
-        if let Some((_, pos, cooldown)) = player_data.iter().find(|(u, _, _)| u == uuid) {
+        if let Some((_, pos, cooldown, slot)) = player_data.iter().find(|(u, ..)| u == uuid) {
             if *cooldown > 0 {
                 continue;
             }
-            let tracked_id = counter.next();
             let dir = Vec2::new(aim_angle.cos(), aim_angle.sin());
             let bullet_pos = *pos + dir * (PLAYER_RADIUS + BULLET_RADIUS + 2.0);
-            spawns.push((*uuid, tracked_id, bullet_pos, *aim_angle));
+            spawns.push((*uuid, *slot, bullet_pos, *aim_angle));
         }
     }
 
-    for (owner_uuid, tracked_id, bullet_pos, aim_angle) in spawns {
-        world.spawn((
-            tracked_id,
-            EntityKind::Bullet,
-            Position(bullet_pos),
-            AimAngle(aim_angle),
-            Owner(owner_uuid),
-        ));
+    for (owner_uuid, slot, bullet_pos, aim_angle) in spawns {
+        world.spawn_tracked_by(
+            SpawnerSlot(slot),
+            (
+                EntityKind::Bullet,
+                Position(bullet_pos),
+                AimAngle(aim_angle),
+                Owner(owner_uuid),
+            ),
+        );
 
         // Reset cooldown on the player
         let mut query = world.query::<(&Owner, &mut ShootCooldown, &EntityKind)>();
@@ -578,7 +588,7 @@ fn bullet_collision(world: &mut World) {
     }
 
     for entity in bullets_to_despawn {
-        world.despawn(entity);
+        world.entity_mut(entity).despawn_ticked();
     }
 
     for (entity, spawn_pos) in players_to_respawn {
@@ -632,7 +642,12 @@ fn body_kind(
 fn on_entity_spawned(
     trigger: On<Add, TickTrackedEntity>,
     mut commands: Commands,
-    query: Query<(&EntityKind, &Position, Option<&Owner>, Option<&ReplicationMode>)>,
+    query: Query<(
+        &EntityKind,
+        &Position,
+        Option<&Owner>,
+        Option<&ReplicationMode>,
+    )>,
     local_client: Option<Res<LocalClientPlayer>>,
 ) {
     let entity = trigger.entity;

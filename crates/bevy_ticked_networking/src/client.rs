@@ -9,7 +9,7 @@ use bevy_ticked::{
     resource_registry::TickedResourceRegistry,
     tick::{CurrentTick, HistoryBufferTicks, TickHoldReason, TickHolds},
     time::{run_tick_schedule, TickRateDilation},
-    tracked_entity::{TickTrackedEntity, TickTrackedEntityCounter},
+    tracked_entity::{SpawnerSlot, TickTrackedEntity, TrackedIdAllocator},
 };
 
 use crate::{
@@ -50,7 +50,7 @@ struct PendingSnapshot(Option<SnapshotPacket>);
 /// means tick 100 can arrive before tick 99. The late 99 used to be applied as
 /// if it were news: a rollback to a state the authority had already moved past,
 /// a replay from there, a pellet the host despawned at 100 standing again for a
-/// frame, and `TickTrackedEntityCounter` set backwards to 99's high-water mark.
+/// frame, and the id allocator set backwards to 99's high-water mark.
 /// Nothing anybody would attribute to packet reordering. Anything at or before
 /// this tick is dropped at the door now, before it can become the pending one.
 ///
@@ -259,7 +259,7 @@ impl<T: TickedInput> Plugin for TickedClientPlugin<T> {
                 Update,
                 crate::reset_on_leave::<T>.run_if(resource_removed::<LocalClientPlayer>),
             )
-            .init_resource::<CounterAfterSnapshot>()
+            .init_resource::<AuthoritySequenceAfterSnapshot>()
             .configure_sets(
                 TickedLoop,
                 (
@@ -360,7 +360,7 @@ fn reset_on_join<T: TickedInput>(world: &mut World) {
     world
         .resource_mut::<TickHolds>()
         .hold(TickHoldReason::AwaitingSync);
-    world.insert_resource(TickTrackedEntityCounter::default());
+    world.insert_resource(TrackedIdAllocator::default());
     world.insert_resource(AppliedSnapshotTick::default());
     world.insert_resource(LastAppliedSeq::default());
     world.resource_mut::<InputQueue<T>>().inputs.clear();
@@ -639,6 +639,10 @@ fn handle_server_snapshot<T: TickedInput>(world: &mut World) {
     // that was part authority and part future. Then everything after the snapshot's tick is
     // forgotten: the component history, and the event logs, or a prediction that never
     // happened stays presented and its correction is swallowed as "already shown".
+    // Existence too: an entity this client spawned after the snapshot's tick — a predicted
+    // bullet — is tombstoned so the replay's spawn revives it under the same id, and an
+    // entity it despawned after that tick is back for the replay to despawn again.
+    bevy_ticked::lifetimes::restore_existence(world, &registry, snapshot_tick);
     registry.restore_local_only(world, snapshot_tick);
     registry.truncate_all_after(world, snapshot_tick);
     TickedEventRegistry::truncate_all_after(world, snapshot_tick);
@@ -848,34 +852,38 @@ fn converge_lead(world: &mut World, current_tick: u64, replay_distance: u64, tar
     }
 }
 
-/// The counter as the last snapshot left it, so a client that mints an id on its own is caught.
+/// The authority's sequence as the last snapshot left it, so a client that mints under slot
+/// 0 is caught.
 ///
-/// Until predicted spawns land, only the authority may mint a tracked id: a client that does so
-/// hands out a number the host will hand out too, and `apply_snapshot` then merges two entities
-/// into one. Every consumer wrote a `debug_assert` for this; here it is once, as a warning that
-/// names the id.
+/// A client mints under its own slot, and that is fine: the host, running the same simulation
+/// from the same inputs, mints the same id and confirms it. An id minted under the authority's
+/// slot on a client is one the host will hand out to something else, and the snapshot then
+/// merges two entities into one. Every consumer wrote a `debug_assert` for this; here it is
+/// once, as a warning that names the id.
 #[derive(Resource, Default)]
-struct CounterAfterSnapshot(u64);
+struct AuthoritySequenceAfterSnapshot(u64);
 
 fn watch_for_client_minted_ids(
-    counter: Res<TickTrackedEntityCounter>,
+    allocator: Res<TrackedIdAllocator>,
     applied: Res<AppliedSnapshotTick>,
-    mut after_snapshot: ResMut<CounterAfterSnapshot>,
+    mut after_snapshot: ResMut<AuthoritySequenceAfterSnapshot>,
     mut health: ResMut<HealthWarnings>,
 ) {
+    let authority = allocator.peek(SpawnerSlot::AUTHORITY);
     if applied.is_changed() {
-        after_snapshot.0 = counter.0;
+        after_snapshot.0 = authority;
         return;
     }
-    if counter.0 > after_snapshot.0 {
-        let minted = counter.0;
+    if authority > after_snapshot.0 {
+        let minted = TickTrackedEntity::new(SpawnerSlot::AUTHORITY, authority - 1).0;
         HealthWarnings::raise(&mut health.client_minted_tracked_id, || {
             format!(
-                "this client minted tracked id {minted} itself; only the authority may, or the \
-                 host will hand the same id to something else"
+                "this client minted tracked id {minted} under the authority's slot; only the \
+                 host may, or it will hand the same id to something else. Spawn through \
+                 TrackedSpawner, which mints under this client's own slot"
             )
         });
-        after_snapshot.0 = counter.0;
+        after_snapshot.0 = authority;
     }
 }
 
