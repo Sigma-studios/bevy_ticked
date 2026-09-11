@@ -19,6 +19,7 @@ use bevy_ensemble::{EnsembleMessage, EnsembleMessageRegistry, packet_index, unfr
 use bevy_ensemble_loopback::{Link, LoopbackNetwork, PeerId, SentPacket};
 use bevy_ticked::tracked_entity::TickTrackedEntity;
 use bevy_ticked_networking::input::TickedInput;
+use bevy_ticked_networking::snapshot::{SnapshotPacket, decode_packet};
 use bevy_ticked_networking_ensemble::{EnsembleInputMessage, EnsembleSnapshotMessage};
 
 use crate::peer::{HOST_UUID, TICK, client_server_peer};
@@ -513,6 +514,34 @@ impl TickedNetwork {
             .collect()
     }
 
+    /// Every snapshot traced from `from` to `to`, decoded, in send order — delivered or not.
+    ///
+    /// Three envelopes come off: the loopback frame (several messages packed into one
+    /// datagram), the ensemble message (a two-byte wire index and a postcard
+    /// [`EnsembleSnapshotMessage`]), and the packet's own encoding. What is left is what the
+    /// server built for that recipient: its `seq`, its `your_margin`, the body. A test that
+    /// asks "what was this client told" reads these rather than the client's world, which has
+    /// already predicted past them.
+    ///
+    /// A traced message that does not decode is skipped: a test corrupting packets on purpose
+    /// wants to see what survived, not a panic in the harness.
+    pub fn decode_snapshots(&self, from: PeerId, to: PeerId) -> Vec<SnapshotPacket> {
+        let Some(index) = self.wire_index::<EnsembleSnapshotMessage>(from) else {
+            return Vec::new();
+        };
+        self.trace()
+            .iter()
+            .filter(|packet| packet.from == from && packet.to == to)
+            .flat_map(|packet| messages_in(&packet.bytes))
+            .filter(|message| packet_index(message) == Some(index))
+            .filter_map(|message| {
+                let envelope: EnsembleSnapshotMessage =
+                    postcard::from_bytes(&message[WIRE_INDEX_BYTES..]).ok()?;
+                decode_packet(&envelope.bytes)
+            })
+            .collect()
+    }
+
     /// The input packets traced from `from` to `to`, by frame and size.
     pub fn inputs_sent<I: TickedInput>(&self, from: PeerId, to: PeerId) -> Vec<InputOnWire> {
         self.input_packets::<I>(from, to)
@@ -555,14 +584,19 @@ impl TickedNetwork {
     }
 }
 
+/// The two-byte wire index `bevy_ensemble` puts in front of every message's postcard body.
+const WIRE_INDEX_BYTES: usize = 2;
+
+/// The messages in `packet`: the ones a frame holds, or the packet itself when it is one.
+fn messages_in(packet: &[u8]) -> Vec<&[u8]> {
+    unframe_packet(packet).unwrap_or_else(|| vec![packet])
+}
+
 /// Whether `packet` — one message, or a frame of several — holds a message with `index`.
 fn carries(packet: &[u8], index: u16) -> bool {
-    match unframe_packet(packet) {
-        Some(messages) => messages
-            .iter()
-            .any(|message| packet_index(message) == Some(index)),
-        None => packet_index(packet) == Some(index),
-    }
+    messages_in(packet)
+        .iter()
+        .any(|message| packet_index(message) == Some(index))
 }
 
 /// A lockstep peer: [`peer_app`](crate::peer::peer_app) plus `LockstepPlugin<A, S>`, a per-tick

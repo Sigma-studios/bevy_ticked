@@ -16,7 +16,7 @@ use crate::{
     diagnostics::{HealthWarnings, ReplayStats},
     input::{InputQueue, TickedInput},
     messages::{ReceivedNetworkSnapshot, SendNetworkInput},
-    snapshot::apply_snapshot,
+    snapshot::{SnapshotBody, SnapshotPacket, apply_full_body},
 };
 
 /// Resource identifying the local player on the client.
@@ -29,7 +29,7 @@ pub struct LocalClientPlayer(pub u128);
 /// two snapshots arriving in one frame have to compare against each other, and
 /// a deferred insert leaves both of them comparing against an empty slot.
 #[derive(Resource, Default)]
-struct PendingSnapshot(Option<crate::snapshot::WorldSnapshot>);
+struct PendingSnapshot(Option<SnapshotPacket>);
 
 /// The tick of the last snapshot this client applied, so an older one arriving
 /// later is recognised for what it is.
@@ -47,6 +47,10 @@ struct PendingSnapshot(Option<crate::snapshot::WorldSnapshot>);
 /// make every snapshot of the next one look old.
 #[derive(Resource, Default, Debug, Clone, Copy)]
 pub struct AppliedSnapshotTick(pub Option<u64>);
+
+/// `seq` of the newest snapshot this client applied, acknowledged on every input packet.
+#[derive(Resource, Default, Debug, Clone, Copy)]
+pub struct LastAppliedSeq(pub Option<u32>);
 
 /// How many ticks ahead of the server the client runs (its prediction lead).
 ///
@@ -223,6 +227,7 @@ impl<T: TickedInput> Plugin for TickedClientPlugin<T> {
         app.init_resource::<ClientTickBuffer>()
             .init_resource::<PendingSnapshot>()
             .init_resource::<AppliedSnapshotTick>()
+            .init_resource::<LastAppliedSeq>()
             .init_resource::<ReplayStats>()
             .init_resource::<HealthWarnings>()
             .add_message::<SnapshotApplied>()
@@ -239,7 +244,7 @@ impl<T: TickedInput> Plugin for TickedClientPlugin<T> {
             .add_systems(
                 TickedLoop,
                 (
-                    handle_server_snapshot.in_set(TickedSystems::PreTick),
+                    handle_server_snapshot::<T>.in_set(TickedSystems::PreTick),
                     (send_local_input::<T>, watch_for_client_minted_ids)
                         .in_set(TickedSystems::PostTick),
                 ),
@@ -307,6 +312,7 @@ fn reset_on_join<T: TickedInput>(world: &mut World) {
         .hold(TickHoldReason::AwaitingSync);
     world.insert_resource(TickTrackedEntityCounter::default());
     world.insert_resource(AppliedSnapshotTick::default());
+    world.insert_resource(LastAppliedSeq::default());
     world.resource_mut::<InputQueue<T>>().inputs.clear();
     let registry = world.resource::<TickedComponentRegistry>().clone();
     registry.clear_all(world);
@@ -338,9 +344,18 @@ pub struct SnapshotApplied {
 }
 
 /// PreTick: if a server snapshot arrived, rollback and replay local inputs to now.
-fn handle_server_snapshot(world: &mut World) {
-    let Some(snapshot) = world.resource_mut::<PendingSnapshot>().0.take() else {
+fn handle_server_snapshot<T: TickedInput>(world: &mut World) {
+    let Some(packet) = world.resource_mut::<PendingSnapshot>().0.take() else {
         return;
+    };
+    let body = match &packet.body {
+        SnapshotBody::Full(body) => body,
+        SnapshotBody::Delta(_) => {
+            // Reserved for the delta phase. A host from after it talking to a client from
+            // before would be refused at the handshake, so this is a defence, not a path.
+            world.resource_mut::<ReplayStats>().dropped_delta_body += 1;
+            return;
+        }
     };
 
     // Not a client (yet). Applying the host's world at a peer that still thinks it
@@ -362,7 +377,7 @@ fn handle_server_snapshot(world: &mut World) {
         .resource::<TickHolds>()
         .holds(TickHoldReason::AwaitingSync);
     let current_tick = world.resource::<CurrentTick>().0;
-    let snapshot_tick = snapshot.tick;
+    let snapshot_tick = packet.tick;
 
     let registry = world.resource::<TickedComponentRegistry>().clone();
 
@@ -386,8 +401,35 @@ fn handle_server_snapshot(world: &mut World) {
     }
 
     // Apply the authoritative snapshot (sets CurrentTick to snapshot_tick)
-    apply_snapshot(world, &snapshot);
+    let applied = apply_full_body(world, snapshot_tick, body);
+    if !applied.duplicate_ids.is_empty() {
+        let mut health = world.resource_mut::<HealthWarnings>();
+        let mut count = health.duplicate_ids_in_snapshot;
+        HealthWarnings::raise(&mut count, || {
+            format!(
+                "a snapshot for tick {snapshot_tick} named the same tracked id more than once: \
+                 {:?}. Only the first record was applied.",
+                applied.duplicate_ids
+            )
+        });
+        health.duplicate_ids_in_snapshot = count;
+    }
+    // Other players' inputs the host already holds. The local player's own are dropped: the
+    // client has them, and a relayed copy could be older than what it has queued since.
+    let local = world.get_resource::<LocalClientPlayer>().map(|p| p.0);
+    if !body.inputs_ahead.is_empty() {
+        let mut queue = world.resource_mut::<InputQueue<T>>();
+        for relayed in &body.inputs_ahead {
+            if Some(relayed.player) == local {
+                continue;
+            }
+            if let Ok(input) = postcard::from_bytes::<T>(&relayed.bytes) {
+                queue.insert(relayed.tick, relayed.player, input);
+            }
+        }
+    }
     world.insert_resource(AppliedSnapshotTick(Some(snapshot_tick)));
+    world.insert_resource(LastAppliedSeq(Some(packet.seq)));
     {
         let mut stats = world.resource_mut::<ReplayStats>();
         stats.snapshots_applied += 1;
@@ -413,13 +455,10 @@ fn handle_server_snapshot(world: &mut World) {
     // difference is "however long this peer has been running" rather than a
     // measurement, and no input has been sent for the server to have timed.
     let replay_distance = current_tick as i64 - snapshot_tick as i64;
-    if !was_paused
-        && let Some(uuid) = world.get_resource::<LocalClientPlayer>().map(|p| p.0)
-        && let Some(&margin) = snapshot.input_margins.get(&uuid)
-    {
+    if !was_paused {
         world
             .resource_mut::<ClientTickBuffer>()
-            .observe(replay_distance, margin);
+            .observe(replay_distance, i64::from(packet.your_margin));
     }
 
     if snapshot_tick >= current_tick {
@@ -641,6 +680,7 @@ fn send_local_input<T: TickedInput>(
     holds: Res<TickHolds>,
     local_player: Option<Res<LocalClientPlayer>>,
     queue: Res<InputQueue<T>>,
+    ack: Res<LastAppliedSeq>,
     mut commands: Commands,
 ) {
     if holds.is_held() {
@@ -655,7 +695,10 @@ fn send_local_input<T: TickedInput>(
     if inputs.is_empty() {
         return;
     }
-    commands.trigger(SendNetworkInput { inputs });
+    commands.trigger(SendNetworkInput {
+        inputs,
+        ack: ack.0,
+    });
 }
 
 #[cfg(test)]

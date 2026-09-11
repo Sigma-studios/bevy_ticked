@@ -1,29 +1,49 @@
-//! What `wire_hash()` does and does not notice.
+//! What the wire format is, and what `wire_hash()` does and does not notice.
 //!
-//! The hash existed for a long time with a doc comment telling people to exchange it at join time,
-//! and nobody did — so these are the first tests it has ever had, and two of them are about the
-//! reason it was not safe to wire up: an entry registered without an explicit name was hashed
-//! under `std::any::type_name`, whose output is explicitly not specified across compiler versions.
+//! The format is the sorted list of networked names and nothing else. Registration order used
+//! to be the format: indices were assigned by position, and two peers that registered in a
+//! different order read each other's `Position` bytes as something else with no error of any
+//! kind. Now the index is derived from the name, so the order cannot matter, a rollback-only
+//! type cannot shift anything, and the handshake can say which name differs.
 
 use bevy::prelude::*;
 use bevy_ticked::prelude::*;
-use bevy_ticked::registry::TickedComponentRegistry;
+use bevy_ticked::registry::{PROTOCOL_VERSION, TickedComponentRegistry, WireFns};
 use bevy_ticked::resource_registry::TickedResourceRegistry;
 
 #[derive(Component, Clone, Copy)]
-struct Pos(i32);
+struct Pos(#[allow(dead_code)] i32);
 
 #[derive(Component, Clone, Copy)]
-struct Vel(i32);
+struct Vel(#[allow(dead_code)] i32);
 
 #[derive(Component, Clone, Copy)]
 struct Tag;
 
 #[derive(Resource, Clone, Copy, Default)]
-struct Round(u32);
+struct Round(#[allow(dead_code)] u32);
 
 #[derive(Resource, Clone, Copy, Default)]
-struct Score(u32);
+struct Score(#[allow(dead_code)] u32);
+
+/// The networking crate supplies real ones; the format does not depend on them.
+fn stub_wire() -> WireFns {
+    WireFns {
+        encode_one: |_, _, _, _| false,
+        decode_one: |_, _, _, _, _| None,
+        begin_tick: |_, _| {},
+        finish_tick: |_, _| {},
+        has_at: |_, _, _| false,
+    }
+}
+
+fn networked<T: TickedComponent>(app: &mut App, name: &'static str) {
+    app.init_resource::<TickedComponentRegistry>();
+    app.init_resource::<WorldActions<T>>();
+    app.world_mut()
+        .resource_mut::<TickedComponentRegistry>()
+        .register_networked::<T>(name, stub_wire());
+}
 
 fn registry(build: impl FnOnce(&mut App)) -> TickedComponentRegistry {
     let mut app = App::new();
@@ -39,72 +59,165 @@ fn resources(build: impl FnOnce(&mut App)) -> TickedResourceRegistry {
     app.world().resource::<TickedResourceRegistry>().clone()
 }
 
-// ── what it must catch ───────────────────────────────────────────────────────
+fn stub_serialize(_: &World, _: u64) -> Option<Vec<u8>> {
+    None
+}
+fn stub_apply(_: &mut World, _: u64, _: &[u8]) {}
 
-/// The failure the whole thing exists for: same types, different order, so every index from the
-/// first difference onward means something else.
+// ── the format ───────────────────────────────────────────────────────────────
+
+/// The failure the old format had: same types, different order, different meaning of index 0.
 #[test]
-fn a_reordered_registration_changes_the_hash() {
+fn registration_order_does_not_change_the_wire_format() {
     let one = registry(|app| {
-        app.register_ticked_component_as::<Pos>("Pos")
-            .register_ticked_component_as::<Vel>("Vel");
+        networked::<Pos>(app, "Pos");
+        networked::<Vel>(app, "Vel");
     });
     let other = registry(|app| {
-        app.register_ticked_component_as::<Vel>("Vel")
-            .register_ticked_component_as::<Pos>("Pos");
+        networked::<Vel>(app, "Vel");
+        networked::<Pos>(app, "Pos");
     });
 
-    assert_ne!(
-        one.wire_hash(),
-        other.wire_hash(),
-        "the multiset of names is the same and the meaning of index 0 is not"
+    assert_eq!(one.wire_hash(), other.wire_hash());
+    assert_eq!(
+        one.wire_names().collect::<Vec<_>>(),
+        other.wire_names().collect::<Vec<_>>()
     );
 }
 
 #[test]
-fn an_extra_registration_changes_the_hash() {
+fn derived_indices_are_stable_under_reordering() {
     let one = registry(|app| {
-        app.register_ticked_component_as::<Pos>("Pos");
+        networked::<Pos>(app, "Pos");
+        networked::<Vel>(app, "Vel");
     });
     let other = registry(|app| {
-        app.register_ticked_component_as::<Pos>("Pos")
-            .register_ticked_component_as::<Vel>("Vel");
+        networked::<Vel>(app, "Vel");
+        networked::<Pos>(app, "Pos");
+    });
+    assert_eq!(one.wire_index_of::<Pos>(), other.wire_index_of::<Pos>());
+    assert_eq!(one.wire_index_of::<Vel>(), other.wire_index_of::<Vel>());
+    assert_eq!(one.wire_index_of::<Pos>(), Some(0), "\"Pos\" sorts before \"Vel\"");
+    assert_eq!(one.wire_index_of::<Vel>(), Some(1));
+    // The registration index is a different number and says so in its name.
+    assert_ne!(one.index_of::<Pos>(), other.index_of::<Pos>());
+}
+
+#[test]
+fn an_extra_networked_registration_changes_the_hash() {
+    let one = registry(|app| networked::<Pos>(app, "Pos"));
+    let other = registry(|app| {
+        networked::<Pos>(app, "Pos");
+        networked::<Vel>(app, "Vel");
     });
     assert_ne!(one.wire_hash(), other.wire_hash());
 }
 
-/// The case that made skipping unnamed entries unsafe. An unnamed type shifts every index after
-/// it, so if it contributed nothing the two registries would hash equal while disagreeing about
-/// what index 1 means.
+/// A rollback-only type never travels, so a peer with an extra one agrees about every byte.
 #[test]
-fn an_extra_unnamed_registration_still_changes_the_hash() {
+fn a_rollback_only_type_is_not_on_the_wire() {
     let one = registry(|app| {
-        app.register_ticked_component_as::<Pos>("Pos")
-            .register_ticked_component_as::<Vel>("Vel");
+        networked::<Pos>(app, "Pos");
+        networked::<Vel>(app, "Vel");
     });
     let other = registry(|app| {
-        app.register_ticked_component_as::<Pos>("Pos")
-            .register_ticked_component::<Tag>()
-            .register_ticked_component_as::<Vel>("Vel");
+        networked::<Pos>(app, "Pos");
+        app.register_ticked_component::<Tag>();
+        networked::<Vel>(app, "Vel");
     });
+    assert_eq!(one.wire_hash(), other.wire_hash());
+    assert_eq!(other.wire_index_of::<Tag>(), None);
+    assert_eq!(other.wire_len(), 2);
+    assert_eq!(other.len(), 3, "it is still registered, and still rolled back");
+}
 
-    assert_ne!(
-        one.wire_hash(),
-        other.wire_hash(),
-        "an unnamed type contributes no name but it does occupy an index, and the index is what \
-         a snapshot is keyed by"
+#[test]
+fn two_types_with_the_same_wire_name_are_refused() {
+    let outcome = std::panic::catch_unwind(|| {
+        registry(|app| {
+            networked::<Pos>(app, "Position");
+            networked::<Vel>(app, "Position");
+        })
+    });
+    let Err(payload) = outcome else {
+        panic!("a duplicate name must panic");
+    };
+    let message = payload.downcast_ref::<String>().cloned().unwrap_or_default();
+    assert!(
+        message.contains("Position") && message.contains("share the wire name"),
+        "the panic names the duplicate: {message}"
     );
+}
+
+#[test]
+fn registering_after_the_format_is_frozen_panics() {
+    let outcome = std::panic::catch_unwind(|| {
+        registry(|app| {
+            networked::<Pos>(app, "Pos");
+            // Anything that reads the wire order freezes it.
+            let _ = app
+                .world()
+                .resource::<TickedComponentRegistry>()
+                .wire_hash();
+            networked::<Vel>(app, "Vel");
+        })
+    });
+    let Err(payload) = outcome else {
+        panic!("registering after the freeze must panic");
+    };
+    let message = payload.downcast_ref::<String>().cloned().unwrap_or_default();
+    assert!(message.contains("frozen"), "{message}");
+}
+
+#[test]
+fn the_registry_is_not_frozen_until_something_asks() {
+    let one = registry(|app| {
+        networked::<Pos>(app, "Pos");
+        assert!(
+            !app.world().resource::<TickedComponentRegistry>().is_frozen(),
+            "registration alone does not freeze"
+        );
+    });
+    assert!(!one.is_frozen());
+    let _ = one.wire_len();
+    assert!(one.is_frozen());
+}
+
+/// The protocol version is in the hash, so a client and host with the same registrations
+/// but a different encoding refuse each other.
+#[test]
+fn the_hash_folds_the_protocol_version() {
+    assert_eq!(PROTOCOL_VERSION, 2);
+    let one = registry(|app| networked::<Pos>(app, "Pos"));
+    // FNV over version then names; a plain FNV over the names would differ.
+    let names_only = bevy_ticked_testing_free_fnv(&["Pos"]);
+    assert_ne!(one.wire_hash(), names_only);
+}
+
+fn bevy_ticked_testing_free_fnv(names: &[&str]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for name in names {
+        for byte in name.as_bytes().iter().chain(b"\0") {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    hash
 }
 
 /// Resources are their own index space, so the component hash cannot speak for them.
 #[test]
 fn the_resource_hash_is_a_separate_number() {
     let one = resources(|app| {
-        app.register_ticked_resource::<Round>();
+        app.init_resource::<TickedResourceRegistry>();
+        app.world_mut()
+            .resource_mut::<TickedResourceRegistry>()
+            .register_networked::<Round>("Round", stub_serialize, stub_apply);
     });
     let other = resources(|app| {
-        app.register_ticked_resource::<Round>();
-        app.register_ticked_resource::<Score>();
+        let mut registry = app.world_mut().resource_mut::<TickedResourceRegistry>();
+        registry.register_networked::<Round>("Round", stub_serialize, stub_apply);
+        registry.register_networked::<Score>("Score", stub_serialize, stub_apply);
     });
 
     assert_ne!(
@@ -112,63 +225,17 @@ fn the_resource_hash_is_a_separate_number() {
         other.wire_hash(),
         "a peer can agree about every component and still disagree here"
     );
-}
-
-// ── what it must not catch ───────────────────────────────────────────────────
-
-/// The reason this was not safe to exchange before.
-///
-/// `register_ticked_component` defaults the wire name to `std::any::type_name`, which is
-/// explicitly not specified across compiler versions. Two peers built from the same source on
-/// different rustc releases would have reported disagreeing registries — a loud error for a
-/// non-problem, which is how a check gets switched off within a week.
-///
-/// Simulated by registering two *different* unnamed types in the same position: if the name were
-/// folded in, these would hash differently, which is precisely what a rustc difference would do to
-/// one type.
-#[test]
-fn an_unnamed_types_name_does_not_reach_the_hash() {
-    let one = registry(|app| {
-        app.register_ticked_component_as::<Pos>("Pos")
-            .register_ticked_component::<Vel>();
-    });
-    let other = registry(|app| {
-        app.register_ticked_component_as::<Pos>("Pos")
-            .register_ticked_component::<Tag>();
-    });
-
-    assert_eq!(
-        one.wire_hash(),
-        other.wire_hash(),
-        "an unnamed entry contributes its position and a sentinel, never a string whose spelling \
-         is up to the compiler"
-    );
-}
-
-/// Naming a rollback-only type opts it back in, which is what `register_ticked_component_as` is
-/// for: the handshake can then say *which* registration differs rather than only that the shapes
-/// do.
-#[test]
-fn naming_a_rollback_only_type_puts_it_back_in_the_hash() {
-    let unnamed = registry(|app| {
-        app.register_ticked_component_as::<Pos>("Pos")
-            .register_ticked_component::<Vel>();
-    });
-    let named = registry(|app| {
-        app.register_ticked_component_as::<Pos>("Pos")
-            .register_ticked_component_as::<Vel>("Vel");
-    });
-
-    assert_ne!(unnamed.wire_hash(), named.wire_hash());
+    assert_eq!(other.wire_index_of::<Round>(), Some(0));
+    assert_eq!(other.wire_index_of::<Score>(), Some(1));
 }
 
 /// Two identically-built peers, which is every session this stack has ever run.
 #[test]
 fn the_same_registrations_hash_the_same() {
     let build = |app: &mut App| {
-        app.register_ticked_component_as::<Pos>("Pos")
-            .register_ticked_component_as::<Vel>("Vel")
-            .register_ticked_component::<Tag>();
+        networked::<Pos>(app, "Pos");
+        networked::<Vel>(app, "Vel");
+        app.register_ticked_component::<Tag>();
     };
     assert_eq!(registry(build).wire_hash(), registry(build).wire_hash());
 }
@@ -177,12 +244,7 @@ fn the_same_registrations_hash_the_same() {
 /// spelling the names out.
 #[test]
 fn the_hash_follows_the_wire_name_and_not_the_rust_type() {
-    let one = registry(|app| {
-        app.register_ticked_component_as::<Pos>("Position");
-    });
-    let other = registry(|app| {
-        // A different Rust type entirely, under the same wire name.
-        app.register_ticked_component_as::<Vel>("Position");
-    });
+    let one = registry(|app| networked::<Pos>(app, "Position"));
+    let other = registry(|app| networked::<Vel>(app, "Position"));
     assert_eq!(one.wire_hash(), other.wire_hash());
 }
