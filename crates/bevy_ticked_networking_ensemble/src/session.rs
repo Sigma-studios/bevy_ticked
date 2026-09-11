@@ -181,7 +181,10 @@ fn adopt_role(
     timed_out: Option<Res<HandshakeTimedOut>>,
     tracked: Query<Entity, With<TickTrackedEntity>>,
     hosting: Query<(), (With<Host>, Or<(With<Lobby>, With<PendingLobby>)>)>,
-    joined: Query<(), (Without<Host>, Or<(With<Lobby>, With<PendingLobby>)>)>,
+    // A client adopts on the promoted lobby, not the pending one: until the backend's own
+    // handshake has run, the data channel may not carry anything, and a role taken then
+    // starts the registry handshake's clock on a link that cannot deliver it yet.
+    joined: Query<(), (Without<Host>, With<Lobby>)>,
 ) {
     if server.is_some() || client.is_some() {
         return;
