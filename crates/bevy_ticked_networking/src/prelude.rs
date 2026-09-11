@@ -1,5 +1,9 @@
 pub use crate::{
     client::{ClientSet, ClientTickBuffer, LocalClientPlayer, TickedClientPlugin},
+    pause::{
+        PausePolicy, PauseReason, PauseSession, Paused, ReceivedPauseRequest, ResumeSession,
+        SendPauseRequest, SessionPause, WhoMayPause,
+    },
     replication::{AuthoritativeHistory, InterpolationDelay, Owner, ReplicationMode},
     smoothing::{
         CorrectionSmoothing, CorrectionStats, NoCorrectionSmoothing, PredictionError,

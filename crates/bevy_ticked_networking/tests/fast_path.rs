@@ -258,6 +258,12 @@ fn an_on_insert_observer_fires_once_for_a_confirmed_spawn() {
 fn a_burst_of_stale_snapshots_replays_at_most_max_ticks_per_frame() {
     let mut app = client();
     app.insert_resource(MaxTicksPerFrame(4));
+    // No snapshot stream in this test; a real client would hold after a quarter second of
+    // silence, which is not what is being measured here.
+    app.insert_resource(bevy_ticked_networking::pause::PausePolicy {
+        client_soft_hold_after: None,
+        ..Default::default()
+    });
     let index = wire_pos(&app);
     let mut body = bevy_ticked_networking::snapshot::FullBody::default();
     body.put(EntityRecord::new(1).with(index, &Pos(0)));

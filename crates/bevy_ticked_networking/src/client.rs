@@ -234,6 +234,7 @@ impl<T: TickedInput> Plugin for TickedClientPlugin<T> {
     fn build(&self, app: &mut App) {
         crate::input::install_input_queue::<T>(app);
         crate::replication::install_owner(app);
+        crate::pause::install(app);
         // A rollback never reaches further back than one one-way trip plus the lead, and the
         // lead is capped at `MAX_TICKS`; twice that is every tick a snapshot could still name.
         // The core default is a hundred seconds, sized for scrubbing, and on a client that was
@@ -559,6 +560,16 @@ fn handle_server_snapshot<T: TickedInput>(world: &mut World) {
         first: was_paused,
     });
 
+    // Paused by the authority: the clock holds at the paused tick, this pass. If this client
+    // predicted past it, `client_follow_pause` rolls it back after this system; nothing here
+    // may run the simulation forward into a future the host is not producing.
+    if world.resource::<crate::pause::SessionPause>().0.is_some() {
+        world
+            .resource_mut::<TickHolds>()
+            .release(TickHoldReason::AwaitingSync);
+        return;
+    }
+
     // Self-adaptive target: update it from the server-reported input margin for
     // this client (how early or late its inputs are arriving), self-contained in
     // this crate.
@@ -609,6 +620,12 @@ fn handle_server_snapshot<T: TickedInput>(world: &mut World) {
             .resource_mut::<TickHolds>()
             .release(TickHoldReason::AwaitingSync);
         replay_bounded(world, &registry, snapshot_tick + target);
+        // The clock is where it should be now. Whatever the frame accumulator still owes is
+        // the stall this client just came back from — a two-second frame after a tab switch
+        // is a quarter of a second of ticks to Bevy — and running them would put the lead
+        // sixteen ticks past the target it was just given, to be shed at two percent a second.
+        use bevy_ticked::time::{Ticked, TickedTime};
+        world.resource_mut::<Time<Ticked>>().discard_overstep();
         // The lead was just set outright, so there is no error left for the rate
         // trim to work on. Leaving a stale value here is not harmless: a client
         // that was shedding lead at 0.98 when it fell behind would keep running
@@ -734,6 +751,10 @@ fn accept_identical<T: TickedInput>(
         tick: snapshot_tick,
         first: false,
     });
+    // Paused: everybody holds at the paused tick; there is no lead to steer.
+    if world.resource::<crate::pause::SessionPause>().0.is_some() {
+        return;
+    }
     let replay_distance = current_tick as i64 - snapshot_tick as i64;
     world
         .resource_mut::<ClientTickBuffer>()
