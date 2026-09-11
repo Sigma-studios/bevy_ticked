@@ -383,24 +383,31 @@ fn verify_client(world: &mut World, uuid: u128) {
     };
     world.entity_mut(client).insert(TickedPeerVerified);
     let server_tick = world.get_resource::<CurrentTick>().map_or(0, |tick| tick.0);
+    let send_every = world
+        .get_resource::<bevy_ticked_networking::server::SendEvery>()
+        .map_or(1, |every| every.0);
     world.trigger(LobbyClientMessage {
         entity: client,
         message: TickedSessionWelcome {
             slot,
             server_tick,
-            send_every: 1,
+            send_every,
         },
         send_mode: SendMode::Reliable,
     });
 }
 
-/// A client keeps the slot its host gave it.
+/// A client keeps the slot its host gave it, and draws remote bodies far enough behind the
+/// host's send rate that there is always a next state to blend toward.
 fn receive_welcome(
     mut welcomes: MessageReader<ReceivedEnsembleMessage<TickedSessionWelcome>>,
     mut commands: Commands,
 ) {
     for welcome in welcomes.read() {
         commands.insert_resource(LocalSpawnerSlot(welcome.message.slot));
+        commands.insert_resource(bevy_ticked_networking::replication::InterpolationDelay(
+            (2 * welcome.message.send_every).max(2),
+        ));
     }
 }
 

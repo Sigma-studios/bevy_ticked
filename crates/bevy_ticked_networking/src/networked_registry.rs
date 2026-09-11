@@ -11,15 +11,17 @@ use bevy_ticked::{
 };
 
 /// Trait bound for components that can be tracked AND serialized over the network.
-pub trait NetworkedTickedComponent:
-    TickedComponent + Serialize + DeserializeOwned
-{
-}
+///
+/// No `PartialEq`: a client compares what the authority sent with what it predicted, and
+/// does so on the *encoded bytes*, which every networked type already produces. Bitwise on
+/// floats, as it should be — a prediction off by an ulp is one that will drift, and the
+/// replay is how it is put right — and open to foreign types (a character controller's
+/// state from another crate) that never implemented equality. A type whose encoding is not
+/// canonical for equal values (a hash map inside it) is compared as unequal and replayed,
+/// which is slower and never wrong.
+pub trait NetworkedTickedComponent: TickedComponent + Serialize + DeserializeOwned {}
 
-impl<T> NetworkedTickedComponent for T where
-    T: TickedComponent + Serialize + DeserializeOwned
-{
-}
+impl<T> NetworkedTickedComponent for T where T: TickedComponent + Serialize + DeserializeOwned {}
 
 /// Extension trait for registering networked ticked components.
 pub trait NetworkedTickedAppExt {
@@ -60,6 +62,7 @@ impl NetworkedTickedAppExt for App {
                 encode_one: encode_one::<T>,
                 decode_one: decode_one::<T>,
                 insert_one: insert_one::<T>,
+                matches_at: matches_at::<T>,
                 begin_tick: begin_tick::<T>,
                 finish_tick: finish_tick::<T>,
                 has_at: has_at::<T>,
@@ -216,6 +219,26 @@ fn insert_one<T: NetworkedTickedComponent>(
     let consumed = bytes.len() - rest.len();
     world.get_entity_mut(entity).ok()?.insert(value);
     Some(consumed)
+}
+
+/// Equal means the saved value encodes to exactly the bytes at the front of `bytes`. On a
+/// mismatch the caller stops walking the record, so `consumed` is only meaningful when equal.
+fn matches_at<T: NetworkedTickedComponent>(
+    world: &World,
+    tick: u64,
+    id: u64,
+    bytes: &[u8],
+) -> Option<(bool, usize)> {
+    let saved = world
+        .resource::<WorldActions<T>>()
+        .at_tick(tick)
+        .and_then(|state| state.get(&id))?;
+    let encoded = postcard::to_allocvec(saved).ok()?;
+    if bytes.starts_with(&encoded) {
+        Some((true, encoded.len()))
+    } else {
+        Some((false, 0))
+    }
 }
 
 fn begin_tick<T: NetworkedTickedComponent>(world: &mut World, tick: u64) {
