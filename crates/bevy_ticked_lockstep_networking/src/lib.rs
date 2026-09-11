@@ -13,6 +13,7 @@ pub mod pause;
 pub mod plugin;
 pub mod prelude;
 pub mod resources;
+pub mod session;
 pub mod testing;
 
 pub use actions::{
@@ -40,8 +41,10 @@ pub use join::{
 pub use messages::{
     ApplyJoinSnapshot, AuthoritativeTick, CaptureJoinSnapshot, ClientAccepted, ClientLoaded,
     ClientScheduledActions, JoinSnapshotApplied, JoinSnapshotReceived, JoinSnapshotRequest,
-    JoinSnapshotResponse, ParticipantJoined, ProvideJoinSnapshot,
+    JoinSnapshotResponse, LockstepPauseReason, ParticipantJoined, PauseLockstep,
+    ProvideJoinSnapshot, ResumeLockstep, RosterChange, SystemAction,
 };
+pub use session::{LockstepSimulationSet, TARGET_ARRIVAL_MARGIN};
 pub use participants::{
     LockstepLobbyParticipant, PendingLockstepParticipantJoins, activate_loaded_client_participants,
     add_host_participant, apply_pending_lockstep_participants, apply_received_participants,
@@ -51,9 +54,11 @@ pub use participants::{
 pub use pause::sync_lockstep_pause_state;
 pub use plugin::{LockstepConfig, LockstepJoinSet, LockstepPlugin};
 pub use resources::{
-    ActionTracker, ClientSnapshotState, InitialLockstepConfig, JOIN_SNAPSHOT_REQUEST_INTERVAL,
-    LastBroadcastTick, LastJoinSnapshotRequests, LocalPendingActions, PendingClientJoins,
-    PendingJoinSnapshotFlushes, StashedAuthoritativeTicks,
+    ActionTracker, ArrivalMargins, ClientSnapshotState, InitialLockstepConfig,
+    JOIN_SNAPSHOT_REQUEST_INTERVAL, LastBroadcastTick, LastJoinSnapshotRequests,
+    LocalPendingActions, LockstepPaused, LockstepRoster, LockstepStall, OwnInputMargin,
+    PendingClientJoins, PendingJoinSnapshotFlushes, PendingSystemActions, StallPolicy,
+    StashedAuthoritativeTicks,
 };
 
 use serde::{Serialize, de::DeserializeOwned};

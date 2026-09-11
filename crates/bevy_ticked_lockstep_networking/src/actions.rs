@@ -194,6 +194,7 @@ pub fn receive_client_actions<A: LockstepAction>(
     config: Res<LockstepConfig>,
     host_lobby: Option<Single<Entity, (With<Lobby>, With<Host>)>>,
     participants: Query<(&LobbyParticipant, &LobbyParticipantOf), With<LockstepLobbyParticipant>>,
+    mut margins: ResMut<crate::ArrivalMargins>,
 ) {
     let Some(host_lobby) = host_lobby else {
         return;
@@ -226,6 +227,9 @@ pub fn receive_client_actions<A: LockstepAction>(
             );
             continue;
         }
+        // How early this batch was: the number the client sizes its buffer from.
+        let margin = (tick as i64 - current_tick.0 as i64).clamp(i16::MIN as i64, i16::MAX as i64);
+        margins.0.insert(sender, margin as i16);
 
         insert_actions_into_tracker(
             &mut tracker,
