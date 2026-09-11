@@ -291,7 +291,12 @@ fn server_spawn_players(
     mut counter: ResMut<TrackedIdAllocator>,
     slots: Option<Res<SpawnerSlots>>,
     local_player: Option<Res<LocalMultiplayerPlayerId>>,
+    // Not before the host role is adopted: the ids minted before it would be a client's.
+    role: Option<Res<LocalServerPlayer>>,
 ) {
+    if role.is_none() {
+        return;
+    }
     let Some(lobby_entity) = host_lobbies.iter().next() else {
         return;
     };
