@@ -31,7 +31,7 @@
 use std::{
     any::{type_name, TypeId},
     collections::{BTreeMap, HashMap},
-    sync::Arc,
+    sync::{Arc, OnceLock},
 };
 
 use bevy::prelude::*;
@@ -104,6 +104,17 @@ pub struct TickedResourceRegistry {
 struct ResourceRegistryInner {
     entries: Vec<RegisteredTickedResource>,
     type_indices: HashMap<TypeId, u16>,
+    frozen: OnceLock<FrozenResources>,
+}
+
+/// The resource wire order: networked entries ranked by name. See
+/// [`TickedComponentRegistry`](crate::registry::TickedComponentRegistry) for the rule.
+#[derive(Clone, Debug, Default)]
+struct FrozenResources {
+    entries: Vec<u16>,
+    by_type: HashMap<TypeId, u16>,
+    names: Vec<&'static str>,
+    hash: u64,
 }
 
 #[derive(Clone)]
@@ -111,7 +122,7 @@ struct RegisteredTickedResource {
     wire_name: &'static str,
     /// Whether the name was given at registration or defaulted to `type_name`. See
     /// [`TickedComponentRegistry::wire_hash`](crate::registry::TickedComponentRegistry::wire_hash).
-    named: bool,
+    type_id: TypeId,
     capture: fn(&mut World, u64),
     restore: fn(&mut World, u64),
     truncate_after: fn(&mut World, u64),
@@ -127,14 +138,24 @@ impl TickedResourceRegistry {
         self.register_inner::<R>(None, None, None);
     }
 
-    /// Register with serialization support. Called by the networking crate.
-    pub fn register_with_serialization<R: TickedResource>(
+    /// Register with a stable name, rollback only.
+    pub fn register_as<R: TickedResource>(&mut self, wire_name: &'static str) {
+        self.register_inner::<R>(Some(wire_name), None, None);
+    }
+
+    /// Register a networked resource. Called by the networking crate. The name is required: it
+    /// is the resource's identity on the wire.
+    ///
+    /// # Panics
+    ///
+    /// If the type or the name was registered before, or the registry is already frozen.
+    pub fn register_networked<R: TickedResource>(
         &mut self,
-        wire_name: Option<&'static str>,
+        wire_name: &'static str,
         serialize_at: fn(&World, u64) -> Option<Vec<u8>>,
         deserialize_and_apply: fn(&mut World, u64, &[u8]),
     ) {
-        self.register_inner::<R>(wire_name, Some(serialize_at), Some(deserialize_and_apply));
+        self.register_inner::<R>(Some(wire_name), Some(serialize_at), Some(deserialize_and_apply));
     }
 
     fn register_inner<R: TickedResource>(
@@ -143,14 +164,29 @@ impl TickedResourceRegistry {
         serialize_at: Option<fn(&World, u64) -> Option<Vec<u8>>>,
         deserialize_and_apply: Option<fn(&mut World, u64, &[u8])>,
     ) {
-        let inner = Arc::make_mut(&mut self.inner);
         let type_id = TypeId::of::<R>();
         let tname = type_name::<R>();
-        let named = wire_name.is_some();
+        assert!(
+            self.inner.frozen.get().is_none(),
+            "ticked resource `{tname}` was registered after the wire format was frozen; register \
+             in a plugin's `build`, before the first snapshot or handshake"
+        );
+        let inner = Arc::make_mut(&mut self.inner);
         let wire_name = wire_name.unwrap_or(tname);
 
         if inner.type_indices.contains_key(&type_id) {
             panic!("Ticked resource type `{tname}` was registered more than once");
+        }
+        if serialize_at.is_some()
+            && inner
+                .entries
+                .iter()
+                .any(|entry| entry.serialize_at.is_some() && entry.wire_name == wire_name)
+        {
+            panic!(
+                "two networked ticked resources share the wire name `{wire_name}` (the second is \
+                 `{tname}`); a wire name must be unique"
+            );
         }
 
         let next_index = u16::try_from(inner.entries.len()).unwrap_or_else(|_| {
@@ -162,7 +198,7 @@ impl TickedResourceRegistry {
 
         inner.entries.push(RegisteredTickedResource {
             wire_name,
-            named,
+            type_id,
             capture: capture_resource::<R>,
             restore: restore_resource::<R>,
             truncate_after: truncate_resource::<R>,
@@ -175,38 +211,63 @@ impl TickedResourceRegistry {
         inner.type_indices.insert(type_id, next_index);
     }
 
+    /// The registration index: position in registration order, meaningful in this process only.
     pub fn index_of<R: TickedResource>(&self) -> Option<u16> {
         self.inner.type_indices.get(&TypeId::of::<R>()).copied()
     }
 
-    /// Every registered resource's wire name, in registration order.
-    ///
-    /// As with components, that order **is** a wire format.
-    pub fn wire_names(&self) -> impl ExactSizeIterator<Item = &'static str> + '_ {
-        self.inner.entries.iter().map(|entry| entry.wire_name)
+    fn frozen(&self) -> &FrozenResources {
+        self.inner.frozen.get_or_init(|| {
+            let mut networked: Vec<(usize, &RegisteredTickedResource)> = self
+                .inner
+                .entries
+                .iter()
+                .enumerate()
+                .filter(|(_, entry)| entry.serialize_at.is_some())
+                .collect();
+            networked.sort_by(|a, b| a.1.wire_name.cmp(b.1.wire_name));
+            let names: Vec<&'static str> = networked.iter().map(|(_, e)| e.wire_name).collect();
+            let hash = names.iter().fold(
+                crate::registry::fnv_fold(
+                    crate::registry::FNV_OFFSET,
+                    &crate::registry::PROTOCOL_VERSION.to_le_bytes(),
+                ),
+                |hash, name| {
+                    crate::registry::fnv_fold(crate::registry::fnv_fold(hash, name.as_bytes()), b"\0")
+                },
+            );
+            FrozenResources {
+                entries: networked.iter().map(|(i, _)| *i as u16).collect(),
+                by_type: networked
+                    .iter()
+                    .enumerate()
+                    .map(|(wire, (_, entry))| (entry.type_id, wire as u16))
+                    .collect(),
+                names,
+                hash,
+            }
+        })
     }
 
-    /// A hash of `(index, wire_name)` for every registered resource.
-    ///
-    /// The same scheme as [`TickedComponentRegistry::wire_hash`], including the sentinel for an
-    /// entry whose name defaulted to `type_name`, and **a separate number**: resources have their
-    /// own index space, so a peer that agrees about components can still disagree here. A
-    /// handshake that compared only one of the two would validate the half that changes least.
-    ///
-    /// [`TickedComponentRegistry::wire_hash`]: crate::registry::TickedComponentRegistry::wire_hash
+    /// Whether the wire order has been computed, after which no registration is accepted.
+    pub fn is_frozen(&self) -> bool {
+        self.inner.frozen.get().is_some()
+    }
+
+    /// The wire index of a networked resource: its rank among the networked names. Freezes.
+    pub fn wire_index_of<R: TickedResource>(&self) -> Option<u16> {
+        self.frozen().by_type.get(&TypeId::of::<R>()).copied()
+    }
+
+    /// Every networked resource's wire name, in wire order (sorted). Freezes the registry.
+    pub fn wire_names(&self) -> impl ExactSizeIterator<Item = &'static str> + '_ {
+        self.frozen().names.iter().copied()
+    }
+
+    /// A hash of the protocol version and the sorted networked names, separate from the
+    /// component one: the two index spaces are independent and a handshake compares both.
     pub fn wire_hash(&self) -> u64 {
-        self.inner
-            .entries
-            .iter()
-            .enumerate()
-            .fold(crate::registry::FNV_OFFSET, |hash, (index, entry)| {
-                let hash = crate::registry::fnv_fold(hash, &(index as u16).to_le_bytes());
-                if entry.named {
-                    crate::registry::fnv_fold(hash, entry.wire_name.as_bytes())
-                } else {
-                    crate::registry::fnv_fold(hash, crate::registry::UNNAMED_SENTINEL)
-                }
-            })
+        self.frozen().hash
     }
 
     pub fn len(&self) -> usize {
@@ -274,31 +335,35 @@ impl TickedResourceRegistry {
         }
     }
 
-    /// Serialize every registered resource at `tick`, by index.
-    pub fn serialize_all(&self, world: &World, tick: u64) -> HashMap<u16, Vec<u8>> {
-        let mut result = HashMap::new();
-        for (index, entry) in self.inner.entries.iter().enumerate() {
-            if let Some(serialize) = entry.serialize_at {
-                if let Some(bytes) = serialize(world, tick) {
-                    result.insert(index as u16, bytes);
-                }
+    /// Serialize every networked resource at `tick`, as `(wire index, bytes)` in wire order.
+    pub fn serialize_all(&self, world: &World, tick: u64) -> Vec<(u16, Vec<u8>)> {
+        let frozen = self.frozen();
+        let mut result = Vec::new();
+        for (wire_index, entry_index) in frozen.entries.iter().enumerate() {
+            let entry = &self.inner.entries[*entry_index as usize];
+            if let Some(serialize) = entry.serialize_at
+                && let Some(bytes) = serialize(world, tick)
+            {
+                result.push((wire_index as u16, bytes));
             }
         }
         result
     }
 
-    /// Apply serialized resource state, by index.
+    /// Apply serialized resource state, by wire index. Unknown indices are skipped.
     pub fn deserialize_and_apply_all(
         &self,
         world: &mut World,
         tick: u64,
-        resources: &HashMap<u16, Vec<u8>>,
+        resources: &[(u16, Vec<u8>)],
     ) {
-        for (index, bytes) in resources {
-            if let Some(entry) = self.inner.entries.get(*index as usize) {
-                if let Some(apply) = entry.deserialize_and_apply {
-                    apply(world, tick, bytes);
-                }
+        let frozen = self.frozen();
+        for (wire_index, bytes) in resources {
+            let Some(entry_index) = frozen.entries.get(*wire_index as usize) else {
+                continue;
+            };
+            if let Some(apply) = self.inner.entries[*entry_index as usize].deserialize_and_apply {
+                apply(world, tick, bytes);
             }
         }
     }

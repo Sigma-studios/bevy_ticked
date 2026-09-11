@@ -2,10 +2,11 @@
 //!
 //! `shooting_ropes/docs/upstream-needs.md` §3.5 claims a component the authority
 //! removes is never replicated, and that the local rollback path and the snapshot
-//! path disagree about it. Both were true, and both are fixed by the `stale` block
-//! at the end of `deserialize_and_apply_component`.
+//! path disagree about it. Both were true, and both are fixed by `finish_tick` in
+//! `networked_registry.rs`, which strips a type from every tracked entity the snapshot did not
+//! give it to.
 //!
-//! **To reproduce the bug**: delete that block. `a_removed_component_is_replicated`
+//! **To reproduce the bug**: make `finish_tick` a no-op. `a_removed_component_is_replicated`
 //! and `the_snapshot_path_and_the_rollback_path_agree` then fail, and nothing else
 //! does. The last three tests document limits the fix does *not* remove, so that
 //! nobody reads "removal replicates now" as more than it is.
@@ -16,7 +17,7 @@ use bevy_ticked::registry::TickedComponentRegistry;
 use bevy_ticked::tick::CurrentTick;
 use bevy_ticked::tracked_entity::{TickTrackedEntity, TickTrackedEntityCounter};
 use bevy_ticked_networking::prelude::*;
-use bevy_ticked_networking::snapshot::{apply_snapshot, build_snapshot};
+use bevy_ticked_networking::snapshot::{apply_full_body, build_full_body};
 use serde::{Deserialize, Serialize};
 
 /// Stands in for `shooting_ropes`'s `Ride`: inserted while something is happening,
@@ -39,8 +40,8 @@ fn peer() -> App {
         .init_resource::<TickedComponentRegistry>()
         .init_resource::<CurrentTick>()
         .init_resource::<TickTrackedEntityCounter>()
-        .register_networked_ticked_component::<Pos>()
-        .register_networked_ticked_component::<Ride>()
+        .register_networked_ticked_component::<Pos>("Pos")
+        .register_networked_ticked_component::<Ride>("Ride")
         .register_ticked_component::<LocalOnly>();
     app
 }
@@ -52,8 +53,8 @@ fn capture(app: &mut App, tick: u64) {
 
 fn sync(host: &mut App, client: &mut App, tick: u64) {
     capture(host, tick);
-    let snapshot = build_snapshot(host.world_mut(), tick);
-    apply_snapshot(client.world_mut(), &snapshot);
+    let body = build_full_body(host.world_mut(), tick);
+    apply_full_body(client.world_mut(), tick, &body);
 }
 
 fn only<C: Component + Copy>(app: &mut App) -> Option<C> {
@@ -85,15 +86,15 @@ fn the_snapshot_already_says_that_nobody_is_riding() {
     let index = host
         .world()
         .resource::<TickedComponentRegistry>()
-        .index_of::<Ride>()
+        .wire_index_of::<Ride>()
         .unwrap();
-    let snapshot = build_snapshot(host.world_mut(), 1);
+    let body = build_full_body(host.world_mut(), 1);
 
-    assert_eq!(
-        snapshot.components.get(&index).map(|m| m.len()),
-        Some(0),
-        "capture_component always calls set_tick, so serialize_all emits the type \
-         with an empty map rather than omitting it"
+    let record = body.record(1).expect("the body has the entity");
+    assert!(
+        !record.present.contains(index),
+        "the record's mask says which types the entity carries, and Ride is not among them: \
+         the absence is in the packet, not inferred from silence"
     );
 }
 
@@ -149,8 +150,8 @@ fn the_snapshot_path_and_the_rollback_path_agree() {
 
 // ── what the fix must not break ──────────────────────────────────────────────
 
-/// A type registered *without* serialisation never appears in a snapshot, so
-/// `deserialize_and_apply_component` is never called for it and nothing strips it.
+/// A type registered *without* serialisation is not on the wire, so no record names it and
+/// nothing strips it.
 /// "The authority said nothing" and "the authority has none" stay distinct.
 #[test]
 fn a_rollback_only_component_is_never_stripped_by_a_snapshot() {
@@ -172,8 +173,8 @@ fn a_rollback_only_component_is_never_stripped_by_a_snapshot() {
 }
 
 /// A *new* entity arriving in the same snapshot as a removal keeps what it was
-/// just given: `apply_snapshot` inserts its components before `TickTrackedEntity`,
-/// so it is not in the tracked set yet when the removal pass runs.
+/// just given: its components are recorded at the tick like anybody else's, so the removal
+/// pass has nothing to strip from it.
 #[test]
 fn an_entity_spawned_by_the_same_snapshot_keeps_its_components() {
     let mut host = peer();
@@ -198,12 +199,12 @@ fn an_entity_spawned_by_the_same_snapshot_keeps_its_components() {
 
 // ── limits the fix does not remove ───────────────────────────────────────────
 
-/// An entity whose networked components are *all* gone disappears entirely,
-/// because `apply_snapshot` derives entity existence from the union of the
-/// component maps. So a consumer still cannot strip a tracked entity bare and
-/// expect it to survive -- "removal replicates" stops one tick short of that.
+/// An entity stripped of every networked component survives: the wire is entity-major, so a
+/// record with an empty mask is still a record, and the entity still exists. The old
+/// type-major shape derived existence from the union of the component maps, and a bare
+/// tracked entity vanished from every client one tick after being stripped.
 #[test]
-fn an_entity_stripped_of_every_networked_component_is_despawned_not_stripped() {
+fn an_entity_stripped_of_every_networked_component_survives_bare() {
     let mut host = peer();
     let mut client = peer();
 
@@ -219,9 +220,16 @@ fn an_entity_stripped_of_every_networked_component_is_despawned_not_stripped() {
 
     assert_eq!(
         tracked_ids(&mut client),
-        vec![1],
-        "the entity is gone from the client while still alive on the host"
+        vec![1, 2],
+        "a bare tracked entity is still an entity on every peer"
     );
+    let bare = client
+        .world_mut()
+        .query::<(&TickTrackedEntity, Option<&Pos>, Option<&Ride>)>()
+        .iter(client.world())
+        .find(|(t, _, _)| t.0 == 2)
+        .map(|(_, pos, ride)| (pos.copied(), ride.copied()));
+    assert_eq!(bare, Some((None, None)), "with nothing on it");
     assert!(host.world().get_entity(entity).is_ok(), "...and the host still has it");
 }
 

@@ -25,43 +25,12 @@ fn registry(register: impl Fn(&mut App)) -> TickedComponentRegistry {
 }
 
 // ── §2.3 ─────────────────────────────────────────────────────────────────────
+//
+// The wire hash is over the *networked* names, sorted. `tests/wire_hash.rs` pins that format
+// in full; what stays here is the property this file was written for: rollback-only
+// registrations are outside it, in every order and every number.
 
-#[test]
-fn the_wire_hash_notices_a_reorder() {
-    // The failure this exists for is silent by construction: swapping two
-    // registrations changes nothing that compiles, nothing that warns, and every
-    // component read after the swap.
-    let forward = registry(|app| {
-        app.register_ticked_component_as::<Position>("Position");
-        app.register_ticked_component_as::<Velocity>("Velocity");
-    });
-    let reversed = registry(|app| {
-        app.register_ticked_component_as::<Velocity>("Velocity");
-        app.register_ticked_component_as::<Position>("Position");
-    });
-
-    assert_ne!(
-        forward.wire_hash(),
-        reversed.wire_hash(),
-        "the same types in a different order must not hash the same"
-    );
-}
-
-/// The one reorder the hash deliberately cannot see, and the reason that is not a hole.
-///
-/// This test used to be the one above, registering both types unnamed. It stopped detecting the
-/// swap when `wire_hash` stopped folding `std::any::type_name` — which it had to, because that
-/// string is not specified across compiler versions and a handshake built on it fires on a rustc
-/// upgrade.
-///
-/// What is lost is nothing: an unnamed registration comes from `register_ticked_component`, which
-/// has no serialisation, so its index **never appears in a snapshot**. Two peers that disagree
-/// about which of two rollback-only types sits at index 3 disagree about nothing that crosses the
-/// wire. What still matters — a rollback-only type shifting the index of a *networked* one — moves
-/// that networked entry's position and is caught, which
-/// `an_extra_unnamed_registration_still_changes_the_hash` pins.
-///
-/// Name them with `register_ticked_component_as` and they are compared like anything else.
+/// A rollback-only type never reaches a snapshot, so no ordering of them is a wire format.
 #[test]
 fn swapping_two_rollback_only_types_is_invisible_and_harmless() {
     let forward = registry(|app| {
@@ -80,16 +49,19 @@ fn swapping_two_rollback_only_types_is_invisible_and_harmless() {
     );
 }
 
+/// And neither is their number: an extra local-only type on one peer is not a mismatch.
 #[test]
-fn the_wire_hash_notices_an_addition() {
+fn an_extra_rollback_only_type_is_not_a_mismatch() {
     let short = registry(|app| {
-        app.register_ticked_component::<Position>();
+        app.register_ticked_component_as::<Position>("Position");
     });
     let long = registry(|app| {
-        app.register_ticked_component::<Position>();
-        app.register_ticked_component::<Velocity>();
+        app.register_ticked_component_as::<Position>("Position");
+        app.register_ticked_component_as::<Velocity>("Velocity");
     });
-    assert_ne!(short.wire_hash(), long.wire_hash());
+    assert_eq!(short.wire_hash(), long.wire_hash());
+    assert_eq!(long.wire_names().count(), 0, "nothing here is on the wire");
+    assert_eq!(long.registered_names().count(), 2, "but both are registered");
 }
 
 #[test]
@@ -103,21 +75,6 @@ fn the_wire_hash_is_stable_for_the_same_registration() {
         app.register_ticked_component::<Velocity>();
     });
     assert_eq!(a.wire_hash(), b.wire_hash(), "two peers must agree");
-}
-
-#[test]
-fn wire_names_are_in_registration_order() {
-    let registry = registry(|app| {
-        app.register_ticked_component::<Position>();
-        app.register_ticked_component::<Velocity>();
-    });
-    let names: Vec<&str> = registry.wire_names().collect();
-    assert_eq!(names.len(), 2);
-    assert!(names[0].ends_with("Position"), "saw {names:?}");
-    assert!(names[1].ends_with("Velocity"), "saw {names:?}");
-    // And the index a consumer would assert against agrees with the position.
-    assert_eq!(registry.index_of::<Position>(), Some(0));
-    assert_eq!(registry.index_of::<Velocity>(), Some(1));
 }
 
 // ── §2.4 ─────────────────────────────────────────────────────────────────────

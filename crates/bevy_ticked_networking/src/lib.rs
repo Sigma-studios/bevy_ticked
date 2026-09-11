@@ -87,4 +87,13 @@ pub fn reset_on_leave<T: TickedInput>(world: &mut World) {
     if let Some(mut applied) = world.get_resource_mut::<client::AppliedSnapshotTick>() {
         applied.0 = None;
     }
+    if let Some(mut seq) = world.get_resource_mut::<client::LastAppliedSeq>() {
+        seq.0 = None;
+    }
+    if let Some(mut seqs) = world.get_resource_mut::<server::SnapshotSeq>() {
+        seqs.0.clear();
+    }
+    if let Some(mut acks) = world.get_resource_mut::<server::LastAck>() {
+        acks.0.clear();
+    }
 }

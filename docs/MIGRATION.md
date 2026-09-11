@@ -6,6 +6,227 @@ what to change in a game, and why. Both peers of a session must be built from th
 Phases that changed `bevy_ensemble` too say which of its commits they pin; that crate's own
 `docs/MIGRATION.md` covers what changed there.
 
+## T7 — snapshot wire v2
+
+**This is a wire-format change**, the one this crate makes in the overhaul. Every peer of a
+session must be built from this commit or later; the registry handshake refuses anything
+else and names the first registration that differs. `PROTOCOL_VERSION` is `2` and is folded
+into every registry hash.
+
+### Wire indices are derived from names; registration order is not a format
+
+**Before** a networked type's index was its position in registration order, assigned as a
+`u16` and sent in every snapshot. Reordering two registrations made a peer read one type's
+bytes as another's with no error of any kind; the only protection was a hand-kept rule.
+**After** the index is the type's rank among every networked wire name, sorted. Two peers
+that register the same names in any order agree about every byte. A rollback-only type has
+no wire index and cannot shift anything. The order is computed the first time anything reads
+it (a snapshot, a handshake, `wire_hash()`); registering after that panics, so register in a
+plugin's `build`.
+
+### A networked registration needs a name
+
+```rust
+// Before
+app.register_networked_ticked_component::<Health>();            // gone
+app.register_networked_ticked_component_as::<Health>("Health"); // gone
+app.register_networked_ticked_resource::<Round>();              // gone
+// After
+app.register_networked_ticked_component::<Health>("Health");
+app.register_networked_ticked_resource::<Round>("Round");
+```
+
+The name is the type's identity on the wire. Two types with the same name panic at
+registration. Renaming the Rust type is free; changing the string is a wire break. Rollback-
+only registrations (`register_ticked_component`, `_as`) are unchanged and never on the wire.
+
+**Delete** a game's index assertions (`assert_eq!(registry.index_of::<Pos>(), Some(3))`) and
+its "append only, never reorder" comments. **Watch** `TickedComponentRegistry::index_of` still
+exists and is the registration index, meaningful in this process only; the one that travels
+is `wire_index_of`.
+
+### The snapshot is entity-major, sorted and addressed
+
+`WorldSnapshot` is gone. A `SnapshotPacket { seq, tick, your_margin, body }` carries a
+`SnapshotBody::Full(FullBody)` — one `EntityRecord { id, present: TypeMask, bytes }` per
+tracked entity, sorted by id, its components concatenated in wire-index order with no length
+prefixes, then `(wire index, bytes)` resources, then `inputs_ahead` — or a `Delta`, reserved
+for the delta phase and dropped (counted in `ReplayStats.dropped_delta_body`) until then.
+The same world encodes to the same bytes twice. Two walking players cost 1340 bytes a tick
+before and 52 now (host to each client, everything on the link).
+
+Each client gets its own packet: `seq` counts per recipient and `your_margin` is that
+client's own input-arrival margin (`InputMargins` no longer travels to everyone).
+`SendNetworkSnapshot { recipient: Option<u128>, bytes }` is one encoded packet per recipient;
+`SnapshotRecipientList(Vec<u128>)` (maintained by the transport, the verified clients)
+replaces `SnapshotRecipients(usize)`; absent means one unaddressed packet, empty means
+nothing is built. `SnapshotStats` counts bytes and `oversize` (over 1200 bytes, warned
+once) on the server itself.
+
+`build_snapshot`/`apply_snapshot` are `build_full_body`/`apply_full_body`, the latter
+returning `Applied { spawned, despawned, undecodable, duplicate_ids }`. A duplicate id in a
+body is applied once and counted in `HealthWarnings.duplicate_ids_in_snapshot`. An entity
+stripped of every networked component now survives bare on every peer; the old type-major
+shape derived existence from the union of the component maps and despawned it.
+
+### Acks and relayed inputs
+
+`NetworkInputPayload.ack: Option<u32>` carries the newest snapshot `seq` the client applied;
+the transport triggers `ReceivedSnapshotAck { sender, seq }` and the server keeps `LastAck`.
+Nothing reads it until the delta phase. `FullBody.inputs_ahead` carries other players'
+inputs the host already holds for ticks after the snapshot's; a client files them in its
+`InputQueue` (its own are ignored), so a replay uses what those players pressed rather than
+nothing.
+
+### The ensemble bridge and the harness
+
+The transport half of the wire phase. The core and `bevy_ticked_networking` half (name-derived
+wire indices, the entity-major packet, per-recipient packets, acks) is in the T7 section
+proper; this covers what changed in `bevy_ticked_networking_ensemble` and
+`bevy_ticked_testing`, and what a game on the bridge has to change. Both peers must be rebuilt:
+the snapshot message, the handshake and the input message all changed on the wire.
+
+#### Registrations are named, and the name is required
+
+**Before** `register_networked_ticked_component::<T>()` took its wire name from
+`std::any::type_name`, and `_as::<T>("Name")` was the opt-in; the same for resources.
+
+**After** `register_networked_ticked_component::<T>("Name")` and
+`register_networked_ticked_resource::<R>("Name")`. There is no unnamed variant and no `_as`.
+`type_name` is explicitly unstable across compiler versions, and a wire index derived from an
+unstable string is a session that breaks on a rustc upgrade.
+
+```rust
+// Before
+.register_networked_ticked_component::<Position>()
+.register_networked_ticked_component_as::<Health>("Health")
+// After
+.register_networked_ticked_component::<Position>("avian::Position")
+.register_networked_ticked_component::<Health>("Health")
+```
+
+**What to change** Give every networked registration a short, stable string; the examples use
+`"avian::Position"`, `"elan::LastJump"`, `"EntityKind"`. Renaming the Rust type is free;
+changing the string is a wire break, so pick once. Registration *order* no longer matters and
+the "order must match on all peers" comments can go.
+
+#### `TickedEnsembleSessionPlugin` is a struct
+
+**Before** a unit struct: `app.add_plugins(TickedEnsembleSessionPlugin)`.
+
+**After** `TickedEnsembleSessionPlugin { handshake_timeout: Duration }`, `Default` is five
+seconds: `app.add_plugins(TickedEnsembleSessionPlugin::default())`. The field is also a
+resource, `HandshakeTimeout(Duration)`, so a test can shorten it on one peer.
+
+#### The registry handshake gates the world (F19)
+
+**Before** both peers announced a hash a frame or two after the lobby appeared, compared it,
+and tore the session down on a mismatch — after whatever snapshots had arrived in between were
+applied, which is a world built from bytes that mean something else and then despawned. A host
+with three matching clients and one mismatched one dropped its own role and ended the game for
+everybody.
+
+**After**
+
+- Each peer announces `TickedRegistryHandshake { components, resources, component_names,
+  resource_names }` — the two hashes and the two sorted name lists — when `bevy_ensemble` marks
+  the counterpart `HandshakeVerified`, that is, once the transport's own protocol check has
+  passed. Control message `bevy_ticked/RegistryHandshake`, authority `Any` (both sides
+  announce), reliable.
+- A host that matches a client inserts `TickedPeerVerified` on that `LobbyClient`, adds its
+  uuid to the server's `SnapshotRecipientList`, and sends `TickedSessionWelcome { slot,
+  server_tick, send_every }` (`bevy_ticked/SessionWelcome`, host-only, reliable). Slots come
+  from `SpawnerSlots` on the host, `1..=255`, lowest free first, freed when the `LobbyClient`
+  goes; the client keeps its in `LocalSpawnerSlot(u8)`. Nothing uses the slot yet; it is for
+  the predicted-spawn phase.
+- A client that matches its host inserts `RegistryVerified`. **Until it is present the bridge
+  drops every snapshot** and counts it in `ReplayStats.dropped_before_handshake`. The host
+  only sends to verified clients, so in practice the count is the odd packet that crossed a
+  slow link before the handshake did.
+- A mismatch names the first differing registration, in `RegistryMismatch.difference` and in
+  the log: `component "Health" is registered on this build and not on the peer's` or `the
+  peer registers "WeaponState" which this build does not`; resources after components. On a
+  client the role is dropped and the latch blocks re-adoption until the lobby goes, as before.
+  **On a host the session continues:** the mismatched client is refused (never verified, never
+  sent a snapshot) and the error says why; the client finds out on its own side, since both
+  compare.
+- A client that has held its role for `HandshakeTimeout` without hearing its host's registries
+  latches `HandshakeTimedOut { waited }`, drops the role and releases `AwaitingSync`, with an
+  error saying the host is on a build without the handshake or the link never delivered it.
+  Before, it sat paused for ever.
+
+**What to change** Nothing, on the session plugin: it is all inside. A game that adopts roles
+by hand and runs only `TickedNetworkingEnsemblePlugin` has no handshake and no gate, exactly as
+before — the bridge only gates when the session plugin installed the handshake — and should
+move to the session plugin to get F19's protection. A game that showed `RegistryMismatch` to
+the player can show `difference` instead of two hashes. `RegistryMismatch` is `Clone` and no
+longer `Copy` (it carries the name lists).
+
+#### `TickedSessionLobby(Entity)`
+
+New resource, present while a `Lobby` entity exists (host or client) and removed with it.
+The bridge's own systems read it instead of `Single<Entity, With<Lobby>>`; a game that sends
+its own lobby messages can too. Installed by either plugin of the crate.
+
+#### Snapshots are addressed, and the bridge no longer counts bytes
+
+**Before** `SendNetworkSnapshot(WorldSnapshot)` was broadcast to the lobby, encoded by the
+bridge (a second postcard pass, to fill `SnapshotStats.bytes`), and `SnapshotRecipients(usize)`
+told the server how many copies that was.
+
+**After** `SendNetworkSnapshot { recipient: Option<u128>, bytes }` arrives one per verified
+client, already encoded; the bridge sends `EnsembleSnapshotMessage { bytes }` unreliably to
+that client's `LobbyClient` entity (or, with `recipient: None`, to the lobby, which is the
+broadcast a bridge without the session plugin still gets). `SnapshotRecipientList(Vec<u128>)`
+replaces `SnapshotRecipients`; the session plugin maintains it from `TickedPeerVerified`.
+`SnapshotStats.bytes`, `max_bytes`, `last_bytes` and the new `oversize` are counted by the
+server at the encode. A packet that does not decode is dropped with one warning; the fuzz
+tests feed the bridge garbage and it must never panic.
+
+`EnsembleInputMessage<T>` carries `NetworkInputPayload { inputs, ack }`; on the host the bridge
+triggers `ReceivedSnapshotAck { sender, seq }` after the packet's inputs.
+
+**What to change** A game that read `SnapshotRecipients` reads `SnapshotRecipientList`; a
+game that built `EnsembleSnapshotMessage { payload }` by hand (a test crafting a packet) builds
+`{ bytes: encode_packet(&packet) }`.
+
+#### The harness
+
+- `fixtures::minimal` registers under `"Pos"`, `"Vel"`, `"EntityKind"`, `"Owner"` with the new
+  API; a test that registered a subset by hand uses `register_networked_ticked_component`.
+- `wire::assert_wire_order` / `assert_resource_wire_order` compare the **sorted** wire names
+  against `expected` as a set; a reorder no longer fails them, an add/remove/rename still
+  does. New: `assert_wire_names(app, &[..])`, `assert_resource_wire_names(app, &[..])`,
+  `wire_hash(app) -> u64`, `resource_wire_hash(app) -> u64`.
+- `TickedNetwork::decode_snapshots(from, to) -> Vec<SnapshotPacket>`: every traced snapshot
+  from one peer to another, unframed and decoded, in send order — the way to read what a
+  client was *told* (`seq`, `your_margin`, the body) rather than what it has since predicted.
+  `snapshots_sent` and `snapshot_packets` are unchanged.
+- `assert_bandwidth_within` returns the measured bytes per tick, so a test can print the figure
+  it budgets against. With the minimal fixture, a host and two walking clients over a cable,
+  it measures **52 bytes per tick** from the host to each client, everything on the link
+  included (the audit's figure under the old shape was 1340); a snapshot packet alone is 51
+  bytes mean, 59 max.
+
+#### Tests that came with it
+
+`crates/bevy_ticked_networking_ensemble/tests/wire_v2.rs`: nothing is applied before the
+handshake matches (a crafted early snapshot is dropped and counted); a mismatched client never
+holds a tracked entity and is told which registration differs; a client whose announcement
+never arrives is refused after the timeout and not left paused; each client's packets carry
+its own margin and its own sequence numbers; a departed player's margin and recipient entry go
+with it; a verified client is welcomed with a slot that is freed on leave and reissued on
+rejoin; snapshots go to verified clients only (not a mismatched one, not a pending one, and to
+a promoted one once promoted); and the bytes-per-tick budget above.
+
+`lossy_links::a_reordered_snapshot_is_dropped_over_the_link` was passing by accident: on a
+cable the loopback delivers every unreliable packet on the next frame, so there is never a
+second packet in flight to swap with, and the one stale drop it counted was the duplicate
+tick-1 snapshot every session starts with — which lands before or after the test's counter
+reset depending on the wall-clock ping the client seeds its lead from, and so on machine load.
+It now runs over a link with three frames of delay, where an overtake is possible and does
+happen.
+
 ## T6 — lockstep part 1: join, checksum, late actions, trust
 
 One wire change: `ClientLoaded` carries the joiner's tick buffer. Both peers must be rebuilt;
