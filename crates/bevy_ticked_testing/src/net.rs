@@ -16,7 +16,7 @@ use std::time::Duration;
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
 use bevy_ensemble::{EnsembleMessage, EnsembleMessageRegistry, packet_index, unframe_packet};
-use bevy_ensemble_loopback::{Link, LoopbackNetwork, PeerId, SentPacket};
+use bevy_ensemble_loopback::{Link, LoopbackNetwork, PacketFate, PeerId, SentPacket};
 use bevy_ticked::tracked_entity::TickTrackedEntity;
 use bevy_ticked_networking::input::TickedInput;
 use bevy_ticked_networking::snapshot::{SnapshotPacket, decode_packet};
@@ -44,6 +44,16 @@ pub struct SnapshotOnWire {
     /// The whole packet, including any other messages framed with it.
     pub bytes: usize,
     pub delivered: bool,
+}
+
+/// One decoded message and when it travelled. See [`TickedNetwork::decode_messages_traced`].
+#[derive(Clone, Debug)]
+pub struct TracedMessage<M> {
+    /// The frame the sender handed it over.
+    pub sent_frame: u64,
+    /// The frame it arrived, or `None` if the link lost it.
+    pub arrived_frame: Option<u64>,
+    pub message: M,
 }
 
 /// One input packet as it crossed the wire.
@@ -301,7 +311,11 @@ impl TickedNetwork {
                     // Every frame, this peer runs `times` times.
                     Some((_, 1, times)) => *times,
                     Some((_, every, times)) => {
-                        if frame.is_multiple_of(u64::from(*every)) { *times } else { 0 }
+                        if frame.is_multiple_of(u64::from(*every)) {
+                            *times
+                        } else {
+                            0
+                        }
                     }
                     None => 1,
                 };
@@ -447,7 +461,12 @@ impl TickedNetwork {
     }
 
     fn frame_of(&self, peer: PeerId) -> Duration {
-        match self.net.app(peer).world().get_resource::<TimeUpdateStrategy>() {
+        match self
+            .net
+            .app(peer)
+            .world()
+            .get_resource::<TimeUpdateStrategy>()
+        {
             Some(TimeUpdateStrategy::ManualDuration(frame)) => *frame,
             _ => TICK,
         }
@@ -554,6 +573,63 @@ impl TickedNetwork {
                 let envelope: EnsembleSnapshotMessage =
                     postcard::from_bytes(&message[WIRE_INDEX_BYTES..]).ok()?;
                 decode_packet(&envelope.bytes)
+            })
+            .collect()
+    }
+
+    /// Every traced message of type `M` from `from` to `to`, decoded, in send order, delivered
+    /// or not. The generic form of [`decode_snapshots`](Self::decode_snapshots): a test reading
+    /// what rode an input packet (its acknowledgement, say) decodes the bridge's input message.
+    pub fn decode_messages<M: EnsembleMessage + serde::de::DeserializeOwned>(
+        &self,
+        from: PeerId,
+        to: PeerId,
+    ) -> Vec<M> {
+        let Some(index) = self.wire_index::<M>(from) else {
+            return Vec::new();
+        };
+        self.trace()
+            .iter()
+            .filter(|packet| packet.from == from && packet.to == to)
+            .flat_map(|packet| messages_in(&packet.bytes))
+            .filter(|message| packet_index(message) == Some(index))
+            .filter_map(|message| postcard::from_bytes(&message[WIRE_INDEX_BYTES..]).ok())
+            .collect()
+    }
+
+    /// As [`decode_messages`](Self::decode_messages), with the frame each message was handed
+    /// over on and the frame it arrived, if it did. For a test that asks whether the sender
+    /// could have known something when it sent: "was this baseline acknowledged before the
+    /// delta against it went out".
+    pub fn decode_messages_traced<M: EnsembleMessage + serde::de::DeserializeOwned>(
+        &self,
+        from: PeerId,
+        to: PeerId,
+    ) -> Vec<TracedMessage<M>> {
+        let Some(index) = self.wire_index::<M>(from) else {
+            return Vec::new();
+        };
+        self.trace()
+            .iter()
+            .filter(|packet| packet.from == from && packet.to == to)
+            .flat_map(|packet| {
+                let arrived = match packet.fate {
+                    PacketFate::Delivered { at_frame } => Some(at_frame),
+                    PacketFate::Duplicated { at_frames } => Some(at_frames[0]),
+                    _ => None,
+                };
+                messages_in(&packet.bytes)
+                    .into_iter()
+                    .filter(move |message| packet_index(message) == Some(index))
+                    .filter_map(move |message| {
+                        let message: M = postcard::from_bytes(&message[WIRE_INDEX_BYTES..]).ok()?;
+                        Some(TracedMessage {
+                            sent_frame: packet.frame,
+                            arrived_frame: arrived,
+                            message,
+                        })
+                    })
+                    .collect::<Vec<_>>()
             })
             .collect()
     }

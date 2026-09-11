@@ -35,7 +35,9 @@
 use std::collections::BTreeMap;
 
 use bevy::prelude::*;
-use bevy_ticked::{TickedLoop, registry::TickedComponentRegistry, tracked_entity::TickTrackedEntity};
+use bevy_ticked::{
+    TickedLoop, registry::TickedComponentRegistry, tracked_entity::TickTrackedEntity,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::client::{AppliedSnapshotTick, ClientSet, LocalClientPlayer};
@@ -95,6 +97,8 @@ pub struct DisplayTick(pub Option<u64>);
 #[derive(Resource, Debug, Clone)]
 pub struct AuthoritativeHistory {
     ticks: BTreeMap<u64, BTreeMap<u64, EntityRecord>>,
+    /// Whole bodies by packet `seq`: what a delta is rebuilt against.
+    bodies: BTreeMap<u32, (u64, crate::snapshot::FullBody)>,
     /// How many snapshot ticks to keep.
     pub max_ticks: usize,
 }
@@ -103,6 +107,7 @@ impl Default for AuthoritativeHistory {
     fn default() -> Self {
         Self {
             ticks: BTreeMap::new(),
+            bodies: BTreeMap::new(),
             max_ticks: 64,
         }
     }
@@ -119,6 +124,19 @@ impl AuthoritativeHistory {
         while self.ticks.len() > self.max_ticks {
             self.ticks.pop_first();
         }
+    }
+
+    /// Remember a whole body under the packet `seq` that carried it, for deltas against it.
+    pub fn record_body(&mut self, seq: u32, tick: u64, body: &crate::snapshot::FullBody) {
+        self.bodies.insert(seq, (tick, body.clone()));
+        while self.bodies.len() > self.max_ticks {
+            self.bodies.pop_first();
+        }
+    }
+
+    /// The body the packet `seq` carried, if still held.
+    pub fn body_at_seq(&self, seq: u32) -> Option<&crate::snapshot::FullBody> {
+        self.bodies.get(&seq).map(|(_, body)| body)
     }
 
     /// The record for `id` at the newest tick at or before `tick`, with that tick.
@@ -141,7 +159,10 @@ impl AuthoritativeHistory {
 
     /// Every id the snapshot at `tick` named.
     pub fn ids_at(&self, tick: u64) -> impl Iterator<Item = u64> + '_ {
-        self.ticks.get(&tick).into_iter().flat_map(|r| r.keys().copied())
+        self.ticks
+            .get(&tick)
+            .into_iter()
+            .flat_map(|r| r.keys().copied())
     }
 
     /// The newest tick held.
@@ -156,6 +177,7 @@ impl AuthoritativeHistory {
 
     pub fn clear(&mut self) {
         self.ticks.clear();
+        self.bodies.clear();
     }
 }
 
@@ -167,7 +189,7 @@ pub(crate) fn install_owner(app: &mut App) {
         .get_resource::<TickedComponentRegistry>()
         .is_some_and(|registry| registry.index_of::<Owner>().is_some());
     if !registered {
-        app.register_networked_ticked_component::<Owner>("bevy_ticked::Owner");
+        app.register_networked_ticked_component_once::<Owner>("bevy_ticked::Owner");
     }
     // The allocator is rolled back by the core; on the wire, the authority's snapshot corrects
     // a client's counters (slot 0 above all: the ids the host has handed out).
@@ -241,7 +263,9 @@ fn mark_owned_on_role(
         match (mine, mode) {
             (true, Some(ReplicationMode::Predicted)) => {}
             (true, _) => {
-                commands.entity(entity).try_insert(ReplicationMode::Predicted);
+                commands
+                    .entity(entity)
+                    .try_insert(ReplicationMode::Predicted);
             }
             (false, Some(ReplicationMode::Predicted)) => {
                 commands.entity(entity).try_remove::<ReplicationMode>();
@@ -309,5 +333,6 @@ fn restore_interpolated_entities(world: &mut World) {
                 None => break,
             }
         }
+        registry.remove_absent(world, entity, &record.present);
     }
 }

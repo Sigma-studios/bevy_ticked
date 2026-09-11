@@ -32,7 +32,9 @@ fn stub_wire() -> WireFns {
         encode_one: |_, _, _, _| false,
         decode_one: |_, _, _, _, _| None,
         insert_one: |_, _, _| None,
+        remove_one: |_, _| {},
         matches_at: |_, _, _, _| None,
+        decode_len: |_| None,
         begin_tick: |_, _| {},
         finish_tick: |_, _| {},
         has_at: |_, _, _| false,
@@ -99,7 +101,11 @@ fn derived_indices_are_stable_under_reordering() {
     });
     assert_eq!(one.wire_index_of::<Pos>(), other.wire_index_of::<Pos>());
     assert_eq!(one.wire_index_of::<Vel>(), other.wire_index_of::<Vel>());
-    assert_eq!(one.wire_index_of::<Pos>(), Some(0), "\"Pos\" sorts before \"Vel\"");
+    assert_eq!(
+        one.wire_index_of::<Pos>(),
+        Some(0),
+        "\"Pos\" sorts before \"Vel\""
+    );
     assert_eq!(one.wire_index_of::<Vel>(), Some(1));
     // The registration index is a different number and says so in its name.
     assert_ne!(one.index_of::<Pos>(), other.index_of::<Pos>());
@@ -130,7 +136,11 @@ fn a_rollback_only_type_is_not_on_the_wire() {
     assert_eq!(one.wire_hash(), other.wire_hash());
     assert_eq!(other.wire_index_of::<Tag>(), None);
     assert_eq!(other.wire_len(), 2);
-    assert_eq!(other.len(), 3, "it is still registered, and still rolled back");
+    assert_eq!(
+        other.len(),
+        3,
+        "it is still registered, and still rolled back"
+    );
 }
 
 #[test]
@@ -144,7 +154,10 @@ fn two_types_with_the_same_wire_name_are_refused() {
     let Err(payload) = outcome else {
         panic!("a duplicate name must panic");
     };
-    let message = payload.downcast_ref::<String>().cloned().unwrap_or_default();
+    let message = payload
+        .downcast_ref::<String>()
+        .cloned()
+        .unwrap_or_default();
     assert!(
         message.contains("Position") && message.contains("share the wire name"),
         "the panic names the duplicate: {message}"
@@ -167,7 +180,10 @@ fn registering_after_the_format_is_frozen_panics() {
     let Err(payload) = outcome else {
         panic!("registering after the freeze must panic");
     };
-    let message = payload.downcast_ref::<String>().cloned().unwrap_or_default();
+    let message = payload
+        .downcast_ref::<String>()
+        .cloned()
+        .unwrap_or_default();
     assert!(message.contains("frozen"), "{message}");
 }
 
@@ -176,7 +192,9 @@ fn the_registry_is_not_frozen_until_something_asks() {
     let one = registry(|app| {
         networked::<Pos>(app, "Pos");
         assert!(
-            !app.world().resource::<TickedComponentRegistry>().is_frozen(),
+            !app.world()
+                .resource::<TickedComponentRegistry>()
+                .is_frozen(),
             "registration alone does not freeze"
         );
     });

@@ -181,7 +181,11 @@ fn forward_received_inputs<T: TickedInput + Serialize + for<'de> Deserialize<'de
             });
         }
         if let Some(seq) = msg.message.payload.ack {
-            commands.trigger(ReceivedSnapshotAck { sender, seq });
+            commands.trigger(ReceivedSnapshotAck {
+                sender,
+                seq,
+                nack_full: msg.message.payload.nack_full,
+            });
         }
     }
 }
@@ -246,6 +250,7 @@ fn forward_outgoing_inputs<T: TickedInput + Serialize + for<'de> Deserialize<'de
         payload: NetworkInputPayload {
             inputs: trigger.event().inputs.clone(),
             ack: trigger.event().ack,
+            nack_full: trigger.event().nack_full,
         },
     };
     // Unreliable: a lost packet is cheaper than head-of-line blocking the
@@ -463,6 +468,7 @@ mod tests {
                 payload: NetworkInputPayload {
                     inputs: vec![(1, Input)],
                     ack: Some(12),
+                    nack_full: false,
                 },
             },
             received_at: bevy_ensemble::Instant::now(),
@@ -470,7 +476,11 @@ mod tests {
         app.update();
         assert_eq!(
             app.world().resource::<Acks>().0,
-            vec![ReceivedSnapshotAck { sender: 7, seq: 12 }]
+            vec![ReceivedSnapshotAck {
+                sender: 7,
+                seq: 12,
+                nack_full: false
+            }]
         );
     }
 }

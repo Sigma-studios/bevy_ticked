@@ -4,7 +4,7 @@ use bevy::{log::error, prelude::*};
 use serde::{Serialize, de::DeserializeOwned};
 
 use bevy_ticked::{
-    registry::{TickedComponent, TickedComponentRegistry, WireFns},
+    registry::{ReplicationClass, TickedComponent, TickedComponentRegistry, WireFns},
     resource_registry::{ResourceActions, TickedResource, TickedResourceRegistry},
     tracked_entity::TickTrackedEntity,
     world_actions::WorldActions,
@@ -45,28 +45,50 @@ pub trait NetworkedTickedAppExt {
     fn register_networked_ticked_component<T: NetworkedTickedComponent>(
         &mut self,
         wire_name: &'static str,
+    ) -> &mut Self {
+        self.register_networked_ticked_component_as::<T>(wire_name, ReplicationClass::Changed)
+    }
+
+    /// A networked component sent with its entity's first record and never again: a kind, a
+    /// spawn point, an owner. Full bodies (a join, a keyframe) still carry it.
+    fn register_networked_ticked_component_once<T: NetworkedTickedComponent>(
+        &mut self,
+        wire_name: &'static str,
+    ) -> &mut Self {
+        self.register_networked_ticked_component_as::<T>(wire_name, ReplicationClass::Once)
+    }
+
+    /// A networked component with an explicit [`ReplicationClass`].
+    fn register_networked_ticked_component_as<T: NetworkedTickedComponent>(
+        &mut self,
+        wire_name: &'static str,
+        class: ReplicationClass,
     ) -> &mut Self;
 }
 
 impl NetworkedTickedAppExt for App {
-    fn register_networked_ticked_component<T: NetworkedTickedComponent>(
+    fn register_networked_ticked_component_as<T: NetworkedTickedComponent>(
         &mut self,
         wire_name: &'static str,
+        class: ReplicationClass,
     ) -> &mut Self {
         self.init_resource::<TickedComponentRegistry>();
         self.init_resource::<WorldActions<T>>();
         let mut registry = self.world_mut().resource_mut::<TickedComponentRegistry>();
-        registry.register_networked::<T>(
+        registry.register_networked_as::<T>(
             wire_name,
             WireFns {
                 encode_one: encode_one::<T>,
                 decode_one: decode_one::<T>,
                 insert_one: insert_one::<T>,
+                remove_one: remove_one::<T>,
                 matches_at: matches_at::<T>,
+                decode_len: decode_len::<T>,
                 begin_tick: begin_tick::<T>,
                 finish_tick: finish_tick::<T>,
                 has_at: has_at::<T>,
             },
+            class,
         );
         self
     }
@@ -221,6 +243,12 @@ fn insert_one<T: NetworkedTickedComponent>(
     Some(consumed)
 }
 
+fn remove_one<T: NetworkedTickedComponent>(world: &mut World, entity: Entity) {
+    if let Ok(mut entity) = world.get_entity_mut(entity) {
+        entity.remove::<T>();
+    }
+}
+
 /// Equal means the saved value encodes to exactly the bytes at the front of `bytes`. On a
 /// mismatch the caller stops walking the record, so `consumed` is only meaningful when equal.
 fn matches_at<T: NetworkedTickedComponent>(
@@ -239,6 +267,11 @@ fn matches_at<T: NetworkedTickedComponent>(
     } else {
         Some((false, 0))
     }
+}
+
+fn decode_len<T: NetworkedTickedComponent>(bytes: &[u8]) -> Option<usize> {
+    let (_, rest) = postcard::take_from_bytes::<T>(bytes).ok()?;
+    Some(bytes.len() - rest.len())
 }
 
 fn begin_tick<T: NetworkedTickedComponent>(world: &mut World, tick: u64) {

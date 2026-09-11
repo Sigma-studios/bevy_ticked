@@ -46,8 +46,10 @@ pub mod prelude {
     pub use crate::fault::*;
     pub use crate::input::*;
     pub use crate::measure::*;
-    pub use crate::net::{Role, TickedNetwork};
-    pub use crate::peer::{HOST_UUID, PeerRecipe, TICK, client_server_peer, peer_app, peer_app_with};
+    pub use crate::net::{Role, TickedNetwork, TracedMessage};
+    pub use crate::peer::{
+        HOST_UUID, PeerRecipe, TICK, client_server_peer, peer_app, peer_app_with,
+    };
     pub use crate::view::*;
     pub use bevy_ensemble_loopback::{Link, PacketFate, PeerId, SentPacket};
 }
