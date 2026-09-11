@@ -144,16 +144,16 @@ fn leaving_before_the_first_snapshot_does_not_leave_the_clock_stopped() {
     app.world_mut().insert_resource(LocalClientPlayer(1));
     app.update();
     assert!(
-        app.world().get_resource::<TicksPaused>().is_some(),
-        "a joining client is paused until the host's world arrives"
+        app.world().resource::<TickHolds>().holds(TickHoldReason::AwaitingSync),
+        "a joining client is held until the host's world arrives"
     );
 
     app.world_mut().remove_resource::<LocalClientPlayer>();
     app.update();
 
     assert!(
-        app.world().get_resource::<TicksPaused>().is_none(),
-        "and un-paused when it turns out there is no host coming"
+        !app.world().resource::<TickHolds>().is_held(),
+        "and released when it turns out there is no host coming"
     );
 }
 

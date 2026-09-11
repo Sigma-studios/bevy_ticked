@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 
 use bevy::prelude::*;
 use bevy_ticked::registry::TickedComponent;
-use bevy_ticked::tick::{CurrentTick, TicksPaused};
+use bevy_ticked::tick::{CurrentTick, TickHolds};
 use bevy_ticked::tracked_entity::TickTrackedEntity;
 use bevy_ticked::tracked_index::TrackedEntityIndex;
 use bevy_ticked::world_actions::WorldActions;
@@ -33,7 +33,7 @@ pub fn tick(app: &App) -> u64 {
 /// Whether the tick clock is held. On a client that is the normal state between joining and the
 /// first snapshot, not a fault.
 pub fn paused(app: &App) -> bool {
-    app.world().contains_resource::<TicksPaused>()
+    app.world().resource::<TickHolds>().is_held()
 }
 
 /// How many ticks `client` runs ahead of `host`. Negative when it has fallen behind, which is

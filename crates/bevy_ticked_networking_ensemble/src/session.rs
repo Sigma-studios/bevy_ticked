@@ -155,12 +155,12 @@ fn adopt_role(
         commands.entity(entity).try_despawn();
     }
 
+    // Neither role touches the clock here. A client's `reset_on_join` holds `AwaitingSync`
+    // until the first snapshot; a host's `reset_on_host` releases it. Anything else holding
+    // the clock — the game's pause menu — is not this plugin's to lift.
     if is_host {
         commands.insert_resource(LocalServerPlayer(local_player.0));
-        // A host's clock is the session's clock, so there is nothing to wait for.
-        commands.remove_resource::<TicksPaused>();
     } else {
-        // `TicksPaused` stays: `TickedClientPlugin` lifts it once there is a tick to sync to.
         commands.insert_resource(LocalClientPlayer(local_player.0));
     }
 }
@@ -186,13 +186,13 @@ fn adopt_role(
 /// # The window
 ///
 /// Only while the client is still waiting for its first snapshot, which is exactly the span
-/// [`TicksPaused`] covers on a client: after that the buffer holds measurements, and a seed is
+/// the `AwaitingSync` hold covers on a client: after that the buffer holds measurements, and a seed is
 /// a guess that would be overwriting them. Pings start on the first frame a lobby exists, so a
 /// sample is usually there in time — and when it isn't, nothing happens and the default is used.
 /// That is survivable rather than free: it costs one correction shortly after the join.
 fn seed_tick_buffer(
     client: Option<Res<LocalClientPlayer>>,
-    paused: Option<Res<TicksPaused>>,
+    holds: Res<TickHolds>,
     ticked: Res<Time<Ticked>>,
     connection: Query<(&PeerRtt, Option<&PeerRttJitter>), With<Lobby>>,
     mut buffer: ResMut<ClientTickBuffer>,
@@ -203,7 +203,7 @@ fn seed_tick_buffer(
         *seeded = false;
         return;
     }
-    if *seeded || paused.is_none() {
+    if *seeded || !holds.holds(TickHoldReason::AwaitingSync) {
         return;
     }
     let Some((rtt, jitter)) = connection.iter().next() else {

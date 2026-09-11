@@ -6,6 +6,50 @@ what to change in a game, and why. Both peers of a session must be built from th
 Phases that changed `bevy_ensemble` too say which of its commits they pin; that crate's own
 `docs/MIGRATION.md` covers what changed there.
 
+## T5 — `TickHolds`: one pause vocabulary
+
+Nothing on the wire changed.
+
+### `TicksPaused` is gone; `TickHolds` replaces it
+
+**Before** one marker resource. A joining client inserted it until its first snapshot, a
+lockstep peer inserted and removed it every frame from what it had received, a game inserted
+it for the pause menu, and every `remove_resource::<TicksPaused>()` lifted everybody's. A
+user's pause was undone by the first snapshot to arrive; a lockstep client's wait was undone
+by the game's unpause.
+
+**After** `TickHolds`, a set of `TickHoldReason`s: `Manual`, `AwaitingSync`, `SessionPause`,
+`WaitingForPeers`, `SoftHold`, `Custom(u8)`. The clock advances when the set is empty. Each
+subsystem holds and releases its own reason and never touches another's: `reset_on_join`
+holds `AwaitingSync` and the first snapshot releases it; the lockstep sync sets
+`WaitingForPeers`; `reset_on_leave` and `reset_on_host` release the session's reasons only.
+
+```rust
+// Before
+commands.insert_resource(TicksPaused);         // pause
+commands.remove_resource::<TicksPaused>();     // resume
+if ticks_paused.is_some() { .. }               // read
+// After
+holds.hold(TickHoldReason::Manual);
+holds.release(TickHoldReason::Manual);
+if holds.is_held() { .. }                      // any reason
+if holds.holds(TickHoldReason::Manual) { .. }  // this one
+```
+
+**Delete** a game's `toggle_ticks_paused` that re-inserted the marker every frame to fight
+the stack, and any `remove_resource::<TicksPaused>()` on lobby join. **Watch** a UI that
+showed "PAUSED" from the marker: `is_held()` says the clock is stopped, `reasons()` says why,
+which is the difference between "paused" and "waiting for the host".
+
+### A paused host keeps broadcasting
+
+While its clock is held, a host still sends its snapshot, once every 32 passes of the loop
+instead of every tick, so a client that joins during a pause receives the world. A client
+receiving the same tick repeatedly drops the duplicates as stale.
+
+`SnapshotApplied.first` now means "the client was holding `AwaitingSync`", which is what it
+meant before under another name.
+
 ## T4 — core correctness, no wire change
 
 Nothing on the wire changed. Every peer should still be rebuilt: the client's rollback now

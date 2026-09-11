@@ -244,7 +244,9 @@ fn a_manual_rewind_runs_the_loop_without_advancing() {
 #[test]
 fn a_manual_step_while_paused_still_advances() {
     let mut app = stepping_app();
-    app.insert_resource(TicksPaused);
+    app.world_mut()
+        .resource_mut::<TickHolds>()
+        .hold(TickHoldReason::Manual);
     app.update();
     app.world_mut().write_message(StepForward);
     app.update();
