@@ -6,6 +6,226 @@ what to change in a game, and why. Both peers of a session must be built from th
 Phases that changed `bevy_ensemble` too say which of its commits they pin; that crate's own
 `docs/MIGRATION.md` covers what changed there.
 
+## T8 — remote entity modes, hold-last input, correction smoothing
+
+Nothing on the wire changed except one new networked component, `bevy_ticked::Owner`, which
+the registry handshake covers.
+
+### Entities the client does not control are interpolated
+
+**Before** a client simulated every tracked entity through its replay with whatever input it
+had, which for a remote player was nothing: a walking body stood still for the whole lead on
+every client and snapped to the next snapshot, sixty-four times a second. Every game wrote a
+smoothing layer over it.
+**After** `ReplicationMode { Predicted, #[default] Interpolated }`, a client-side component.
+An entity with no marker is interpolated: every loop pass after the snapshot, its networked
+components are set to the authoritative record for `latest applied tick - InterpolationDelay`
+(default 2 ticks), and `TickedInterpolation` blends between consecutive authoritative states.
+The display tick (`DisplayTick`) advances one tick per tick toward that target and catches up
+only when more than two behind, so a bunch of late snapshots does not move a body three ticks
+in one frame; a snapshot that arrives too late for the rollback, or is superseded by a newer
+one before it is applied, is still recorded in `AuthoritativeHistory`, so the drawn path has
+no hole where it was. On a `bad_wifi` link a walking body is drawn moving at most two units
+per tick, where the audit saw it jump by the whole lead.
+It is a little behind, always smooth, and exactly where the host said. Predicted entities are
+simulated through the replay as before.
+
+`Owner(pub u128)` is now the stack's networked component (`"bevy_ticked::Owner"`, registered
+by both role plugins). `RemoteInterpolationPlugin` (installed by `TickedClientPlugin`) marks an
+entity with the local player's `Owner` as `Predicted` when it appears and when the role
+arrives. `AuthoritativeHistory` keeps the last 64 snapshots' records; the misprediction check
+and the delta phase read it too.
+
+**Delete** the game's `OwnerPlayer`/`PlayerUuid` component and its registration, and every
+"remote body with no input" workaround. **Do** make remote physics bodies kinematic on
+clients (the examples do it in an observer on `Owner`): the host owns their motion, and a
+dynamic body fights the restore every tick. **Watch** a test that spawns a tracked entity on a
+client without an `Owner` and expects a snapshot's value to be *visible*: it is interpolated
+now, two ticks behind; give it `ReplicationMode::Predicted` if the test is about prediction.
+
+### Hold the last input
+
+`InputQueue::get_or_last(tick, uuid)` and `at_tick_or_last(tick)`: a player with no input for
+a tick keeps pressing what they last pressed. The server relays other players' inputs in
+`FullBody.inputs_ahead` (T7), so a predicted remote body has real inputs to hold. **Delete**
+the game's `NetInput` hold-last half and `PlayerInputState`.
+
+### Correction smoothing
+
+`TickedSmoothingPlugin` + `CorrectionSmoothing { decay_rate: 12, max_offset: 2, max_angle: 1,
+apply_to: SmoothingTarget::{Self_, Child(Entity)} }` on an entity: a snapshot correction moves
+the simulation whole and the renderer by a decaying offset, applied in `PostUpdate` after the
+tick blend and undone in `TickedSystems::Restore`, or written to a visual child and never to
+the simulated transform. The local player's entities are exempt (a correction to what you
+control should be felt), so is anything with `NoCorrectionSmoothing`, and so is the initial
+sync; a correction beyond `max_offset`/`max_angle` is shown as the jump it is.
+`CorrectionStats` counts them. **Delete** `rollback_smoothing.rs`, `smoothing.rs` and their
+`CorrectionStats`.
+
+`measure_prediction::<T>(app, distance)` records `PredictionError`: the distance between what
+the client had captured for a snapshot's tick and what the authority sent, per snapshot.
+`ClientSet::{BeforeSnapshot, ApplySnapshot, AfterSnapshot}` inside `PreTick` is where a game
+hooks its own before/after measurement.
+
+### The examples
+
+The core half of this phase (`ReplicationMode`, `Owner`, `RemoteInterpolationPlugin`,
+`TickedSmoothingPlugin`, hold-last input, `ClientSet`) is in the T8 section of
+`docs/MIGRATION.md`. This covers what a game built like the examples has to change, what the
+harness gained, and the tests that came with it. Nothing on the wire changed beyond `Owner`,
+which every peer now registers, so both peers must still be built from the same commit.
+
+## The examples
+
+#### `PlayerUuid` is `Owner`
+
+**Before** each example carried its own `PlayerUuid(u128)` component, registered under
+`"PlayerUuid"`, and used it for the three things every game used one for: which body gets the
+camera and the input, which body is the local player's, and which body a snapshot's absence
+rule may not touch.
+
+**After** `bevy_ticked_networking::replication::Owner(u128)`, in the prelude, registered by
+the role plugins under `"bevy_ticked::Owner"`. The stack reads it to decide which bodies a
+client predicts. **Delete** the game's component and its registration; the two examples did
+nothing else.
+
+```rust
+// Before
+struct PlayerUuid(u128);
+.register_networked_ticked_component::<PlayerUuid>("PlayerUuid")
+commands.spawn((tracked_id, EntityKind::Player, .., PlayerUuid(participant.player_uuid)));
+// After
+commands.spawn((tracked_id, EntityKind::Player, .., Owner(participant.player_uuid)));
+```
+
+#### A remote body is interpolated and takes no input
+
+**Before** `apply_inputs` ran on every player body with whatever `InputQueue::at_tick` held,
+which for a remote player was nothing past the relayed inputs; the body stood still through
+the replay and snapped forward at the next snapshot. Neither example had a written-out
+"zero input for non-local players" branch — the stall *was* the workaround, by omission.
+
+**After** `apply_inputs` reads `at_tick_or_last(tick)` (a player with no input for this tick
+is still pressing what they last pressed) and drives only the bodies this peer simulates:
+
+```rust
+fn drives(local_client: Option<&LocalClientPlayer>, mode: Option<&ReplicationMode>) -> bool {
+    local_client.is_none() || matches!(mode, Some(ReplicationMode::Predicted))
+}
+```
+
+On the host that is everyone; on a client it is the local player's body (the stack marks it
+`Predicted` from `Owner`) and anything the game marks so. Everything else is put at the
+authority's state after each snapshot by the stack and needs no input. Shooting still reads
+`at_tick`: a held trigger from a stale input would spawn bullets the host never did.
+
+#### A remote physics body is kinematic on a client
+
+The stack restores an interpolated entity's networked components after every snapshot, and
+the simulation still runs on it between restores. A dynamic avian body fights that restore
+every tick — damping, colliding, falling, integrating from a velocity the host has since
+changed. Both examples choose the body kind where the owner is known:
+
+```rust
+fn body_kind(local_client: Option<&LocalClientPlayer>, owner: Option<&Owner>,
+             mode: Option<&ReplicationMode>) -> RigidBody {
+    let Some(local) = local_client else { return RigidBody::Dynamic };   // the host
+    let mine = owner.is_some_and(|owner| owner.0 == local.0);
+    if mine || matches!(mode, Some(ReplicationMode::Predicted)) { RigidBody::Dynamic }
+    else { RigidBody::Kinematic }
+}
+```
+
+It is called from the `On<Add, TickTrackedEntity>` observer, not `On<Add, Owner>`:
+`apply_full_body` inserts `TickTrackedEntity` **last**, after every networked component, so
+that observer is the one that sees the owner and runs after anything keyed on `Owner`. A
+second observer, `On<Insert, ReplicationMode>`, changes the body when a game changes the mode
+later. In `fps_shooter` the kind overrides the `RigidBody::Dynamic` inside elan's
+`character_controller_bundle()`; the rest of the bundle stays, so a predicting client still
+has a controller to predict with.
+
+#### Interpolation and smoothing
+
+Both examples add `TickedInterpolationPlugin` and `TickedSmoothingPlugin`, and put
+`TickedInterpolation::default()` and `CorrectionSmoothing` on every player body (the local
+player's is exempt by `Owner`, nothing to mark). `top_down_shooter` raises `max_offset` to
+four player radii: the default two units is two pixels there, and every correction would have
+been "too big to smooth". `fps_shooter` keeps the default: two metres is a respawn.
+
+Bullets get `TickedInterpolation` too, and their `Position -> Transform` copy moved from
+`Update` into the tick (`sync_bullet_transforms`, after `bullet_collision`), so the
+interpolation records one state per tick. `top_down_shooter::sync_visuals` no longer writes
+any translation — avian writes the player's inside the tick and the blend would only have
+been overwritten and put back — and rotates the laser child and the bullet sprite as before.
+`fps_shooter::sync_visuals` is gone; it only did the bullet copy.
+
+## The harness (`bevy_ticked_testing`)
+
+- `fixtures::minimal::Owner` is a re-export of the stack's `Owner` and is no longer
+  registered by `register_components`. `apply_inputs` holds the last input
+  (`at_tick_or_last`): a body whose owner sent nothing for this tick keeps its velocity, as
+  it already did by having `Vel` be state, but a stale input is now re-applied rather than
+  skipped. No existing test's counts changed.
+- `fixtures::minimal::install_with_transform(app)`: `install` plus a `Transform` on every
+  tracked entity (attached by an observer, so a body a snapshot spawns has one), written from
+  `Pos` each tick by `sync_transform`, blended by `TickedInterpolationPlugin`. `Transform` is
+  registered for rollback under `"Transform"`, never the wire. Opt-in: the integer fixture is
+  exact and a float transform is not. `sync_transform` re-attaches a transform a rollback
+  restore stripped — a restore removes a rollback-only component from every entity the
+  restored tick has no record of, and a snapshot-spawned body has none for the ticks before
+  its first capture.
+- `fixtures::minimal::spawn_player_with_transform(world, uuid)`: `spawn_player` with the
+  transform and interpolation state already on the body. `seat_everyone` is unchanged; under
+  `install_with_transform` the observer gives its bodies the same.
+- `view::authoritative_tick(app) -> Option<u64>`: the newest tick in `AuthoritativeHistory`,
+  what interpolated entities are drawn from, `InterpolationDelay` behind.
+- `view::replication_mode(app, id) -> Option<ReplicationMode>`: `None` is "interpolated by
+  default" as well as "no such entity".
+- `tests/bites.rs::assert_all_peers_agree_fails_on_a_corrupted_replica` corrupts the client's
+  **own** body now. It used to corrupt the host's, which on a client is interpolated and is put
+  back from the authoritative record every tick; the harness then had nothing to bite on.
+
+## Tests that came with it
+
+`crates/bevy_ticked_networking_ensemble/tests/remote_modes.rs`, host and two clients: B's copy
+of a walking A never goes backwards and ends about the delay behind the host; on B, A's body is
+exactly the host's record for `authoritative tick - delay` after every restore (a probe in
+`PreTick` after `ClientSet::AfterSnapshot`) and within one tick of it after every frame; with
+transforms, the drawn body moves one unit a tick at most and lags by the delay; a body marked
+`Predicted` on B moves once per tick of B's clock through every replay and runs ahead of the
+host; snapshots to B carry A's inputs for ticks after their own, and B holds them to the
+snapshot tick plus A's margin; a correction of the local player's body never gets a
+`SmoothingOffset` and is not counted, while the same correction of a predicted remote body
+is smoothed; the offset shrinks every frame, takes the frames its decay rate says, and never
+snaps; and a hundred frames of A walking on congested wifi never move the drawn body by
+anything like the lead. `get_or_last` has a unit test in the same file.
+
+#### What the wifi test does not say
+
+It was asked to assert "never more than two units a frame" and asserts a ceiling of six, under
+half the lead, and no more than twenty frames of a hundred over two. On `Link::bad_wifi()` two
+things still bunch the drawn steps, both in `RemoteInterpolationPlugin` and not in the
+examples or the harness:
+
+- forty milliseconds of jitter lands two to five snapshots in one frame, and the display tick
+  follows the applied tick one for one, so the body takes that many steps at once;
+- a snapshot overtaken on the link is dropped as stale *and not recorded* in
+  `AuthoritativeHistory`, so the history has holes and "the newest record at or before the
+  display tick" jumps by the hole when the next record lands.
+
+Measured over six seeds and three hundred frames each: six frames in ten the drawn body does
+not move, most of the rest it moves two, and it moves four or five about one frame in twenty.
+A display clock that advances one tick per tick with the delay absorbing the burst, and a late
+snapshot recorded even when it is not applied, would close both and let the test say two.
+
+#### A harness gotcha the smoothing tests found
+
+`drop_next_packets` takes effect at the send. A snapshot already on a 15 ms link lands on the
+next frame regardless, and puts a corruption right before it ever reaches the transform — so a
+test that corrupts a body to force a visible correction drops first, runs two frames to drain
+the link, then corrupts, then runs two more for the wrong value to be drawn. `corrupt_visibly`
+in `remote_modes.rs` is that, and asserts the transform actually went wrong.
+
 ## T7 — snapshot wire v2
 
 **This is a wire-format change**, the one this crate makes in the overhaul. Every peer of a

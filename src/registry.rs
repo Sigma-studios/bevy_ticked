@@ -111,6 +111,9 @@ pub struct WireFns {
     /// Take one value from the front of `bytes`, insert it on `entity` and into the history at
     /// `(tick, id)`. Returns how many bytes it consumed, or `None` if they did not decode.
     pub decode_one: fn(&mut World, u64, Entity, u64, &[u8]) -> Option<usize>,
+    /// As `decode_one`, onto the entity only: no history entry. For putting an authoritative
+    /// value on display without pretending the simulation produced it.
+    pub insert_one: fn(&mut World, Entity, &[u8]) -> Option<usize>,
     /// Start a new history entry at `tick`, empty; `decode_one` fills it.
     pub begin_tick: fn(&mut World, u64),
     /// Absence is authoritative: remove the type from every tracked entity that `decode_one`
@@ -487,6 +490,19 @@ impl TickedComponentRegistry {
     ) -> Option<usize> {
         let (_, wire) = self.wire_entry(wire_index)?;
         (wire.decode_one)(world, tick, entity, id, bytes)
+    }
+
+    /// Take one value of wire type `wire_index` from the front of `bytes` and insert it on
+    /// `entity`, recording nothing. Returns the bytes consumed.
+    pub fn insert_one(
+        &self,
+        world: &mut World,
+        wire_index: u16,
+        entity: Entity,
+        bytes: &[u8],
+    ) -> Option<usize> {
+        let (_, wire) = self.wire_entry(wire_index)?;
+        (wire.insert_one)(world, entity, bytes)
     }
 
     /// Open a history entry at `tick` for every networked type, before decoding a snapshot's

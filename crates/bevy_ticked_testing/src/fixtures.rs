@@ -13,6 +13,8 @@ pub mod minimal {
 
     use bevy::prelude::*;
     use bevy_ticked::checksum::WorldHash;
+    use bevy_ticked::interpolation::{TickedInterpolation, TickedInterpolationPlugin};
+    use bevy_ticked::registry::TickedAppExt;
     use bevy_ticked::tick::CurrentTick;
     use bevy_ticked::tracked_entity::{TickTrackedEntity, TickTrackedEntityCounter};
     use bevy_ticked::TickedSimulation;
@@ -39,9 +41,9 @@ pub mod minimal {
         pub const PLAYER: Self = Self(1);
     }
 
-    /// Which player drives this body. Networked, so a client knows which body is its own.
-    #[derive(Component, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Debug)]
-    pub struct Owner(pub u128);
+    /// Which player drives this body: the stack's own, so a client predicts its body and
+    /// interpolates everybody else's.
+    pub use bevy_ticked_networking::replication::Owner;
 
     /// What a player presses: a direction, or nothing.
     #[derive(Clone, Copy, Default, Serialize, Deserialize, Debug, PartialEq, Eq)]
@@ -76,16 +78,20 @@ pub mod minimal {
         commands.entity(add.entity).insert(Visual);
     }
 
-    /// Set every body's velocity from its owner's input for this tick, when there is one. A tick
-    /// with no input for a player leaves the last velocity standing — a held key.
+    /// Set every body's velocity from its owner's input for this tick, or from the newest one
+    /// before it: a player with no input filed for this tick keeps pressing what they last
+    /// pressed. A player with nothing at all leaves the last velocity standing.
+    ///
+    /// Hold-last rather than `at_tick`, because a remote player's input for a tick this peer
+    /// has not received yet is far more likely "still walking" than "stopped": with `at_tick`
+    /// a predicted remote body stood still for every tick past the relayed inputs and snapped
+    /// forward when the snapshot arrived.
     pub fn apply_inputs(
         tick: Res<CurrentTick>,
         queue: Res<InputQueue<Input>>,
         mut bodies: Query<(&Owner, &mut Vel)>,
     ) {
-        let Some(inputs) = queue.at_tick(tick.0) else {
-            return;
-        };
+        let inputs = queue.at_tick_or_last(tick.0);
         for (owner, mut vel) in &mut bodies {
             if let Some(input) = inputs.get(&owner.0) {
                 vel.0 = i64::from(input.dx);
@@ -125,8 +131,8 @@ pub mod minimal {
     pub fn register_components(app: &mut App) {
         app.register_networked_ticked_component::<Pos>("Pos")
             .register_networked_ticked_component::<Vel>("Vel")
-            .register_networked_ticked_component::<EntityKind>("EntityKind")
-            .register_networked_ticked_component::<Owner>("Owner");
+            .register_networked_ticked_component::<EntityKind>("EntityKind");
+        // `Owner` is the stack's own and is registered by the role plugins.
     }
 
     /// The simulation systems and the `Visual` observer, without any registration.
@@ -158,6 +164,91 @@ pub mod minimal {
             bevy_ticked::checksum::ChecksumLogPlugin::<MinimalHash>::default()
                 .in_set(MinimalSet::Sample),
         );
+    }
+
+    // ── With a transform ─────────────────────────────────────────────────────────────────────
+
+    /// [`install`] plus a `Transform` on every tracked entity, written from `Pos` each tick,
+    /// and a `TickedInterpolation` to blend it between ticks.
+    ///
+    /// Opt-in: the integer fixture is exact and a float transform is not, and neither the tick
+    /// interpolation nor correction smoothing (`TickedSmoothingPlugin`) has anything to do
+    /// without a `Transform`. A test about how a body is *drawn* installs this; one about
+    /// where it *is* does not.
+    ///
+    /// `Transform` is registered for rollback (never the wire), so a replay restores it and
+    /// re-derives it from the replayed `Pos` rather than carrying the blend the renderer last
+    /// wrote — the T4 failure — and so a corrupted transform is put right by the next snapshot
+    /// the way a corrupted `Pos` is.
+    pub fn install_with_transform(app: &mut App) {
+        install(app);
+        app.register_ticked_component_as::<Transform>("Transform")
+            .add_plugins(TickedInterpolationPlugin)
+            .add_observer(attach_transform)
+            .add_systems(
+                TickedSimulation,
+                sync_transform.after(integrate).in_set(MinimalSet::Simulate),
+            );
+    }
+
+    fn transform_at(pos: i64) -> Transform {
+        Transform::from_xyz(pos as f32, 0.0, 0.0)
+    }
+
+    /// Every tracked entity gets a transform and an interpolation state, whichever peer spawned
+    /// it: a body a snapshot spawns on a client arrives with its networked components only.
+    fn attach_transform(
+        add: On<Add, TickTrackedEntity>,
+        bodies: Query<(Option<&Pos>, Has<Transform>)>,
+        mut commands: Commands,
+    ) {
+        let Ok((pos, has_transform)) = bodies.get(add.entity) else {
+            return;
+        };
+        let mut entity = commands.entity(add.entity);
+        entity.insert_if_new(TickedInterpolation::default());
+        if !has_transform {
+            entity.insert(transform_at(pos.map_or(0, |pos| pos.0)));
+        }
+    }
+
+    /// `Transform.translation.x = Pos`, after the integration, so the blend and the smoothing
+    /// offset have a float to work on.
+    ///
+    /// Self-healing: a rollback restore removes a rollback-only component from every entity
+    /// the restored tick has no record of, and a body a snapshot spawned mid-replay is exactly
+    /// that for the ticks before its first capture. A body found bare gets its transform back
+    /// before this tick is captured, so it is never bare twice.
+    pub fn sync_transform(
+        mut bodies: Query<(Entity, &Pos, Option<&mut Transform>), With<TickTrackedEntity>>,
+        mut commands: Commands,
+    ) {
+        for (entity, pos, transform) in &mut bodies {
+            match transform {
+                Some(mut transform) => transform.translation.x = pos.0 as f32,
+                None => {
+                    commands.entity(entity).insert(transform_at(pos.0));
+                }
+            }
+        }
+    }
+
+    /// [`spawn_player`] with the transform and interpolation state already on the body, so its
+    /// tick-0 capture holds a real transform rather than the observer's deferred one. Only
+    /// meaningful under [`install_with_transform`]; elsewhere the transform is dead weight.
+    pub fn spawn_player_with_transform(world: &mut World, uuid: u128) -> Entity {
+        let id = world.resource_mut::<TickTrackedEntityCounter>().next();
+        world
+            .spawn((
+                Pos(0),
+                Vel(0),
+                EntityKind::PLAYER,
+                Owner(uuid),
+                id,
+                transform_at(0),
+                TickedInterpolation::default(),
+            ))
+            .id()
     }
 
     /// Give every peer on the network a body, minted on the host. Returns `(uuid, tracked id)`

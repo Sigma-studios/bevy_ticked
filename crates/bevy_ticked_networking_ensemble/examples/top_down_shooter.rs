@@ -50,10 +50,6 @@ struct SpawnPoint(Vec2);
 #[derive(Component, Clone, Debug, Serialize, Deserialize, Default)]
 struct ShootCooldown(u64);
 
-/// Links a player's UUID to their game entity.
-#[derive(Component, Clone, Debug, Serialize, Deserialize)]
-struct PlayerUuid(u128);
-
 #[derive(Component)]
 struct UiText;
 
@@ -84,8 +80,13 @@ fn main() {
         .add_plugins(TickedServerPlugin::<PlayerInput>::new())
         .add_plugins(TickedClientPlugin::<PlayerInput>::new())
         .add_plugins(TickedNetworkingEnsemblePlugin::<PlayerInput>::new())
+        // The renderer blends each body between its last two tick states, and a correction
+        // to a predicted body slides into place instead of blinking there. Neither touches
+        // what the simulation reads.
+        .add_plugins((TickedInterpolationPlugin, TickedSmoothingPlugin))
         // Register networked components. The wire name is the type's identity on the
         // wire and must be the same on every peer; registration order does not matter.
+        // `Owner` — whose body this is — is the stack's own and is registered by it.
         .register_networked_ticked_component::<Position>("avian::Position")
         .register_networked_ticked_component::<Rotation>("avian::Rotation")
         .register_networked_ticked_component::<LinearVelocity>("avian::LinearVelocity")
@@ -94,7 +95,6 @@ fn main() {
         .register_networked_ticked_component::<EntityKind>("EntityKind")
         .register_networked_ticked_component::<SpawnPoint>("SpawnPoint")
         .register_networked_ticked_component::<ShootCooldown>("ShootCooldown")
-        .register_networked_ticked_component::<PlayerUuid>("PlayerUuid")
         // Startup
         .add_systems(Startup, setup)
         // Lobby management (Update)
@@ -116,10 +116,11 @@ fn main() {
         // Simulation systems (run inside TickedSimulation)
         .add_systems(
             TickedSimulation,
-            (apply_inputs, move_bullets, bullet_collision).chain(),
+            (apply_inputs, move_bullets, bullet_collision, sync_bullet_transforms).chain(),
         )
         // React to networked entity lifecycle
         .add_observer(on_entity_spawned)
+        .add_observer(on_replication_mode_changed)
         .run();
 }
 
@@ -318,7 +319,7 @@ fn server_spawn_players(
             AimAngle(0.0),
             SpawnPoint(spawn_pos),
             ShootCooldown::default(),
-            PlayerUuid(participant.player_uuid),
+            Owner(participant.player_uuid),
             PlayerOwned(participant_entity),
         ));
 
@@ -337,7 +338,7 @@ fn capture_local_input(
     local_client: Option<Res<LocalClientPlayer>>,
     local_server: Option<Res<LocalServerPlayer>>,
     mut input_queue: ResMut<InputQueue<PlayerInput>>,
-    players: Query<(&Position, &PlayerUuid)>,
+    players: Query<(&Position, &Owner)>,
 ) {
     // Determine our UUID
     let my_uuid = local_client
@@ -397,25 +398,34 @@ fn capture_local_input(
 
 // --- Simulation systems (run in TickedSimulation) ---
 
+/// Drive every body this peer simulates from its owner's input for this tick — or the newest
+/// one before it: a player whose input for this tick has not arrived is still pressing what
+/// they last pressed, far more often than nothing. With nothing, a predicted remote body
+/// stood still for every tick past the relayed inputs and snapped forward at the snapshot.
+///
+/// Only the bodies this peer drives: on the host that is everyone; on a client it is the local
+/// player's body and any the game marked `Predicted`. Everybody else's body is interpolated —
+/// put at the authority's state after each snapshot — and takes no input here at all. That
+/// is the whole of what used to be the "remote body with no input" workaround.
 fn apply_inputs(
     tick: Res<CurrentTick>,
     time: Res<Time>,
     input_queue: Res<InputQueue<PlayerInput>>,
+    local_client: Option<Res<LocalClientPlayer>>,
     mut players: Query<(
         &mut LinearVelocity,
         &mut AimAngle,
         &mut ShootCooldown,
-        &PlayerUuid,
+        &Owner,
         &EntityKind,
+        Option<&ReplicationMode>,
     )>,
 ) {
-    let Some(tick_inputs) = input_queue.at_tick(tick.0) else {
-        return;
-    };
+    let tick_inputs = input_queue.at_tick_or_last(tick.0);
     let dt = time.delta_secs();
 
-    for (mut vel, mut aim, mut cooldown, uuid, kind) in players.iter_mut() {
-        if *kind != EntityKind::Player {
+    for (mut vel, mut aim, mut cooldown, uuid, kind, mode) in players.iter_mut() {
+        if *kind != EntityKind::Player || !drives(local_client.as_deref(), mode) {
             continue;
         }
         if let Some(input) = tick_inputs.get(&uuid.0) {
@@ -485,7 +495,7 @@ fn move_bullets(world: &mut World) {
     // Spawn new bullets
     let mut player_data: Vec<(u128, Vec2, u64)> = Vec::new();
     {
-        let mut query = world.query::<(&PlayerUuid, &Position, &ShootCooldown, &EntityKind)>();
+        let mut query = world.query::<(&Owner, &Position, &ShootCooldown, &EntityKind)>();
         for (uuid, pos, cooldown, kind) in query.iter(world) {
             if *kind == EntityKind::Player {
                 player_data.push((uuid.0, pos.0, cooldown.0));
@@ -514,11 +524,11 @@ fn move_bullets(world: &mut World) {
             EntityKind::Bullet,
             Position(bullet_pos),
             AimAngle(aim_angle),
-            PlayerUuid(owner_uuid),
+            Owner(owner_uuid),
         ));
 
         // Reset cooldown on the player
-        let mut query = world.query::<(&PlayerUuid, &mut ShootCooldown, &EntityKind)>();
+        let mut query = world.query::<(&Owner, &mut ShootCooldown, &EntityKind)>();
         for (uuid, mut cooldown, kind) in query.iter_mut(world) {
             if *kind == EntityKind::Player && uuid.0 == owner_uuid {
                 cooldown.0 = SHOOT_COOLDOWN_TICKS;
@@ -531,7 +541,7 @@ fn bullet_collision(world: &mut World) {
     // Collect bullet positions
     let mut bullets: Vec<(Entity, Vec2, u128)> = Vec::new();
     {
-        let mut query = world.query::<(Entity, &Position, &PlayerUuid, &EntityKind)>();
+        let mut query = world.query::<(Entity, &Position, &Owner, &EntityKind)>();
         for (entity, pos, uuid, kind) in query.iter(world) {
             if *kind == EntityKind::Bullet {
                 bullets.push((entity, pos.0, uuid.0));
@@ -542,7 +552,7 @@ fn bullet_collision(world: &mut World) {
     // Collect player positions
     let mut players: Vec<(Entity, Vec2, u128, Vec2)> = Vec::new();
     {
-        let mut query = world.query::<(Entity, &Position, &PlayerUuid, &SpawnPoint, &EntityKind)>();
+        let mut query = world.query::<(Entity, &Position, &Owner, &SpawnPoint, &EntityKind)>();
         for (entity, pos, uuid, spawn, kind) in query.iter(world) {
             if *kind == EntityKind::Player {
                 players.push((entity, pos.0, uuid.0, spawn.0));
@@ -581,15 +591,52 @@ fn bullet_collision(world: &mut World) {
     }
 }
 
+// --- Who simulates what ---
+
+/// Whether this peer simulates a body from input: the host simulates every body, a client
+/// only the ones it predicts. `ReplicationMode` is a client-side marker; absent means
+/// interpolated, so on a client only an explicit `Predicted` counts.
+fn drives(local_client: Option<&LocalClientPlayer>, mode: Option<&ReplicationMode>) -> bool {
+    local_client.is_none() || matches!(mode, Some(ReplicationMode::Predicted))
+}
+
+/// The physics body a player gets on this peer.
+///
+/// On the host every body is dynamic: the host simulates everyone from their inputs. On a
+/// client only the local player's is — the body the replay predicts from inputs this client
+/// has — and so is anything the game marks `Predicted`. Every other player's body is
+/// interpolated: after each snapshot it is put at the authority's state, and a dynamic body
+/// would fight that restore every tick, damping and colliding and integrating from a velocity
+/// the host has since changed. Kinematic, it goes where it is put and coasts on the velocity
+/// it was given until the next restore. The host owns its motion; this peer only shows it.
+fn body_kind(
+    local_client: Option<&LocalClientPlayer>,
+    owner: Option<&Owner>,
+    mode: Option<&ReplicationMode>,
+) -> RigidBody {
+    let Some(local) = local_client else {
+        return RigidBody::Dynamic;
+    };
+    let mine = owner.is_some_and(|owner| owner.0 == local.0);
+    if mine || matches!(mode, Some(ReplicationMode::Predicted)) {
+        RigidBody::Dynamic
+    } else {
+        RigidBody::Kinematic
+    }
+}
+
 // --- Entity lifecycle observers ---
 
+/// A snapshot-spawned entity gets its `TickTrackedEntity` last, after every networked component
+/// including `Owner`, so this is where the owner is known and the body kind can be chosen.
 fn on_entity_spawned(
     trigger: On<Add, TickTrackedEntity>,
     mut commands: Commands,
-    query: Query<(&EntityKind, &Position)>,
+    query: Query<(&EntityKind, &Position, Option<&Owner>, Option<&ReplicationMode>)>,
+    local_client: Option<Res<LocalClientPlayer>>,
 ) {
     let entity = trigger.entity;
-    let Ok((kind, pos)) = query.get(entity) else {
+    let Ok((kind, pos, owner, mode)) = query.get(entity) else {
         return;
     };
     let transform = Transform::from_translation(pos.0.extend(0.0));
@@ -603,8 +650,17 @@ fn on_entity_spawned(
                     ..default()
                 },
                 transform,
-                // Physics components needed for client-side prediction
-                RigidBody::Dynamic,
+                TickedInterpolation::default(),
+                // The local player's body is exempt on its own: a correction to what you
+                // are steering should be felt. A correction bigger than a few body widths is
+                // a respawn, and is meant to be seen.
+                CorrectionSmoothing {
+                    max_offset: PLAYER_RADIUS * 4.0,
+                    ..default()
+                },
+                // Physics components needed on every peer: the host and a predicting client
+                // simulate the body, an interpolating client shows it. Which kind, below.
+                body_kind(local_client.as_deref(), owner, mode),
                 Collider::circle(PLAYER_RADIUS),
                 LinearDamping(PLAYER_DRAG),
                 LockedAxes::ROTATION_LOCKED,
@@ -631,26 +687,52 @@ fn on_entity_spawned(
                     ..default()
                 },
                 transform,
+                TickedInterpolation::default(),
             ));
         }
     }
 }
 
+/// A body handed from one mode to the other after it spawned — a game predicting a remote
+/// player it is wrestling with, or giving up on that — changes physics body with it.
+fn on_replication_mode_changed(
+    trigger: On<Insert, ReplicationMode>,
+    mut commands: Commands,
+    players: Query<(&EntityKind, Option<&Owner>, &ReplicationMode)>,
+    local_client: Option<Res<LocalClientPlayer>>,
+) {
+    let Ok((EntityKind::Player, owner, mode)) = players.get(trigger.entity) else {
+        return;
+    };
+    commands
+        .entity(trigger.entity)
+        .insert(body_kind(local_client.as_deref(), owner, Some(mode)));
+}
+
+/// Bullets have no physics body, so nothing writes their transform inside the tick the way
+/// avian writes a player's; done here, after they moved, so `TickedInterpolation` records one
+/// state per tick and blends between them.
+fn sync_bullet_transforms(
+    mut bullets: Query<(&Position, &EntityKind, &mut Transform), With<TickTrackedEntity>>,
+) {
+    for (pos, kind, mut transform) in bullets.iter_mut() {
+        if *kind == EntityKind::Bullet {
+            transform.translation = pos.0.extend(0.0);
+        }
+    }
+}
+
+/// Per-frame visuals that are not the position: avian writes a player's transform inside the
+/// tick and bullets get theirs from `sync_bullet_transforms`; `TickedInterpolation` blends
+/// both for the renderer, so writing translations here would only fight it.
 fn sync_visuals(
     mut tracked: Query<
-        (
-            &Position,
-            &AimAngle,
-            &EntityKind,
-            &mut Transform,
-            Option<&Children>,
-        ),
+        (&AimAngle, &EntityKind, &mut Transform, Option<&Children>),
         With<TickTrackedEntity>,
     >,
     mut child_transforms: Query<&mut Transform, Without<TickTrackedEntity>>,
 ) {
-    for (pos, aim, kind, mut transform, children) in tracked.iter_mut() {
-        transform.translation = pos.0.extend(0.0);
+    for (aim, kind, mut transform, children) in tracked.iter_mut() {
         match kind {
             EntityKind::Player => {
                 // Rotate the laser child instead of the player entity.

@@ -10,7 +10,7 @@ use bevy::prelude::*;
 use bevy_ticked::tracked_entity::TickTrackedEntityCounter;
 use bevy_ticked_networking::networked_registry::NetworkedTickedAppExt;
 use bevy_ticked_testing::fixtures::minimal::{
-    self, EntityKind, Input, MinimalHash, Owner, Pos, Vel, seat_everyone, spawn_player,
+    self, EntityKind, Input, MinimalHash, Pos, Vel, seat_everyone, spawn_player,
 };
 use bevy_ticked_testing::prelude::*;
 
@@ -108,8 +108,7 @@ fn dropping_a_component_from_the_registry_fails_convergence() {
     net.add_client_built(|app| {
         minimal::install_systems(app);
         app.register_networked_ticked_component::<Vel>("Vel")
-            .register_networked_ticked_component::<EntityKind>("EntityKind")
-            .register_networked_ticked_component::<Owner>("Owner");
+            .register_networked_ticked_component::<EntityKind>("EntityKind");
     });
     // The join handshake may end the session over the mismatch; whether or not it does, `Pos`
     // cannot converge on a peer that has no `Pos`.
@@ -166,11 +165,13 @@ fn assert_all_peers_agree_fails_on_a_corrupted_replica() {
         "nothing was compared, so the agreement above was vacuous"
     );
 
-    // Corrections stop, then the replica goes wrong.
+    // Corrections stop, then the replica goes wrong. The client's own body: a predicted one,
+    // which stays wrong. An interpolated one would be put back from the authoritative record
+    // every tick, which is the point of interpolation and not of this test.
     net.disconnect(client);
     net.run(2);
     let at = tick(net.app(client));
-    let id = seats[0].1;
+    let id = seats[1].1;
     corrupt_component::<Pos>(net.app_mut(client), id, |pos| pos.0 += 1000);
     net.run(40);
 

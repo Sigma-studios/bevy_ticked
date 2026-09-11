@@ -14,3 +14,7 @@ serde = { version = "1", features = ["derive"] }
 bevy = "0.19"
 # The source guard and golden helpers; tests only.
 bevy_ticked_testing = { path = "../bevy_ticked_testing" }
+
+[lints.clippy]
+too_many_arguments = "allow"
+type_complexity = "allow"
