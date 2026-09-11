@@ -34,3 +34,7 @@ path = "examples/top_down_shooter.rs"
 [[example]]
 name = "fps_shooter"
 path = "examples/fps_shooter.rs"
+
+[lints.clippy]
+too_many_arguments = "allow"
+type_complexity = "allow"

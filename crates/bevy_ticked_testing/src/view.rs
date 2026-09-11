@@ -18,6 +18,7 @@ use bevy_ticked::world_actions::WorldActions;
 use bevy_ticked_networking::client::{AppliedSnapshotTick, ClientTickBuffer, LocalClientPlayer};
 use bevy_ticked_networking::diagnostics::{HealthWarnings, InputStats, ReplayStats, SnapshotStats};
 use bevy_ticked_networking::input::{InputQueue, TickedInput};
+use bevy_ticked_networking::replication::{AuthoritativeHistory, ReplicationMode};
 use bevy_ticked_networking::server::LocalServerPlayer;
 
 pub use crate::net::Role;
@@ -60,6 +61,27 @@ pub fn applied_tick(app: &App) -> Option<u64> {
     app.world()
         .get_resource::<AppliedSnapshotTick>()
         .and_then(|applied| applied.0)
+}
+
+/// The newest tick this peer holds an authoritative record for: what its interpolated
+/// entities are drawn from, `InterpolationDelay` ticks behind. `None` before the first snapshot
+/// of a session, or on a peer without the client plugin.
+///
+/// The same number as [`applied_tick`] in a running session — the record is kept as the
+/// snapshot is applied — but read from `AuthoritativeHistory`, because that is what the
+/// restore reads, and a test about what a remote body shows wants the source the plugin uses.
+pub fn authoritative_tick(app: &App) -> Option<u64> {
+    app.world()
+        .get_resource::<AuthoritativeHistory>()?
+        .newest_tick()
+}
+
+/// How this peer treats the entity carrying `id`: `Some(Predicted)` for the local player's
+/// (or anything a game marked so), `None` for everything else — which is interpolated, the
+/// default the marker's absence means. `None` also when no entity carries `id`.
+pub fn replication_mode(app: &App, id: u64) -> Option<ReplicationMode> {
+    let entity = tracked_entity(app, id)?;
+    app.world().get::<ReplicationMode>(entity).copied()
 }
 
 fn client_buffer(app: &App) -> &ClientTickBuffer {
