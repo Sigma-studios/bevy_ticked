@@ -66,16 +66,32 @@ pub struct NewestInputTick(pub HashMap<u128, u64>);
 /// The user must provide an input application system in `TickedSimulation`
 /// that reads from `InputQueue<T>` and applies inputs to the game state.
 pub struct TickedServerPlugin<T: TickedInput> {
+    /// Broadcast a snapshot every this many ticks. `1` is every tick.
+    ///
+    /// A client that agrees with the authority costs nothing per snapshot now, so the rate is
+    /// a bandwidth knob and no longer a smoothness one; a remote body is interpolated across
+    /// the gap either way (the bridge sets `InterpolationDelay` to twice this).
+    pub send_every: u64,
     _phantom: PhantomData<T>,
 }
 
 impl<T: TickedInput> TickedServerPlugin<T> {
     pub fn new() -> Self {
         Self {
+            send_every: 1,
             _phantom: PhantomData,
         }
     }
+
+    pub fn send_every(mut self, ticks: u64) -> Self {
+        self.send_every = ticks.max(1);
+        self
+    }
 }
+
+/// Runtime copy of [`TickedServerPlugin::send_every`].
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SendEvery(pub u64);
 
 impl<T: TickedInput> Default for TickedServerPlugin<T> {
     fn default() -> Self {
@@ -87,7 +103,8 @@ impl<T: TickedInput> Plugin for TickedServerPlugin<T> {
     fn build(&self, app: &mut App) {
         crate::input::install_input_queue::<T>(app);
         crate::replication::install_owner(app);
-        app.init_resource::<InputMargins>()
+        app.insert_resource(SendEvery(self.send_every.max(1)))
+            .init_resource::<InputMargins>()
             .init_resource::<NewestInputTick>()
             .init_resource::<InputStats>()
             .init_resource::<SnapshotStats>()
@@ -267,12 +284,16 @@ fn record_ack(trigger: On<ReceivedSnapshotAck>, mut acks: ResMut<LastAck>) {
 fn broadcast_snapshot<T: TickedInput>(
     tick: Res<CurrentTick>,
     holds: Res<TickHolds>,
+    send_every: Res<SendEvery>,
     server_player: Option<Res<LocalServerPlayer>>,
     recipients: Option<Res<SnapshotRecipientList>>,
     mut passes_held: Local<u32>,
     mut commands: Commands,
 ) {
     if server_player.is_none() || holds.holds(TickHoldReason::AwaitingSync) {
+        return;
+    }
+    if !tick.0.is_multiple_of(send_every.0.max(1)) {
         return;
     }
     if holds.is_held() {

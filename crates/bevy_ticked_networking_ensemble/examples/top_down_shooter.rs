@@ -35,7 +35,7 @@ struct PlayerInput {
 
 // --- Networked components ---
 
-#[derive(Component, Clone, Debug, Serialize, Deserialize, Default)]
+#[derive(Component, PartialEq, Clone, Debug, Serialize, Deserialize, Default)]
 struct AimAngle(f32);
 
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,10 +44,10 @@ enum EntityKind {
     Bullet,
 }
 
-#[derive(Component, Clone, Debug, Serialize, Deserialize)]
+#[derive(Component, PartialEq, Clone, Debug, Serialize, Deserialize)]
 struct SpawnPoint(Vec2);
 
-#[derive(Component, Clone, Debug, Serialize, Deserialize, Default)]
+#[derive(Component, PartialEq, Clone, Debug, Serialize, Deserialize, Default)]
 struct ShootCooldown(u64);
 
 #[derive(Component)]
