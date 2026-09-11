@@ -40,7 +40,7 @@ fn host() -> App {
         })
         .insert_resource(TimeUpdateStrategy::ManualDuration(TICK))
         .add_plugins(TickedServerPlugin::<Input>::new())
-        .register_networked_ticked_component_as::<Pos>("Pos");
+        .register_networked_ticked_component::<Pos>("Pos");
     app.insert_resource(LocalServerPlayer(HOST));
     app
 }

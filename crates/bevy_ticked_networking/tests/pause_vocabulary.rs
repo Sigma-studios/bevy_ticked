@@ -1,7 +1,6 @@
 //! A joining client, a user's pause, and the first snapshot: three things that used to share
 //! one marker resource, so any of them could lift the others.
 
-use std::collections::HashMap;
 use std::time::Duration;
 
 use bevy::prelude::*;
@@ -13,7 +12,7 @@ use bevy_ticked_networking::client::LocalClientPlayer;
 use bevy_ticked_networking::messages::ReceivedNetworkSnapshot;
 use bevy_ticked_networking::prelude::*;
 use bevy_ticked_networking::server::LocalServerPlayer;
-use bevy_ticked_networking::snapshot::build_snapshot;
+use bevy_ticked_networking::snapshot::{SnapshotPacket, build_full_body};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
@@ -34,7 +33,7 @@ fn peer() -> App {
         .add_plugins(TickedClientPlugin::<Input>::new())
         .add_plugins(TickedServerPlugin::<Input>::new())
         .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_micros(15_625)))
-        .register_networked_ticked_component::<Pos>();
+        .register_networked_ticked_component::<Pos>("Pos");
     app.update();
     app
 }
@@ -43,9 +42,9 @@ fn deliver_first_snapshot(app: &mut App) {
     app.world_mut().spawn((TickTrackedEntity(1), Pos(0)));
     let registry = app.world().resource::<TickedComponentRegistry>().clone();
     registry.capture_all(app.world_mut(), 0);
-    let mut snapshot = build_snapshot(app.world_mut(), 0);
-    snapshot.input_margins = HashMap::from([(LOCAL, 2)]);
-    app.world_mut().trigger(ReceivedNetworkSnapshot(snapshot));
+    let mut packet = SnapshotPacket::full(0, build_full_body(app.world_mut(), 0));
+    packet.your_margin = 2;
+    app.world_mut().trigger(ReceivedNetworkSnapshot(packet));
 }
 
 fn holds(app: &App) -> &TickHolds {

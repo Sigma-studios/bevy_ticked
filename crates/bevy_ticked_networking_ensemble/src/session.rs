@@ -50,20 +50,37 @@ use bevy_ticked::prelude::*;
 use bevy_ticked::time::{Ticked, TickedTime};
 use bevy_ticked_networking::client::{ClientTickBuffer, LocalClientPlayer};
 use bevy_ticked_networking::messages::PeerLeft;
-use bevy_ticked_networking::server::{LocalServerPlayer, SnapshotRecipients};
+use bevy_ticked_networking::server::{LocalServerPlayer, SnapshotRecipientList};
 
-use crate::handshake::RegistryMismatch;
+use crate::handshake::{
+    HandshakeTimedOut, HandshakeTimeout, LocalSpawnerSlot, RegistryMismatch, RegistryVerified,
+    TickedPeerVerified,
+};
 
-/// Adopt and release the ticked role from the ensemble lobby, and keep
-/// [`SnapshotRecipients`] current.
+/// Adopt and release the ticked role from the ensemble lobby, run the registry handshake, and
+/// keep [`SnapshotRecipientList`] current.
 ///
 /// Add alongside [`TickedNetworkingEnsemblePlugin`](crate::TickedNetworkingEnsemblePlugin) to stop
 /// writing session bookkeeping by hand.
-pub struct TickedEnsembleSessionPlugin;
+pub struct TickedEnsembleSessionPlugin {
+    /// How long a client waits for its host's registries before giving up. See
+    /// [`HandshakeTimeout`].
+    pub handshake_timeout: Duration,
+}
+
+impl Default for TickedEnsembleSessionPlugin {
+    fn default() -> Self {
+        Self {
+            handshake_timeout: Duration::from_secs(5),
+        }
+    }
+}
 
 impl Plugin for TickedEnsembleSessionPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<SnapshotRecipients>()
+        install_lobby_tracking(app);
+        app.init_resource::<SnapshotRecipientList>()
+            .insert_resource(HandshakeTimeout(self.handshake_timeout))
             .add_plugins(crate::handshake::plugin)
             .add_observer(forget_departed_client)
             .add_systems(
@@ -73,10 +90,48 @@ impl Plugin for TickedEnsembleSessionPlugin {
                     seed_tick_buffer,
                     release_role,
                     forget_mismatch,
-                    count_recipients,
+                    list_recipients,
                 )
                     .chain(),
             );
+    }
+}
+
+/// The entity carrying `Lobby` while this peer is in a session, host or client.
+///
+/// One resource rather than a `Single<Entity, With<Lobby>>` in every system that sends: the
+/// bridge, the handshake and a game all want the same entity, and a `Single` that finds none
+/// on the frame a lobby is replaced skips the system silently. Inserted with the `Lobby`
+/// component and removed with it.
+#[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TickedSessionLobby(pub Entity);
+
+/// Keep [`TickedSessionLobby`] true. Added by both plugins of this crate, once.
+pub(crate) fn install_lobby_tracking(app: &mut App) {
+    if app.is_plugin_added::<LobbyTrackingPlugin>() {
+        return;
+    }
+    app.add_plugins(LobbyTrackingPlugin);
+}
+
+struct LobbyTrackingPlugin;
+
+impl Plugin for LobbyTrackingPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_observer(
+            |add: On<Add, Lobby>, mut commands: Commands| {
+                commands.insert_resource(TickedSessionLobby(add.entity));
+            },
+        )
+        .add_observer(
+            |remove: On<Remove, Lobby>,
+             lobby: Option<Res<TickedSessionLobby>>,
+             mut commands: Commands| {
+                if lobby.is_some_and(|lobby| lobby.0 == remove.entity) {
+                    commands.remove_resource::<TickedSessionLobby>();
+                }
+            },
+        );
     }
 }
 
@@ -125,6 +180,7 @@ fn adopt_role(
     server: Option<Res<LocalServerPlayer>>,
     client: Option<Res<LocalClientPlayer>>,
     mismatch: Option<Res<RegistryMismatch>>,
+    timed_out: Option<Res<HandshakeTimedOut>>,
     tracked: Query<Entity, With<TickTrackedEntity>>,
     hosting: Query<(), (With<Host>, Or<(With<Lobby>, With<PendingLobby>)>)>,
     joined: Query<(), (Without<Host>, Or<(With<Lobby>, With<PendingLobby>)>)>,
@@ -132,8 +188,9 @@ fn adopt_role(
     if server.is_some() || client.is_some() {
         return;
     }
-    // A session this peer cannot speak the language of does not get retried at frame rate.
-    if mismatch.is_some() {
+    // A session this peer cannot speak the language of, or never heard from, does not get
+    // retried at frame rate.
+    if mismatch.is_some() || timed_out.is_some() {
         return;
     }
     let Some(local_player) = local_player else {
@@ -247,19 +304,29 @@ fn release_role(
     // `reset_on_leave` does the rest, keyed off these being removed.
     commands.remove_resource::<LocalServerPlayer>();
     commands.remove_resource::<LocalClientPlayer>();
+    // What the handshake established was about this session.
+    commands.remove_resource::<RegistryVerified>();
+    commands.remove_resource::<LocalSpawnerSlot>();
 }
 
-/// Forget a registry mismatch once the lobby it belonged to is gone.
+/// Forget a registry mismatch or a handshake timeout once the lobby it belonged to is gone.
 ///
 /// Joining a *different* lobby is allowed to try again — the peer on the other end of that one may
 /// well have been built from the same commit as this.
 fn forget_mismatch(
     mut commands: Commands,
     mismatch: Option<Res<RegistryMismatch>>,
+    timed_out: Option<Res<HandshakeTimedOut>>,
     lobbies: Query<(), Or<(With<Lobby>, With<PendingLobby>)>>,
 ) {
-    if mismatch.is_some() && lobbies.is_empty() {
+    if !lobbies.is_empty() {
+        return;
+    }
+    if mismatch.is_some() {
         commands.remove_resource::<RegistryMismatch>();
+    }
+    if timed_out.is_some() {
+        commands.remove_resource::<HandshakeTimedOut>();
     }
 }
 
@@ -282,14 +349,19 @@ fn forget_departed_client(
     }
 }
 
-/// How many peers a snapshot would reach, for [`SnapshotRecipients`].
-fn count_recipients(
-    mut recipients: ResMut<SnapshotRecipients>,
-    clients: Query<(), With<LobbyClient>>,
+/// Who gets a snapshot: every `LobbyClient` whose registries matched, by uuid, ascending.
+///
+/// Rebuilt from the entities each frame rather than edited on add and remove, so a client that
+/// was despawned by the transport without ever being unverified is gone from the list the same
+/// frame. Written only when it changed, so `Res::is_changed` on it means something.
+fn list_recipients(
+    mut recipients: ResMut<SnapshotRecipientList>,
+    verified: Query<&LobbyClientPlayerUuid, (With<LobbyClient>, With<TickedPeerVerified>)>,
 ) {
-    let count = clients.iter().count();
-    if recipients.0 != count {
-        recipients.0 = count;
+    let mut uuids: Vec<u128> = verified.iter().map(|client| client.0).collect();
+    uuids.sort_unstable();
+    if recipients.0 != uuids {
+        recipients.0 = uuids;
     }
 }
 
@@ -318,7 +390,7 @@ mod tests {
             .add_plugins(TickedServerPlugin::<Input>::new())
             .add_plugins(TickedClientPlugin::<Input>::new())
             .add_plugins(crate::TickedNetworkingEnsemblePlugin::<Input>::new())
-            .add_plugins(TickedEnsembleSessionPlugin);
+            .add_plugins(TickedEnsembleSessionPlugin::default());
         app
     }
 

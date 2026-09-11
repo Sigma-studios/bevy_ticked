@@ -222,9 +222,20 @@ fn duplicated_snapshots_are_applied_once() {
     assert_everyone_converged(&net, &seats);
 }
 
+/// Three frames of delay, so that consecutive snapshots are in flight together: the loopback
+/// overtakes by swapping two packets that are both still on the link, and on a cable every
+/// unreliable packet lands on the next frame with nothing to swap with. Over a plain cable
+/// this test passed on the one stale drop every session starts with — the duplicate tick-1
+/// snapshot — which lands before or after the counter reset depending on the wall-clock ping
+/// the client seeds its lead from, and so on machine load.
 #[test]
 fn a_reordered_snapshot_is_dropped_over_the_link() {
-    let mut net = session(1, Link::cable().with_reorder(0.5));
+    let mut net = session(
+        1,
+        Link::cable()
+            .with_delay(Duration::from_millis(45))
+            .with_reorder(0.5),
+    );
     let seats = seat_everyone(&mut net);
     let client = net.client();
     net.app_mut(client)
@@ -236,9 +247,9 @@ fn a_reordered_snapshot_is_dropped_over_the_link() {
 
     let stats = replays(net.app(client));
     assert!(
-        stats.dropped_stale > 0,
-        "half the snapshots were swapped with their neighbour and none was dropped as stale \
-         ({stats:?})"
+        stats.dropped_stale >= 20,
+        "half the snapshots were swapped with their neighbour and almost none was dropped as \
+         stale ({stats:?})"
     );
     let applied = applied_tick(net.app(client)).expect("a snapshot was applied");
     assert!(applied > 0);

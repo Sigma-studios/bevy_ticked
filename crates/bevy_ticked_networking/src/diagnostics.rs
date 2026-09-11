@@ -43,6 +43,8 @@ pub struct ReplayStats {
     pub dropped_before_handshake: u64,
     /// `current_tick - snapshot_tick` at the last applied snapshot: the replay distance.
     pub last_replay_distance: i64,
+    /// Packets with a `Delta` body, which this client cannot apply until the delta phase.
+    pub dropped_delta_body: u64,
 }
 
 impl ReplayStats {
@@ -66,18 +68,37 @@ pub struct SnapshotStats {
     pub max_bytes: usize,
     /// The most recent one.
     pub last_bytes: usize,
+    /// Packets larger than [`SNAPSHOT_ADVISORY_BYTES`]: over a datagram's comfortable size, and
+    /// on some links over the size that arrives at all. Warned once.
+    pub oversize: u64,
 }
+
+/// A snapshot above this many bytes is a warning. Below the common path MTU with room for
+/// the transport's framing; above it a datagram may be fragmented and a lost fragment loses
+/// the whole thing.
+pub const SNAPSHOT_ADVISORY_BYTES: usize = 1200;
 
 impl SnapshotStats {
     pub fn reset(&mut self) {
         *self = Self::default();
     }
 
-    /// Fold one serialised snapshot's size in. Called by a bridge.
+    /// Fold one encoded packet's size in.
     pub fn record_bytes(&mut self, bytes: usize) {
         self.bytes += bytes as u64;
         self.max_bytes = self.max_bytes.max(bytes);
         self.last_bytes = bytes;
+        if bytes > SNAPSHOT_ADVISORY_BYTES {
+            if self.oversize == 0 {
+                warn!(
+                    "a snapshot packet is {bytes} bytes, over the {SNAPSHOT_ADVISORY_BYTES}-byte \
+                     advisory; a datagram this size may be fragmented and lost whole. Register \
+                     fewer types, quantise inside the simulation, or wait for delta \
+                     replication (said once; counted from now on)"
+                );
+            }
+            self.oversize += 1;
+        }
     }
 }
 

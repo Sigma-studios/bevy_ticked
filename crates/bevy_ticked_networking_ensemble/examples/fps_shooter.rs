@@ -151,20 +151,21 @@ fn main() {
         .add_plugins(TickedClientPlugin::<PlayerInput>::new())
         .add_plugins(TickedNetworkingEnsemblePlugin::<PlayerInput>::new())
         .init_resource::<LocalLook>()
-        // Register networked components (order must match on all peers)
-        .register_networked_ticked_component::<Position>()
-        .register_networked_ticked_component::<Rotation>()
-        .register_networked_ticked_component::<LinearVelocity>()
-        .register_networked_ticked_component::<AngularVelocity>()
-        .register_networked_ticked_component::<Aim>()
-        .register_networked_ticked_component::<EntityKind>()
-        .register_networked_ticked_component::<SpawnPoint>()
-        .register_networked_ticked_component::<ShootCooldown>()
-        .register_networked_ticked_component::<PlayerUuid>()
+        // Register networked components. The wire name is the type's identity on the
+        // wire and must be the same on every peer; registration order does not matter.
+        .register_networked_ticked_component::<Position>("avian::Position")
+        .register_networked_ticked_component::<Rotation>("avian::Rotation")
+        .register_networked_ticked_component::<LinearVelocity>("avian::LinearVelocity")
+        .register_networked_ticked_component::<AngularVelocity>("avian::AngularVelocity")
+        .register_networked_ticked_component::<Aim>("Aim")
+        .register_networked_ticked_component::<EntityKind>("EntityKind")
+        .register_networked_ticked_component::<SpawnPoint>("SpawnPoint")
+        .register_networked_ticked_component::<ShootCooldown>("ShootCooldown")
+        .register_networked_ticked_component::<PlayerUuid>("PlayerUuid")
         // elan's persistent jump timers: rolling these back keeps the local
         // player's predicted jump from mispredicting and snapping on correction.
-        .register_networked_ticked_component::<LastGrounded>()
-        .register_networked_ticked_component::<LastJump>()
+        .register_networked_ticked_component::<LastGrounded>("elan::LastGrounded")
+        .register_networked_ticked_component::<LastJump>("elan::LastJump")
         // Startup
         .add_systems(Startup, setup)
         // Per-frame (Update)

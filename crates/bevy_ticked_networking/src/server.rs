@@ -13,36 +13,33 @@ use bevy_ticked::{
 use crate::{
     diagnostics::{InputStats, SnapshotStats},
     input::{InputQueue, MAX_INPUT_LEAD_TICKS, TickedInput},
-    messages::{PeerLeft, ReceivedNetworkInput, SendNetworkSnapshot},
-    snapshot::build_snapshot,
+    messages::{PeerLeft, ReceivedNetworkInput, ReceivedSnapshotAck, SendNetworkSnapshot},
+    snapshot::{RelayedInput, SnapshotBody, SnapshotPacket, build_full_body, encode_packet},
 };
 
 /// Resource identifying the local player on the server (for listen-server setups).
 #[derive(Resource)]
 pub struct LocalServerPlayer(pub u128);
 
-/// How many peers a snapshot built right now would actually reach.
+/// Who a snapshot goes to: every client the transport has verified, by uuid.
 ///
-/// # Why this is a resource and not a query
-///
-/// `broadcast_snapshot` gated on `LocalServerPlayer` and nothing else, and
-/// `BroadcastSnapshotCommand` serialised the entire world *before* the transport discovered there
-/// was nobody to send it to. The recipient test was on the far side of the expensive part.
-///
-/// That is not a small waste, it is a design constraint: it is the reason a peer playing alone
-/// cannot simply insert `LocalServerPlayer` and be a host with no clients. A solo player who did
-/// would postcard the whole world sixty-four times a second and throw every byte away — so solo
-/// play has to hold *neither* role resource, and every consumer with a single-player mode then
-/// needs its own three-valued idea of who it is, because upstream's is two booleans that are both
-/// false. Both games that have a solo mode wrote that enum.
-///
-/// This crate cannot ask "is anyone listening" itself — it has no idea what a lobby is. So the
-/// transport layer answers, here, before anything is serialised.
-///
-/// **Absent means "unknown, send anyway".** A transport that does not maintain this behaves
-/// exactly as before, which is what makes adding it safe.
-#[derive(Resource, Default, Debug, Clone, Copy)]
-pub struct SnapshotRecipients(pub usize);
+/// Maintained by the transport layer, which is the only thing that knows what a lobby is.
+/// Each entry gets its own packet, with its own sequence number and its own input margin.
+/// **Absent means "unknown, send to everyone"**: one unaddressed packet, which is how a world
+/// with no transport (a test) behaves. Present and empty means nobody is listening, and
+/// nothing is built — the test is before the encode, on purpose: a host with no clients used
+/// to postcard the whole world sixty-four times a second and throw every byte away, which is
+/// why solo play could not simply be "a host with no clients".
+#[derive(Resource, Default, Debug, Clone)]
+pub struct SnapshotRecipientList(pub Vec<u128>);
+
+/// Per-recipient snapshot sequence numbers.
+#[derive(Resource, Default, Debug, Clone)]
+pub struct SnapshotSeq(pub HashMap<u128, u32>);
+
+/// The newest snapshot `seq` each client has acknowledged. What a delta is built against.
+#[derive(Resource, Default, Debug, Clone)]
+pub struct LastAck(pub HashMap<u128, u32>);
 
 /// Latest input-arrival margin (in ticks) per client, measured by the server:
 /// `input.tick - server_tick` at arrival. Sent to clients in each snapshot so they
@@ -93,7 +90,10 @@ impl<T: TickedInput> Plugin for TickedServerPlugin<T> {
             .init_resource::<NewestInputTick>()
             .init_resource::<InputStats>()
             .init_resource::<SnapshotStats>()
+            .init_resource::<SnapshotSeq>()
+            .init_resource::<LastAck>()
             .add_observer(collect_network_inputs::<T>)
+            .add_observer(record_ack)
             .add_observer(forget_departed_peer::<T>)
             .add_systems(
                 Update,
@@ -105,7 +105,7 @@ impl<T: TickedInput> Plugin for TickedServerPlugin<T> {
             )
             .add_systems(
                 TickedLoop,
-                broadcast_snapshot.in_set(TickedSystems::PostTick),
+                broadcast_snapshot::<T>.in_set(TickedSystems::PostTick),
             );
     }
 
@@ -143,6 +143,8 @@ fn reset_on_host<T: TickedInput>(world: &mut World) {
     // session would make every input of this one look stale.
     world.insert_resource(NewestInputTick::default());
     world.insert_resource(InputMargins::default());
+    world.insert_resource(SnapshotSeq::default());
+    world.insert_resource(LastAck::default());
     let registry = world.resource::<TickedComponentRegistry>().clone();
     registry.clear_all(world);
 }
@@ -246,6 +248,14 @@ fn forget_departed_peer<T: TickedInput>(
     newest.0.remove(&uuid);
 }
 
+fn record_ack(trigger: On<ReceivedSnapshotAck>, mut acks: ResMut<LastAck>) {
+    let ack = *trigger.event();
+    let newest = acks.0.entry(ack.sender).or_insert(ack.seq);
+    if ack.seq >= *newest {
+        *newest = ack.seq;
+    }
+}
+
 /// After the core tick, build and broadcast a snapshot.
 /// Only runs if `LocalServerPlayer` is present (i.e., this peer is the host).
 ///
@@ -253,11 +263,11 @@ fn forget_departed_peer<T: TickedInput>(
 /// and a client that joins during the pause needs the world; what changes is the rate: the
 /// tick is the same every pass, so once every [`HELD_BROADCAST_EVERY`] passes is enough for a
 /// joiner and spares everyone else a stream of identical packets.
-fn broadcast_snapshot(
+fn broadcast_snapshot<T: TickedInput>(
     tick: Res<CurrentTick>,
     holds: Res<TickHolds>,
     server_player: Option<Res<LocalServerPlayer>>,
-    recipients: Option<Res<SnapshotRecipients>>,
+    recipients: Option<Res<SnapshotRecipientList>>,
     mut passes_held: Local<u32>,
     mut commands: Commands,
 ) {
@@ -272,29 +282,80 @@ fn broadcast_snapshot(
     } else {
         *passes_held = 0;
     }
-    // Before `build_snapshot`, which is the whole point. See [`SnapshotRecipients`].
-    if recipients.is_some_and(|recipients| recipients.0 == 0) {
+    // Before the encode, which is the whole point. See [`SnapshotRecipientList`].
+    if recipients.is_some_and(|recipients| recipients.0.is_empty()) {
         return;
     }
-    commands.queue(BroadcastSnapshotCommand(tick.0));
+    commands.queue(BroadcastSnapshotCommand::<T>(tick.0, PhantomData));
 }
 
 /// Passes of the loop between snapshots while the clock is held: half a second at 64 Hz.
 const HELD_BROADCAST_EVERY: u32 = 32;
 
-struct BroadcastSnapshotCommand(u64);
+struct BroadcastSnapshotCommand<T>(u64, PhantomData<T>);
 
-impl Command for BroadcastSnapshotCommand {
+impl<T: TickedInput> Command for BroadcastSnapshotCommand<T> {
     type Out = ();
 
     fn apply(self, world: &mut World) {
-        let mut snapshot = build_snapshot(world, self.0);
-        if let Some(margins) = world.get_resource::<InputMargins>() {
-            snapshot.input_margins = margins.0.clone();
+        let tick = self.0;
+        let mut body = build_full_body(world, tick);
+        body.inputs_ahead = inputs_ahead::<T>(world, tick);
+
+        let recipients: Option<Vec<u128>> = world
+            .get_resource::<SnapshotRecipientList>()
+            .map(|list| list.0.clone());
+        let targets: Vec<Option<u128>> = match recipients {
+            Some(list) => list.into_iter().map(Some).collect(),
+            None => vec![None],
+        };
+        for recipient in targets {
+            let seq = match recipient {
+                Some(uuid) => {
+                    let mut seqs = world.resource_mut::<SnapshotSeq>();
+                    let next = seqs.0.entry(uuid).or_insert(0);
+                    *next = next.wrapping_add(1);
+                    *next
+                }
+                None => 0,
+            };
+            let your_margin = recipient
+                .and_then(|uuid| world.resource::<InputMargins>().0.get(&uuid).copied())
+                .map_or(0, |margin| margin.clamp(i16::MIN as i64, i16::MAX as i64) as i16);
+            let packet = SnapshotPacket {
+                seq,
+                tick,
+                your_margin,
+                body: SnapshotBody::Full(body.clone()),
+            };
+            let bytes = encode_packet(&packet);
+            if let Some(mut stats) = world.get_resource_mut::<SnapshotStats>() {
+                stats.sent += 1;
+                stats.record_bytes(bytes.len());
+            }
+            world.commands().trigger(SendNetworkSnapshot { recipient, bytes });
         }
-        if let Some(mut stats) = world.get_resource_mut::<SnapshotStats>() {
-            stats.sent += 1;
-        }
-        world.commands().trigger(SendNetworkSnapshot(snapshot));
     }
+}
+
+/// Every input the host holds for ticks after `tick`, for every player, encoded. A client
+/// drops its own on arrival; the rest let its replay use what other players pressed.
+fn inputs_ahead<T: TickedInput>(world: &World, tick: u64) -> Vec<RelayedInput> {
+    let queue = world.resource::<InputQueue<T>>();
+    let mut out = Vec::new();
+    for at in (tick + 1)..=(tick + MAX_INPUT_LEAD_TICKS) {
+        let Some(inputs) = queue.at_tick(at) else {
+            continue;
+        };
+        for (player, input) in inputs {
+            if let Ok(bytes) = postcard::to_allocvec(input) {
+                out.push(RelayedInput {
+                    player: *player,
+                    tick: at,
+                    bytes,
+                });
+            }
+        }
+    }
+    out
 }

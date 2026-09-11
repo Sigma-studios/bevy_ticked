@@ -4,8 +4,9 @@
 //! frame, endpoints and fate) and where the bodies ended up.
 //!
 //! Not compared, and each a finding:
-//! - packet *bytes*: the snapshot is a `HashMap` on the wire until the wire-format phase sorts
-//!   it, and two encodings of the same world can differ in order;
+//! - packet *bytes*: the snapshot used to be a `HashMap` on the wire, and two encodings of the
+//!   same world could differ in order. The wire phase sorted it; what still keeps the bytes
+//!   from being compared is the next item;
 //! - packet *sizes*: a pong carries a wall-clock dwell, and the client seeds its prediction
 //!   lead from the ping round trip, which over loopback is the wall clock too. A run's lead
 //!   therefore differs by a tick or so between runs, and with it the tick every input is

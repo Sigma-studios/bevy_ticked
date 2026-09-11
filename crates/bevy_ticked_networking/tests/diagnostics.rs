@@ -1,7 +1,6 @@
 //! The counters a session shows are counted where the events happen, so a test and an overlay
 //! read the same number. Each test here fires one kind of event and reads one counter.
 
-use std::collections::HashMap;
 use std::time::Duration;
 
 use bevy::prelude::*;
@@ -15,7 +14,7 @@ use bevy_ticked_networking::diagnostics::{HealthWarnings, InputStats, ReplayStat
 use bevy_ticked_networking::messages::{ReceivedNetworkInput, ReceivedNetworkSnapshot};
 use bevy_ticked_networking::prelude::*;
 use bevy_ticked_networking::server::LocalServerPlayer;
-use bevy_ticked_networking::snapshot::{WorldSnapshot, build_snapshot};
+use bevy_ticked_networking::snapshot::{EntityRecord, SnapshotBody, SnapshotPacket, build_full_body};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
@@ -39,7 +38,7 @@ fn client() -> App {
         })
         .add_plugins(TickedClientPlugin::<Input>::new())
         .insert_resource(TimeUpdateStrategy::ManualDuration(TICK))
-        .register_networked_ticked_component::<Pos>();
+        .register_networked_ticked_component::<Pos>("Pos");
     app.world_mut().spawn((TickTrackedEntity(1), Pos(0)));
     app.insert_resource(LocalClientPlayer(LOCAL));
     app
@@ -54,17 +53,17 @@ fn host() -> App {
         })
         .add_plugins(TickedServerPlugin::<Input>::new())
         .insert_resource(TimeUpdateStrategy::ManualDuration(TICK))
-        .register_networked_ticked_component::<Pos>();
+        .register_networked_ticked_component::<Pos>("Pos");
     app.insert_resource(LocalServerPlayer(HOST));
     app
 }
 
-fn snapshot_matching(client: &mut App, tick: u64) -> WorldSnapshot {
+fn snapshot_matching(client: &mut App, tick: u64) -> SnapshotPacket {
     let registry = client.world().resource::<TickedComponentRegistry>().clone();
     registry.capture_all(client.world_mut(), tick);
-    let mut snapshot = build_snapshot(client.world_mut(), tick);
-    snapshot.input_margins = HashMap::from([(LOCAL, 2)]);
-    snapshot
+    let mut packet = SnapshotPacket::full(tick, build_full_body(client.world_mut(), tick));
+    packet.your_margin = 2;
+    packet
 }
 
 fn deliver(app: &mut App, tick: u64) {
@@ -190,13 +189,11 @@ fn a_counter_moved_by_a_snapshot_is_not_a_client_minted_id() {
     let index = app
         .world()
         .resource::<TickedComponentRegistry>()
-        .index_of::<Pos>()
+        .wire_index_of::<Pos>()
         .unwrap();
-    snapshot
-        .components
-        .entry(index)
-        .or_default()
-        .insert(41, postcard::to_allocvec(&Pos(9)).unwrap());
+    if let SnapshotBody::Full(body) = &mut snapshot.body {
+        body.put(EntityRecord::new(41).with(index, &Pos(9)));
+    }
     app.world_mut().trigger(ReceivedNetworkSnapshot(snapshot));
     app.update();
     app.update();
@@ -223,8 +220,8 @@ fn a_snapshot_older_than_the_history_window_is_counted() {
     assert!(tick + 4 < current);
     // Built without capturing into this client's history, which `deliver` does and which would
     // itself extend the history back to `tick`.
-    let mut snapshot = build_snapshot(app.world_mut(), tick);
-    snapshot.input_margins = HashMap::from([(LOCAL, 2)]);
+    let mut snapshot = SnapshotPacket::full(tick, build_full_body(app.world_mut(), tick));
+    snapshot.your_margin = 2;
     app.world_mut().trigger(ReceivedNetworkSnapshot(snapshot));
     app.update();
 
@@ -271,5 +268,6 @@ fn the_host_counts_every_snapshot_it_broadcasts() {
     let ticks = app.world().resource::<CurrentTick>().0;
     assert!(ticks > 0);
     assert_eq!(stats.sent, ticks, "one broadcast per tick until send rates land");
-    assert_eq!(stats.bytes, 0, "no transport bridge, so nothing was serialised");
+    assert!(stats.bytes > 0, "the server encodes the packet itself and counts it");
+    assert_eq!(stats.oversize, 0);
 }

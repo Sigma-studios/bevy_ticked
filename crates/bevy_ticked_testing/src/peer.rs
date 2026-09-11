@@ -152,7 +152,7 @@ pub fn client_server_peer_with<I: TickedInput>(
             TickedServerPlugin::<I>::new(),
             TickedClientPlugin::<I>::new(),
             TickedNetworkingEnsemblePlugin::<I>::new(),
-            TickedEnsembleSessionPlugin,
+            TickedEnsembleSessionPlugin::default(),
         ));
         build(app);
     })

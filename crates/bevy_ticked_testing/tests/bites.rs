@@ -107,9 +107,9 @@ fn dropping_a_component_from_the_registry_fails_convergence() {
     // A peer built from a commit that never registered `Pos`.
     net.add_client_built(|app| {
         minimal::install_systems(app);
-        app.register_networked_ticked_component_as::<Vel>("Vel")
-            .register_networked_ticked_component_as::<EntityKind>("EntityKind")
-            .register_networked_ticked_component_as::<Owner>("Owner");
+        app.register_networked_ticked_component::<Vel>("Vel")
+            .register_networked_ticked_component::<EntityKind>("EntityKind")
+            .register_networked_ticked_component::<Owner>("Owner");
     });
     // The join handshake may end the session over the mismatch; whether or not it does, `Pos`
     // cannot converge on a peer that has no `Pos`.
