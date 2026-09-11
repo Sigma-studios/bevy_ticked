@@ -6,14 +6,14 @@ use bevy::prelude::*;
 use bevy_ticked::{
     TickedLoop, TickedSystems,
     registry::TickedComponentRegistry,
-    tick::{CurrentTick, TicksPaused},
+    tick::{CurrentTick, HistoryBufferTicks, TicksPaused},
     tracked_entity::{TickTrackedEntity, TickTrackedEntityCounter},
 };
 
 use crate::{
     diagnostics::{InputStats, SnapshotStats},
-    input::{InputQueue, TickedInput},
-    messages::{ReceivedNetworkInput, SendNetworkSnapshot},
+    input::{InputQueue, MAX_INPUT_LEAD_TICKS, TickedInput},
+    messages::{PeerLeft, ReceivedNetworkInput, SendNetworkSnapshot},
     snapshot::build_snapshot,
 };
 
@@ -94,6 +94,7 @@ impl<T: TickedInput> Plugin for TickedServerPlugin<T> {
             .init_resource::<InputStats>()
             .init_resource::<SnapshotStats>()
             .add_observer(collect_network_inputs::<T>)
+            .add_observer(forget_departed_peer::<T>)
             .add_systems(
                 Update,
                 reset_on_host::<T>.run_if(resource_added::<LocalServerPlayer>),
@@ -106,6 +107,10 @@ impl<T: TickedInput> Plugin for TickedServerPlugin<T> {
                 TickedLoop,
                 broadcast_snapshot.in_set(TickedSystems::PostTick),
             );
+    }
+
+    fn finish(&self, app: &mut App) {
+        bevy_ticked::require_steerable_tick_source(app, "TickedServerPlugin");
     }
 }
 
@@ -165,15 +170,38 @@ pub(crate) fn highest_tracked_id(world: &mut World) -> u64 {
 /// straggler carrying an *older* input would overwrite the fresher one already
 /// sitting on the next tick — turning a mechanism for recovering input into one
 /// for corrupting it.
+///
+/// # The window
+///
+/// An input is accepted only if `server_tick - HistoryBufferTicks <= tick <=
+/// server_tick + MAX_INPUT_LEAD_TICKS`. Anything else is counted in
+/// [`InputStats::dropped_out_of_window`] and then ignored entirely: it does not
+/// enter the queue, it does not move the sender's margin, and it does not raise
+/// the sender's [`NewestInputTick`].
+///
+/// Before the window, one client — hostile or merely buggy — could put a tick at
+/// `u64::MAX` into the queue, and from then on every snapshot carried a margin
+/// of nine quintillion, the prune system never reached that tick, and a
+/// forward-fill guard that trusted "newest" refused every input the client sent
+/// afterwards. The lower bound is the same as the prune window because an older
+/// tick is unreplayable anyway; the upper bound is the client's own lead ceiling,
+/// so a legitimate client can never be refused.
 fn collect_network_inputs<T: TickedInput>(
     trigger: On<ReceivedNetworkInput<T>>,
     tick: Res<CurrentTick>,
+    window: Res<HistoryBufferTicks>,
     mut queue: ResMut<InputQueue<T>>,
     mut margins: ResMut<InputMargins>,
     mut newest: ResMut<NewestInputTick>,
     mut stats: ResMut<InputStats>,
 ) {
     let event = trigger.event();
+    let oldest_accepted = tick.0.saturating_sub(window.0);
+    let newest_accepted = tick.0.saturating_add(MAX_INPUT_LEAD_TICKS);
+    if event.tick < oldest_accepted || event.tick > newest_accepted {
+        stats.dropped_out_of_window += 1;
+        return;
+    }
     // How many ticks ahead of the server this input arrived (negative = late).
     // Reported back to the client so it can adapt its prediction lead.
     let margin = event.tick as i64 - tick.0 as i64;
@@ -192,6 +220,25 @@ fn collect_network_inputs<T: TickedInput>(
     if event.tick <= tick.0 {
         queue.insert(tick.0 + 1, event.sender, event.input.clone());
     }
+}
+
+/// Observer: a client left, so nothing the host holds per sender may outlive it.
+///
+/// Its inputs at every tick (or the body it left behind keeps obeying its last
+/// keypress until the window prunes it), its margin (or every snapshot keeps
+/// reporting a player who is not there), and its newest-tick mark (or a rejoin
+/// under the same uuid finds all of its inputs older than "newest" and never
+/// gets one forward-filled). See [`PeerLeft`].
+fn forget_departed_peer<T: TickedInput>(
+    trigger: On<PeerLeft>,
+    mut queue: ResMut<InputQueue<T>>,
+    mut margins: ResMut<InputMargins>,
+    mut newest: ResMut<NewestInputTick>,
+) {
+    let uuid = trigger.event().0;
+    queue.remove_player(uuid);
+    margins.0.remove(&uuid);
+    newest.0.remove(&uuid);
 }
 
 /// After the core tick, build and broadcast a snapshot.

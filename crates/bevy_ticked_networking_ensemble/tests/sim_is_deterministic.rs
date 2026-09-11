@@ -6,10 +6,8 @@
 //!
 //! The examples are whole games in one file each, so their input capture, sprites and lobby keys
 //! live next to their ticked systems and the guard cannot tell them apart by schedule. Each is
-//! listed with the frame-side system it belongs to. `SECONDS_PER_TICK` is the one pending
-//! reach: the examples integrate by the constant inside the tick, and the tick-clock phase of
-//! the overhaul replaces that with `Res<Time>::delta()`, which `bevy_ticked` sets to the tick
-//! length. Those exceptions expire, so the phase cannot quietly not happen.
+//! listed with the frame-side system it belongs to. The examples integrate from `Res<Time>`,
+//! which `bevy_ticked` sets to the tick clock inside a tick.
 
 use bevy_ticked_testing::source_guard::{DEFAULT_NEEDLES, Exception, SourceGuard};
 
@@ -47,26 +45,11 @@ fn guard() -> SourceGuard {
                 expires: None,
             },
             Exception {
-                path: "src/overlay.rs",
-                needle: "elapsed_secs",
-                reason: "the same PostUpdate overlay system reads `elapsed_secs_f64` to refresh \
-                         its rates twice a second; see the `Res<Time<Real>` entry",
-                expires: None,
-            },
-            Exception {
                 path: "examples/fps_shooter.rs",
                 needle: "ButtonInput",
                 reason: "the lobby keys and `capture_local_input` run in Update; the tick \
                          receives a PlayerInput component, never the keyboard",
                 expires: None,
-            },
-            Exception {
-                path: "examples/fps_shooter.rs",
-                needle: "SECONDS_PER_TICK",
-                reason: "`set_controller_time` and `move_bullets` integrate by the constant \
-                         inside the tick; the tick-clock phase replaces it with \
-                         Res<Time>::delta()",
-                expires: Some("2026-12-31"),
             },
             Exception {
                 path: "examples/top_down_shooter.rs",
@@ -82,13 +65,6 @@ fn guard() -> SourceGuard {
                          and moved by `sync_visuals`, all on the frame side; the tick moves \
                          Position, not Transform",
                 expires: None,
-            },
-            Exception {
-                path: "examples/top_down_shooter.rs",
-                needle: "SECONDS_PER_TICK",
-                reason: "`apply_inputs` and `move_bullets` integrate by the constant inside \
-                         the tick; the tick-clock phase replaces it with Res<Time>::delta()",
-                expires: Some("2026-12-31"),
             },
         ])
         .min_files(5)

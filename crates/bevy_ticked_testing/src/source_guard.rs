@@ -111,14 +111,6 @@ pub const DEFAULT_NEEDLES: &[Needle] = &[
         reason: "names the wall clock; wall-clock time is not simulation state",
     },
     Needle {
-        needle: "delta_secs",
-        reason: "the frame delta is not the tick length; read Res<Time>::delta() inside the tick",
-    },
-    Needle {
-        needle: "elapsed_secs",
-        reason: "elapsed frame time is not simulation state; count ticks with CurrentTick",
-    },
-    Needle {
         needle: "ButtonInput",
         reason: "input belongs outside the tick, captured once and handed to the tick as data",
     },

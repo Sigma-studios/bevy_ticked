@@ -11,6 +11,7 @@ use bevy::prelude::*;
 
 use bevy_ticked::{
     registry::TickedComponentRegistry,
+    resource_registry::TickedResourceRegistry,
     tick::{CurrentTick, TicksPaused},
     tracked_entity::{TickTrackedEntity, TickTrackedEntityCounter},
 };
@@ -55,6 +56,13 @@ pub fn reset_on_leave<T: TickedInput>(world: &mut World) {
     world.resource_mut::<InputQueue<T>>().inputs.clear();
     let registry = world.resource::<TickedComponentRegistry>().clone();
     registry.clear_all(world);
+    // Clearing a resource's history is not the same as clearing the resource: a `RoundState`
+    // that said "round 7, team B leads" said it into the next lobby too, and every consumer
+    // wrote a `reset_round_on_leave` to put it back. Registered means "part of the session",
+    // and the session is over.
+    if let Some(resources) = world.get_resource::<TickedResourceRegistry>().cloned() {
+        resources.reset_all(world);
+    }
 
     // A peer that leaves mid-sync would otherwise stay paused for ever, waiting for a snapshot
     // from a session it is no longer in.

@@ -28,7 +28,7 @@ fn peer() -> App {
     let mut app = App::new();
     app.add_plugins(MinimalPlugins)
         .add_plugins(TickedPlugin {
-            source: TickSource::FixedUpdate,
+            source: TickSource::Hz(64.0),
             ..default()
         })
         .add_plugins(TickedServerPlugin::<Input>::new())
@@ -123,5 +123,32 @@ fn no_id_is_ever_issued_twice_in_a_session() {
         sorted.len(),
         issued.len(),
         "duplicate ids issued across the session boundary: {issued:?}"
+    );
+}
+
+/// The door out puts registered resources back to their defaults, not just their histories.
+///
+/// `clear_all` forgot what a resource *had been*; nothing forgot what it *was*, so a round
+/// counter walked into the next lobby still saying "round 7", and every consumer wrote the
+/// `reset_round_on_leave` system this makes unnecessary.
+#[test]
+fn reset_on_leave_resets_registered_resources() {
+    #[derive(Resource, Clone, Copy, Debug, Default, PartialEq)]
+    struct Round(u32);
+
+    let mut app = peer();
+    app.register_ticked_resource::<Round>();
+    app.insert_resource(Round(7));
+    app.insert_resource(LocalServerPlayer(1));
+    app.update();
+    assert_eq!(*app.world().resource::<Round>(), Round(7));
+
+    app.world_mut().remove_resource::<LocalServerPlayer>();
+    app.update();
+
+    assert_eq!(
+        *app.world().resource::<Round>(),
+        Round::default(),
+        "the round the last session ended on is not the one the next lobby starts in"
     );
 }

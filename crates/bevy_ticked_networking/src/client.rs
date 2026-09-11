@@ -4,8 +4,10 @@ use bevy::prelude::*;
 
 use bevy_ticked::{
     TickedLoop, TickedSimulation, TickedSystems,
+    events::TickedEventRegistry,
     registry::TickedComponentRegistry,
-    tick::{CurrentTick, TicksPaused},
+    resource_registry::TickedResourceRegistry,
+    tick::{CurrentTick, HistoryBufferTicks, TicksPaused},
     time::{run_tick_schedule, TickRateDilation},
     tracked_entity::{TickTrackedEntity, TickTrackedEntityCounter},
 };
@@ -117,7 +119,7 @@ impl ClientTickBuffer {
     /// Never target less replay distance than this.
     const MIN_TICKS: u64 = 2;
     /// Cap it so a pathological connection can't make prediction explode.
-    const MAX_TICKS: u64 = 64;
+    const MAX_TICKS: u64 = crate::input::MAX_INPUT_LEAD_TICKS;
     /// EWMA weight for new observations.
     const SMOOTHING: f64 = 0.1;
 
@@ -210,6 +212,14 @@ impl<T: TickedInput> Default for TickedClientPlugin<T> {
 impl<T: TickedInput> Plugin for TickedClientPlugin<T> {
     fn build(&self, app: &mut App) {
         crate::input::install_input_queue::<T>(app);
+        // A rollback never reaches further back than one one-way trip plus the lead, and the
+        // lead is capped at `MAX_TICKS`; twice that is every tick a snapshot could still name.
+        // The core default is a hundred seconds, sized for scrubbing, and on a client that was
+        // a hundred seconds of every registered component kept for a rewind that cannot
+        // happen — and walked on every capture.
+        if !app.world().contains_resource::<bevy_ticked::HistoryWindowChosen>() {
+            app.insert_resource(HistoryBufferTicks(2 * ClientTickBuffer::MAX_TICKS));
+        }
         app.init_resource::<ClientTickBuffer>()
             .init_resource::<PendingSnapshot>()
             .init_resource::<AppliedSnapshotTick>()
@@ -229,11 +239,15 @@ impl<T: TickedInput> Plugin for TickedClientPlugin<T> {
             .add_systems(
                 TickedLoop,
                 (
-                    handle_server_snapshot::<T>.in_set(TickedSystems::PreTick),
+                    handle_server_snapshot.in_set(TickedSystems::PreTick),
                     (send_local_input::<T>, watch_for_client_minted_ids)
                         .in_set(TickedSystems::PostTick),
                 ),
             );
+    }
+
+    fn finish(&self, app: &mut App) {
+        bevy_ticked::require_steerable_tick_source(app, "TickedClientPlugin");
     }
 }
 
@@ -292,6 +306,12 @@ fn reset_on_join<T: TickedInput>(world: &mut World) {
     world.resource_mut::<InputQueue<T>>().inputs.clear();
     let registry = world.resource::<TickedComponentRegistry>().clone();
     registry.clear_all(world);
+    // Registered resources go back to their defaults: the host's first snapshot brings the
+    // networked ones, and the local ones have no business carrying a previous session's value.
+    if let Some(resources) = world.get_resource::<TickedResourceRegistry>().cloned() {
+        resources.reset_all(world);
+    }
+    TickedEventRegistry::clear_all(world);
 }
 
 /// Written once a snapshot has been applied to the world.
@@ -314,7 +334,7 @@ pub struct SnapshotApplied {
 }
 
 /// PreTick: if a server snapshot arrived, rollback and replay local inputs to now.
-fn handle_server_snapshot<T: TickedInput>(world: &mut World) {
+fn handle_server_snapshot(world: &mut World) {
     let Some(snapshot) = world.resource_mut::<PendingSnapshot>().0.take() else {
         return;
     };
@@ -453,8 +473,18 @@ fn handle_server_snapshot<T: TickedInput>(world: &mut World) {
         return;
     }
 
-    // Snapshot is behind us — rollback and replay predicted ticks.
+    // Snapshot is behind us: roll back and replay predicted ticks.
+    //
+    // The networked half of the world is now the authority's, written by `apply_snapshot`.
+    // The local half — components and resources registered without a wire name, which only
+    // roll back — is put back to what it was at the snapshot's tick, from history; it used to
+    // keep the value of the client's last predicted tick, so the replay started from a world
+    // that was part authority and part future. Then everything after the snapshot's tick is
+    // forgotten: the component history, and the event logs, or a prediction that never
+    // happened stays presented and its correction is swallowed as "already shown".
+    registry.restore_local_only(world, snapshot_tick);
     registry.truncate_all_after(world, snapshot_tick);
+    TickedEventRegistry::truncate_all_after(world, snapshot_tick);
 
     let target = world.resource::<ClientTickBuffer>().target_replay_distance;
     let end_tick = converge_lead(world, current_tick, replay_distance as u64, target);
@@ -523,11 +553,13 @@ fn dilation_for(error: f64) -> f64 {
 /// whole tick corrects the same error in one frame, but every visual driven by
 /// the simulation jumps by a tick when it happens.
 ///
-/// Under [`TickSource::FixedUpdate`] there is no accumulator to stretch, so fall
-/// back to the one-tick nudge rather than never converging.
+/// Under [`TickSource::Manual`] there is no accumulator to stretch — whoever drives
+/// the loop owns the pacing — so fall back to the one-tick nudge rather than never
+/// converging. `FixedUpdate` is refused at build time (see
+/// [`require_steerable_tick_source`](bevy_ticked::require_steerable_tick_source)).
 ///
 /// [`TickSource::Hz`]: bevy_ticked::TickSource::Hz
-/// [`TickSource::FixedUpdate`]: bevy_ticked::TickSource::FixedUpdate
+/// [`TickSource::Manual`]: bevy_ticked::TickSource::Manual
 fn converge_lead(world: &mut World, current_tick: u64, replay_distance: u64, target: u64) -> u64 {
     let error = replay_distance as f64 - target as f64;
 
