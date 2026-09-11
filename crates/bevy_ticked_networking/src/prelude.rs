@@ -1,5 +1,10 @@
 pub use crate::{
-    client::{ClientTickBuffer, LocalClientPlayer, TickedClientPlugin},
+    client::{ClientSet, ClientTickBuffer, LocalClientPlayer, TickedClientPlugin},
+    replication::{AuthoritativeHistory, InterpolationDelay, Owner, ReplicationMode},
+    smoothing::{
+        CorrectionSmoothing, CorrectionStats, NoCorrectionSmoothing, PredictionError,
+        SmoothingTarget, TickedSmoothingPlugin, measure_prediction,
+    },
     input::{InputQueue, MAX_INPUT_LEAD_TICKS, TickedInput},
     messages::{
         NetworkInputPayload, PeerLeft, ReceivedNetworkInput, ReceivedNetworkSnapshot,

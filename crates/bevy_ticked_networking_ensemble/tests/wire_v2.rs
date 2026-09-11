@@ -21,7 +21,7 @@ use bevy_ticked_networking_ensemble::{
     RegistryMismatch, RegistryVerified, SpawnerSlots,
 };
 use bevy_ticked_testing::fixtures::minimal::{
-    self, EntityKind, Input, Owner, Vel, seat_everyone,
+    self, EntityKind, Input, Vel, seat_everyone,
 };
 use bevy_ticked_testing::log::{errors_since, mark};
 use bevy_ticked_testing::prelude::*;
@@ -32,8 +32,7 @@ const SETTLE: usize = 400;
 fn without_pos(app: &mut App) {
     minimal::install_systems(app);
     app.register_networked_ticked_component::<Vel>("Vel")
-        .register_networked_ticked_component::<EntityKind>("EntityKind")
-        .register_networked_ticked_component::<Owner>("Owner");
+        .register_networked_ticked_component::<EntityKind>("EntityKind");
 }
 
 fn host_margins(net: &TickedNetwork) -> Vec<(u128, i64)> {
@@ -209,10 +208,13 @@ fn a_mismatched_client_is_told_which_registration_differs() {
     assert_eq!(mismatch.peer, net.uuid(net.host()));
     assert_eq!(
         mismatch.theirs.component_names,
-        ["EntityKind", "Owner", "Pos", "Vel"],
+        ["EntityKind", "Pos", "Vel", "bevy_ticked::Owner"],
         "the host's sorted names travel with the handshake"
     );
-    assert_eq!(mismatch.ours.component_names, ["EntityKind", "Owner", "Vel"]);
+    assert_eq!(
+        mismatch.ours.component_names,
+        ["EntityKind", "Vel", "bevy_ticked::Owner"]
+    );
 
     // The host's side of the same story names the same registration.
     net.run(2);

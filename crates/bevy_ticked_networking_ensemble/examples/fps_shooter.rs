@@ -90,10 +90,6 @@ struct SpawnPoint(Vec3);
 #[derive(Component, Clone, Debug, Serialize, Deserialize, Default)]
 struct ShootCooldown(u64);
 
-/// Links a player's UUID to their game entity.
-#[derive(Component, Clone, Debug, Serialize, Deserialize)]
-struct PlayerUuid(u128);
-
 // --- Local-only marker components ---
 
 #[derive(Component)]
@@ -150,9 +146,14 @@ fn main() {
         .add_plugins(TickedServerPlugin::<PlayerInput>::new())
         .add_plugins(TickedClientPlugin::<PlayerInput>::new())
         .add_plugins(TickedNetworkingEnsemblePlugin::<PlayerInput>::new())
+        // The renderer blends each body between its last two tick states, and a correction
+        // to a predicted body slides into place instead of blinking there. Neither touches
+        // what the simulation reads.
+        .add_plugins((TickedInterpolationPlugin, TickedSmoothingPlugin))
         .init_resource::<LocalLook>()
         // Register networked components. The wire name is the type's identity on the
         // wire and must be the same on every peer; registration order does not matter.
+        // `Owner` — whose body this is — is the stack's own and is registered by it.
         .register_networked_ticked_component::<Position>("avian::Position")
         .register_networked_ticked_component::<Rotation>("avian::Rotation")
         .register_networked_ticked_component::<LinearVelocity>("avian::LinearVelocity")
@@ -161,7 +162,6 @@ fn main() {
         .register_networked_ticked_component::<EntityKind>("EntityKind")
         .register_networked_ticked_component::<SpawnPoint>("SpawnPoint")
         .register_networked_ticked_component::<ShootCooldown>("ShootCooldown")
-        .register_networked_ticked_component::<PlayerUuid>("PlayerUuid")
         // elan's persistent jump timers: rolling these back keeps the local
         // player's predicted jump from mispredicting and snapping on correction.
         .register_networked_ticked_component::<LastGrounded>("elan::LastGrounded")
@@ -182,7 +182,6 @@ fn main() {
                 capture_local_input,
                 attach_local_camera,
                 manage_cameras,
-                sync_visuals,
                 sync_camera_pitch,
                 update_ui,
             ),
@@ -200,12 +199,13 @@ fn main() {
         .configure_sets(TickedSimulation, ControllerSet.before(PhysicsSystems::Prepare))
         .add_systems(
             TickedSimulation,
-            (move_bullets, bullet_collision)
+            (move_bullets, bullet_collision, sync_bullet_transforms)
                 .chain()
                 .after(PhysicsSystems::Writeback),
         )
         // React to networked entity lifecycle
         .add_observer(on_entity_spawned)
+        .add_observer(on_replication_mode_changed)
         .run();
 }
 
@@ -428,7 +428,7 @@ fn server_spawn_players(
             Aim { yaw, pitch: 0.0 },
             SpawnPoint(spawn_pos),
             ShootCooldown::default(),
-            PlayerUuid(participant.player_uuid),
+            Owner(participant.player_uuid),
             PlayerOwned(participant_entity),
         ));
 
@@ -499,8 +499,18 @@ fn set_controller_time(time: Res<Time>, mut controller_time: ResMut<ControllerTi
     controller_time.elapsed = time.elapsed_secs();
 }
 
-/// Apply this tick's inputs to each player: drive elan's `ControllerInput`,
+/// Apply this tick's inputs to each player this peer drives: feed elan's `ControllerInput`,
 /// update `Aim`, yaw the physics body, and tick down the shoot cooldown.
+///
+/// This tick's input, or the newest one before it: a player whose input for this tick has not
+/// arrived is still pressing what they last pressed, far more often than nothing. With
+/// nothing, a predicted remote body stood still for every tick past the relayed inputs and
+/// snapped forward at the snapshot.
+///
+/// Only the bodies this peer drives: on the host that is everyone; on a client it is the local
+/// player's body and any the game marked `Predicted`. Everybody else's body is interpolated —
+/// put at the authority's state after each snapshot — and takes no input here. That is the
+/// whole of what used to be the "remote body with no input" workaround.
 ///
 /// The body's yaw is written to avian's `Rotation` (not the `Transform`): avian
 /// owns the body Transform, so we let it sync `Rotation -> Transform`, and elan's
@@ -511,21 +521,21 @@ fn set_controller_time(time: Res<Time>, mut controller_time: ResMut<ControllerTi
 fn apply_inputs(
     tick: Res<CurrentTick>,
     input_queue: Res<InputQueue<PlayerInput>>,
+    local_client: Option<Res<LocalClientPlayer>>,
     mut players: Query<(
         &mut ControllerInput,
         &mut Rotation,
         &mut Aim,
         &mut ShootCooldown,
-        &PlayerUuid,
+        &Owner,
         &EntityKind,
+        Option<&ReplicationMode>,
     )>,
 ) {
-    let Some(tick_inputs) = input_queue.at_tick(tick.0) else {
-        return;
-    };
+    let tick_inputs = input_queue.at_tick_or_last(tick.0);
 
-    for (mut input, mut rotation, mut aim, mut cooldown, uuid, kind) in players.iter_mut() {
-        if *kind != EntityKind::Player {
+    for (mut input, mut rotation, mut aim, mut cooldown, uuid, kind, mode) in players.iter_mut() {
+        if *kind != EntityKind::Player || !drives(local_client.as_deref(), mode) {
             continue;
         }
         if let Some(player_input) = tick_inputs.get(&uuid.0) {
@@ -594,7 +604,7 @@ fn move_bullets(world: &mut World) {
     // Gather player state for spawning bullets.
     let mut players: Vec<(u128, Vec3, Aim, u64)> = Vec::new();
     {
-        let mut query = world.query::<(&PlayerUuid, &Position, &Aim, &ShootCooldown, &EntityKind)>();
+        let mut query = world.query::<(&Owner, &Position, &Aim, &ShootCooldown, &EntityKind)>();
         for (uuid, pos, aim, cooldown, kind) in query.iter(world) {
             if *kind == EntityKind::Player {
                 players.push((uuid.0, pos.0, *aim, cooldown.0));
@@ -622,11 +632,11 @@ fn move_bullets(world: &mut World) {
             EntityKind::Bullet,
             Position(bullet_pos),
             aim,
-            PlayerUuid(owner_uuid),
+            Owner(owner_uuid),
         ));
 
         // Reset the shooter's cooldown.
-        let mut query = world.query::<(&PlayerUuid, &mut ShootCooldown, &EntityKind)>();
+        let mut query = world.query::<(&Owner, &mut ShootCooldown, &EntityKind)>();
         for (uuid, mut cooldown, kind) in query.iter_mut(world) {
             if *kind == EntityKind::Player && uuid.0 == owner_uuid {
                 cooldown.0 = SHOOT_COOLDOWN_TICKS;
@@ -656,7 +666,7 @@ fn bullet_collision(world: &mut World) {
 
     let mut bullets: Vec<(Entity, Vec3, u128)> = Vec::new();
     {
-        let mut query = world.query::<(Entity, &Position, &PlayerUuid, &EntityKind)>();
+        let mut query = world.query::<(Entity, &Position, &Owner, &EntityKind)>();
         for (entity, pos, uuid, kind) in query.iter(world) {
             if *kind == EntityKind::Bullet {
                 bullets.push((entity, pos.0, uuid.0));
@@ -666,7 +676,7 @@ fn bullet_collision(world: &mut World) {
 
     let mut players: Vec<(Entity, Vec3, u128, Vec3)> = Vec::new();
     {
-        let mut query = world.query::<(Entity, &Position, &PlayerUuid, &SpawnPoint, &EntityKind)>();
+        let mut query = world.query::<(Entity, &Position, &Owner, &SpawnPoint, &EntityKind)>();
         for (entity, pos, uuid, spawn, kind) in query.iter(world) {
             if *kind == EntityKind::Player {
                 players.push((entity, pos.0, uuid.0, spawn.0));
@@ -705,32 +715,77 @@ fn bullet_collision(world: &mut World) {
     }
 }
 
+// --- Who simulates what ---
+
+/// Whether this peer simulates a body from input: the host simulates every body, a client
+/// only the ones it predicts. `ReplicationMode` is a client-side marker; absent means
+/// interpolated, so on a client only an explicit `Predicted` counts.
+fn drives(local_client: Option<&LocalClientPlayer>, mode: Option<&ReplicationMode>) -> bool {
+    local_client.is_none() || matches!(mode, Some(ReplicationMode::Predicted))
+}
+
+/// The physics body a player gets on this peer.
+///
+/// On the host every body is dynamic: the host simulates everyone from their inputs. On a
+/// client only the local player's is — the body the replay predicts from inputs this client
+/// has — and so is anything the game marks `Predicted`. Every other player's body is
+/// interpolated: after each snapshot it is put at the authority's state, and a dynamic body
+/// would fight that restore every tick, falling under gravity, colliding, integrating from a
+/// velocity the host has since changed. Kinematic, it goes where it is put and coasts on the
+/// velocity it was given until the next restore. The host owns its motion; this peer only
+/// shows it.
+fn body_kind(
+    local_client: Option<&LocalClientPlayer>,
+    owner: Option<&Owner>,
+    mode: Option<&ReplicationMode>,
+) -> RigidBody {
+    let Some(local) = local_client else {
+        return RigidBody::Dynamic;
+    };
+    let mine = owner.is_some_and(|owner| owner.0 == local.0);
+    if mine || matches!(mode, Some(ReplicationMode::Predicted)) {
+        RigidBody::Dynamic
+    } else {
+        RigidBody::Kinematic
+    }
+}
+
 // --- Entity lifecycle observers ---
 
+/// A snapshot-spawned entity gets its `TickTrackedEntity` last, after every networked component
+/// including `Owner`, so this is where the owner is known and the body kind can be chosen.
 fn on_entity_spawned(
     trigger: On<Add, TickTrackedEntity>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    query: Query<&EntityKind>,
+    query: Query<(&EntityKind, Option<&Owner>, Option<&ReplicationMode>)>,
+    local_client: Option<Res<LocalClientPlayer>>,
 ) {
     let entity = trigger.entity;
-    let Ok(kind) = query.get(entity) else {
+    let Ok((kind, owner, mode)) = query.get(entity) else {
         return;
     };
 
     match kind {
         EntityKind::Player => {
             commands.entity(entity).insert((
-                // The controller bundle is needed on every peer so clients can
-                // predict the body locally (snapshots only carry networked state).
+                // The controller bundle is needed on every peer: the host and a predicting
+                // client simulate the body, an interpolating client shows it. Its dynamic
+                // body is overridden below for a body this peer only shows.
                 // Rotation is present up front so apply_inputs can yaw the body
                 // from the first tick.
                 character_controller_bundle(),
+                body_kind(local_client.as_deref(), owner, mode),
                 Rotation::default(),
                 Mesh3d(meshes.add(Cuboid::new(0.4, 1.3, 0.4))),
                 MeshMaterial3d(materials.add(unlit(Color::srgb(0.2, 0.7, 0.35)))),
                 Transform::default(),
+                TickedInterpolation::default(),
+                // The local player's body is exempt on its own: a correction to what you
+                // are steering should be felt. The default caps at two metres; a correction
+                // bigger than that is a respawn, and is meant to be seen.
+                CorrectionSmoothing::default(),
             ));
 
             // Override the controller's speed (default is 1.0). Applied here, on
@@ -748,16 +803,33 @@ fn on_entity_spawned(
                 Mesh3d(meshes.add(Cuboid::from_length(0.2))),
                 MeshMaterial3d(materials.add(unlit(Color::srgb(1.0, 0.85, 0.2)))),
                 Transform::default(),
+                TickedInterpolation::default(),
             ));
         }
     }
 }
 
-/// Copy simulated `Position` onto the render `Transform` for bullets. Player
-/// bodies are oriented (yaw) by avian's `Rotation -> Transform` sync inside the
-/// sim, so we deliberately do not touch their transforms here (writing them would
-/// fight avian's transform sync and clobber the rolled-back position).
-fn sync_visuals(
+/// A body handed from one mode to the other after it spawned — a game predicting a remote
+/// player it is wrestling with, or giving up on that — changes physics body with it.
+fn on_replication_mode_changed(
+    trigger: On<Insert, ReplicationMode>,
+    mut commands: Commands,
+    players: Query<(&EntityKind, Option<&Owner>, &ReplicationMode)>,
+    local_client: Option<Res<LocalClientPlayer>>,
+) {
+    let Ok((EntityKind::Player, owner, mode)) = players.get(trigger.entity) else {
+        return;
+    };
+    commands
+        .entity(trigger.entity)
+        .insert(body_kind(local_client.as_deref(), owner, Some(mode)));
+}
+
+/// Copy simulated `Position` onto the render `Transform` for bullets, inside the tick and
+/// after they moved, so `TickedInterpolation` records one state per tick and blends between
+/// them. Player bodies are positioned and oriented by avian's `Position`/`Rotation ->
+/// Transform` sync inside the sim, so their transforms are deliberately not touched here.
+fn sync_bullet_transforms(
     mut bullets: Query<(&Position, &EntityKind, &mut Transform), With<TickTrackedEntity>>,
 ) {
     for (pos, kind, mut transform) in bullets.iter_mut() {
@@ -785,7 +857,7 @@ fn attach_local_camera(
     mut commands: Commands,
     local_client: Option<Res<LocalClientPlayer>>,
     local_server: Option<Res<LocalServerPlayer>>,
-    players: Query<(Entity, &PlayerUuid, &EntityKind), Without<CameraAttached>>,
+    players: Query<(Entity, &Owner, &EntityKind), Without<CameraAttached>>,
 ) {
     let Some(my_uuid) = local_client
         .as_ref()

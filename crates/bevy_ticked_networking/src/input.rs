@@ -70,6 +70,32 @@ impl<T: TickedInput> InputQueue<T> {
         self.inputs.get(&tick)
     }
 
+    /// A player's input at `tick`, or the newest one before it: a held key.
+    ///
+    /// A remote player's input for a tick the client has not received yet is far more likely
+    /// to be "what they were pressing" than "nothing", and every consumer wrote this fallback.
+    /// With nothing, a remote body stopped dead at every replay boundary and snapped back when
+    /// the snapshot arrived. `None` only if the player has never sent an input at or before
+    /// `tick`.
+    pub fn get_or_last(&self, tick: u64, player_uuid: u128) -> Option<&T> {
+        self.inputs
+            .range(..=tick)
+            .rev()
+            .find_map(|(_, players)| players.get(&player_uuid))
+    }
+
+    /// Every player's input at `tick`, each falling back to their newest earlier one, in
+    /// ascending uuid order. Players with nothing at or before `tick` are absent.
+    pub fn at_tick_or_last(&self, tick: u64) -> BTreeMap<u128, T> {
+        let mut out: BTreeMap<u128, T> = BTreeMap::new();
+        for (_, players) in self.inputs.range(..=tick).rev() {
+            for (player, input) in players {
+                out.entry(*player).or_insert_with(|| input.clone());
+            }
+        }
+        out
+    }
+
     /// Every player with at least one input in the queue, each once, in ascending uuid order.
     pub fn players(&self) -> impl Iterator<Item = u128> {
         self.inputs
