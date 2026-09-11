@@ -1,4 +1,6 @@
 pub use crate::{
+    checksum::{ChecksumLog, ChecksumLogPlugin, Divergence, WorldHash},
+    diagnostics::TickCost,
     MaxTicksPerFrame, RunTickedLoop, TickSource, TickedLoop, TickedPlugin, TickedSimulation,
     TickedSystems,
     events::{

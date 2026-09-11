@@ -1,7 +1,9 @@
 pub mod actions;
 pub mod adaptive_buffer;
 pub mod authoritative;
-pub mod checksum;
+/// Moved to the core crate: every networked game needs it, not only lockstep. Re-exported here so
+/// existing paths keep working.
+pub use bevy_ticked::checksum;
 pub mod checksum_exchange;
 pub mod join;
 pub mod messages;

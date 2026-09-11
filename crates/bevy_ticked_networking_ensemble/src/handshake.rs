@@ -84,7 +84,10 @@ pub struct RegistryMismatch {
 }
 
 pub(crate) fn plugin(app: &mut App) {
-    app.register_ensemble_message_type::<TickedRegistryHandshake>()
+    app.register_control_message_type::<TickedRegistryHandshake>(
+        "bevy_ticked/RegistryHandshake",
+        bevy_ensemble::MessageAuthority::HostOnly,
+    )
         .add_systems(Update, (announce_registry, check_registry).chain());
 }
 
@@ -216,7 +219,7 @@ mod tests {
             .write_message(ReceivedEnsembleMessage {
                 sender: Some(9),
                 message,
-                received_at: std::time::Duration::ZERO,
+                received_at: bevy_ensemble::Instant::now(),
             });
         app.update();
     }

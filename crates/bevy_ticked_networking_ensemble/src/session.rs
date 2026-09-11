@@ -42,7 +42,6 @@
 use core::time::Duration;
 
 use bevy::prelude::*;
-use bevy_ensemble::LOCAL_PLAYER_UUID;
 use bevy_ensemble::prelude::*;
 // `PeerRtt` / `PeerRttJitter` come in via the prelude above; named here so the reason they are
 // wanted is legible at the import site.
@@ -138,15 +137,10 @@ fn adopt_role(
     let Some(local_player) = local_player else {
         return;
     };
-    // bevy_ensemble gives a host [`LOCAL_PLAYER_UUID`] the frame it asks to host, and the backend
-    // overwrites it with the real identity when the lobby is created. A role adopted in between
-    // keeps the placeholder for the whole session: the roster is patched to the real uuid, this
-    // resource is not, and everything the host does under its role -- every input it queues --
-    // names a player that owns nothing. Waiting costs a host nothing, because the real uuid lands
-    // with the lobby's creation, and no peer can connect to a lobby that does not exist yet.
-    if local_player.0 == LOCAL_PLAYER_UUID {
-        return;
-    }
+    // bevy_ensemble used to give a host a placeholder identity the frame it asked to host, and
+    // a role adopted from it kept a uuid of zero for the whole session. There is no placeholder
+    // any more: the resource is absent until the backend knows the identity, which is what the
+    // `let Some` above waits for.
     let is_host = !hosting.is_empty();
     if !is_host && joined.is_empty() {
         return;
@@ -337,10 +331,9 @@ mod tests {
         for _ in 0..3 {
             app.update();
         }
-        assert_eq!(
-            app.world().resource::<LocalMultiplayerPlayerId>().0,
-            LOCAL_PLAYER_UUID,
-            "until the lobby exists, the lobby crate gives a host its placeholder"
+        assert!(
+            app.world().get_resource::<LocalMultiplayerPlayerId>().is_none(),
+            "until the backend knows the identity, there is none"
         );
         assert_eq!(
             host_role(app.world()),

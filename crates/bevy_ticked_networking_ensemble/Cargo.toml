@@ -3,6 +3,12 @@ name = "bevy_ticked_networking_ensemble"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["overlay"]
+# Publishes the simulation's counters (tick cost, replays, snapshot bytes) to bevy_ensemble's
+# net-debug overlay under `ticked.*`.
+overlay = ["bevy_ensemble/netdebug"]
+
 [dependencies]
 bevy = { version = "0.19", default-features = false, features = ["std", "bevy_log"] }
 bevy_ticked = { path = "../.." }
@@ -18,6 +24,8 @@ avian2d = { version = "0.7", features = ["serialize"] }
 avian3d = { version = "0.7", features = ["serialize"] }
 bevy_ensemble_webrtc = { workspace = true }
 bevy_elan = { git = "https://github.com/Sigma-dev/bevy_elan", rev = "fb453b3", features = ["serialize"] }
+# The source guard and golden helpers; tests only.
+bevy_ticked_testing = { path = "../bevy_ticked_testing" }
 
 [[example]]
 name = "top_down_shooter"

@@ -11,6 +11,7 @@ use bevy_ticked::{
 };
 
 use crate::{
+    diagnostics::{InputStats, SnapshotStats},
     input::{InputQueue, TickedInput},
     messages::{ReceivedNetworkInput, SendNetworkSnapshot},
     snapshot::build_snapshot,
@@ -90,6 +91,8 @@ impl<T: TickedInput> Plugin for TickedServerPlugin<T> {
         crate::input::install_input_queue::<T>(app);
         app.init_resource::<InputMargins>()
             .init_resource::<NewestInputTick>()
+            .init_resource::<InputStats>()
+            .init_resource::<SnapshotStats>()
             .add_observer(collect_network_inputs::<T>)
             .add_systems(
                 Update,
@@ -168,11 +171,16 @@ fn collect_network_inputs<T: TickedInput>(
     mut queue: ResMut<InputQueue<T>>,
     mut margins: ResMut<InputMargins>,
     mut newest: ResMut<NewestInputTick>,
+    mut stats: ResMut<InputStats>,
 ) {
     let event = trigger.event();
     // How many ticks ahead of the server this input arrived (negative = late).
     // Reported back to the client so it can adapt its prediction lead.
     let margin = event.tick as i64 - tick.0 as i64;
+    stats.received += 1;
+    if margin < 0 {
+        stats.late += 1;
+    }
     margins.0.insert(event.sender, margin);
     queue.insert(event.tick, event.sender, event.input.clone());
 
@@ -214,6 +222,9 @@ impl Command for BroadcastSnapshotCommand {
         let mut snapshot = build_snapshot(world, self.0);
         if let Some(margins) = world.get_resource::<InputMargins>() {
             snapshot.input_margins = margins.0.clone();
+        }
+        if let Some(mut stats) = world.get_resource_mut::<SnapshotStats>() {
+            stats.sent += 1;
         }
         world.commands().trigger(SendNetworkSnapshot(snapshot));
     }
