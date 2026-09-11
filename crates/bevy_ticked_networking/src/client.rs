@@ -11,6 +11,7 @@ use bevy_ticked::{
 };
 
 use crate::{
+    diagnostics::{HealthWarnings, ReplayStats},
     input::{InputQueue, TickedInput},
     messages::{ReceivedNetworkSnapshot, SendNetworkInput},
     snapshot::apply_snapshot,
@@ -212,6 +213,8 @@ impl<T: TickedInput> Plugin for TickedClientPlugin<T> {
         app.init_resource::<ClientTickBuffer>()
             .init_resource::<PendingSnapshot>()
             .init_resource::<AppliedSnapshotTick>()
+            .init_resource::<ReplayStats>()
+            .init_resource::<HealthWarnings>()
             .add_message::<SnapshotApplied>()
             .add_observer(receive_snapshot)
             .add_systems(
@@ -222,11 +225,13 @@ impl<T: TickedInput> Plugin for TickedClientPlugin<T> {
                 Update,
                 crate::reset_on_leave::<T>.run_if(resource_removed::<LocalClientPlayer>),
             )
+            .init_resource::<CounterAfterSnapshot>()
             .add_systems(
                 TickedLoop,
                 (
                     handle_server_snapshot::<T>.in_set(TickedSystems::PreTick),
-                    send_local_input::<T>.in_set(TickedSystems::PostTick),
+                    (send_local_input::<T>, watch_for_client_minted_ids)
+                        .in_set(TickedSystems::PostTick),
                 ),
             );
     }
@@ -242,6 +247,7 @@ fn receive_snapshot(
     trigger: On<ReceivedNetworkSnapshot>,
     applied: Res<AppliedSnapshotTick>,
     mut pending: ResMut<PendingSnapshot>,
+    mut stats: ResMut<ReplayStats>,
 ) {
     let tick = trigger.event().0.tick;
     let newest_seen = applied
@@ -250,6 +256,7 @@ fn receive_snapshot(
         .chain(pending.0.as_ref().map(|waiting| waiting.tick))
         .max();
     if newest_seen.is_some_and(|newest| tick <= newest) {
+        stats.dropped_stale += 1;
         return;
     }
     pending.0 = Some(trigger.event().0.clone());
@@ -322,6 +329,7 @@ fn handle_server_snapshot<T: TickedInput>(world: &mut World) {
     // arrives too early is discarded instead of waiting to be applied stale. They
     // are unreliable by construction, so losing one costs nothing.
     if !world.contains_resource::<LocalClientPlayer>() {
+        world.resource_mut::<ReplayStats>().dropped_before_handshake += 1;
         return;
     }
 
@@ -331,9 +339,33 @@ fn handle_server_snapshot<T: TickedInput>(world: &mut World) {
 
     let registry = world.resource::<TickedComponentRegistry>().clone();
 
+    // A snapshot older than anything still in history can be applied, but the replay from it
+    // cannot restore rollback-only state for the ticks in between: they are gone. Counted, and
+    // said once, because it is the kind of thing that presents as "the client is slightly off"
+    // for a session and has an exact cause.
+    if let Some(oldest) = registry.oldest_captured_tick(world)
+        && snapshot_tick < oldest
+    {
+        let mut health = world.resource_mut::<HealthWarnings>();
+        let mut count = health.snapshot_older_than_history;
+        HealthWarnings::raise(&mut count, || {
+            format!(
+                "a snapshot for tick {snapshot_tick} arrived, but the oldest tick still in \
+                 history is {oldest}: rollback-only state between them cannot be restored. Raise \
+                 HistoryBufferTicks or lower the lead."
+            )
+        });
+        health.snapshot_older_than_history = count;
+    }
+
     // Apply the authoritative snapshot (sets CurrentTick to snapshot_tick)
     apply_snapshot(world, &snapshot);
     world.insert_resource(AppliedSnapshotTick(Some(snapshot_tick)));
+    {
+        let mut stats = world.resource_mut::<ReplayStats>();
+        stats.snapshots_applied += 1;
+        stats.last_replay_distance = current_tick as i64 - snapshot_tick as i64;
+    }
     // `was_paused` is exactly "this is the initial sync". It used to be computed
     // here, used to decide whether to skip ahead, and thrown away; consumers were
     // left to infer it from how far bodies moved.
@@ -396,6 +428,11 @@ fn handle_server_snapshot<T: TickedInput>(world: &mut World) {
             registry.capture_all(world, tick);
         }
         world.resource_mut::<CurrentTick>().0 = snapshot_tick + target;
+        {
+            let mut stats = world.resource_mut::<ReplayStats>();
+            stats.rollbacks += 1;
+            stats.ticks_replayed += target;
+        }
         world.remove_resource::<TicksPaused>();
         // The lead was just set outright, so there is no error left for the rate
         // trim to work on. Leaving a stale value here is not harmless: a client
@@ -428,6 +465,11 @@ fn handle_server_snapshot<T: TickedInput>(world: &mut World) {
         registry.capture_all(world, tick);
     }
     world.resource_mut::<CurrentTick>().0 = end_tick;
+    {
+        let mut stats = world.resource_mut::<ReplayStats>();
+        stats.rollbacks += 1;
+        stats.ticks_replayed += end_tick.saturating_sub(snapshot_tick);
+    }
 }
 
 /// Largest deviation from the nominal tick rate used to steer the lead.
@@ -511,6 +553,37 @@ fn converge_lead(world: &mut World, current_tick: u64, replay_distance: u64, tar
         current_tick + 1
     } else {
         current_tick
+    }
+}
+
+/// The counter as the last snapshot left it, so a client that mints an id on its own is caught.
+///
+/// Until predicted spawns land, only the authority may mint a tracked id: a client that does so
+/// hands out a number the host will hand out too, and `apply_snapshot` then merges two entities
+/// into one. Every consumer wrote a `debug_assert` for this; here it is once, as a warning that
+/// names the id.
+#[derive(Resource, Default)]
+struct CounterAfterSnapshot(u64);
+
+fn watch_for_client_minted_ids(
+    counter: Res<TickTrackedEntityCounter>,
+    applied: Res<AppliedSnapshotTick>,
+    mut after_snapshot: ResMut<CounterAfterSnapshot>,
+    mut health: ResMut<HealthWarnings>,
+) {
+    if applied.is_changed() {
+        after_snapshot.0 = counter.0;
+        return;
+    }
+    if counter.0 > after_snapshot.0 {
+        let minted = counter.0;
+        HealthWarnings::raise(&mut health.client_minted_tracked_id, || {
+            format!(
+                "this client minted tracked id {minted} itself; only the authority may, or the \
+                 host will hand the same id to something else"
+            )
+        });
+        after_snapshot.0 = counter.0;
     }
 }
 

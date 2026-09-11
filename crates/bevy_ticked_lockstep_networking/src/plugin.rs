@@ -15,7 +15,7 @@ use crate::{
     send_client_loaded_after_snapshot_applied, sync_lockstep_pause_state,
 };
 use bevy::prelude::*;
-use bevy_ensemble::{EnsembleAppExt, EnsembleSet, Lobby};
+use bevy_ensemble::{EnsembleAppExt, EnsembleSet, Lobby, MessageAuthority};
 use bevy_ticked::{TickedLoop, TickedSystems};
 use std::marker::PhantomData;
 
@@ -113,12 +113,33 @@ where
                 )
                     .chain(),
             )
-            .register_ensemble_message_type::<crate::JoinSnapshotRequest>()
-            .register_ensemble_message_type::<crate::JoinSnapshotResponse<S>>()
-            .register_ensemble_message_type::<crate::ClientLoaded>()
-            .register_ensemble_message_type::<crate::ClientScheduledActions<A>>()
-            .register_ensemble_message_type::<crate::AuthoritativeTick<A>>()
-            .register_ensemble_message_type::<crate::ParticipantJoined>()
+            // Protocol-level types: never relayed. Whatever the host says about the session —
+            // a join snapshot, an authoritative tick, the roster — a client takes from its host
+            // and nobody else.
+            .register_control_message_type::<crate::JoinSnapshotRequest>(
+                "bevy_ticked_lockstep/JoinSnapshotRequest",
+                MessageAuthority::Any,
+            )
+            .register_control_message_type::<crate::JoinSnapshotResponse<S>>(
+                "bevy_ticked_lockstep/JoinSnapshotResponse",
+                MessageAuthority::HostOnly,
+            )
+            .register_control_message_type::<crate::ClientLoaded>(
+                "bevy_ticked_lockstep/ClientLoaded",
+                MessageAuthority::Any,
+            )
+            .register_control_message_type::<crate::ClientScheduledActions<A>>(
+                "bevy_ticked_lockstep/ClientScheduledActions",
+                MessageAuthority::Any,
+            )
+            .register_control_message_type::<crate::AuthoritativeTick<A>>(
+                "bevy_ticked_lockstep/AuthoritativeTick",
+                MessageAuthority::HostOnly,
+            )
+            .register_control_message_type::<crate::ParticipantJoined>(
+                "bevy_ticked_lockstep/ParticipantJoined",
+                MessageAuthority::HostOnly,
+            )
             .add_systems(
                 TickedLoop,
                 (

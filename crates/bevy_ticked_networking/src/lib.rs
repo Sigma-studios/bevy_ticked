@@ -1,4 +1,5 @@
 pub mod client;
+pub mod diagnostics;
 pub mod input;
 pub mod messages;
 pub mod networked_registry;

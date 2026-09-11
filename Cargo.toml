@@ -8,6 +8,7 @@ members = [
     "crates/bevy_ticked_networking",
     "crates/bevy_ticked_networking_ensemble",
     "crates/bevy_ticked_lockstep_networking",
+    "crates/bevy_ticked_testing",
 ]
 
 # bevy_ensemble is pinned here, once, by commit. Every crate in this workspace takes it with
@@ -15,10 +16,10 @@ members = [
 # rather than a hunt through six manifests and a lock file that had quietly fallen nine commits
 # behind the branch they all named.
 [workspace.dependencies]
-bevy_ensemble = { git = "https://github.com/Sigma-studios/bevy_ensemble", rev = "4880d0b" }
-bevy_ensemble_webrtc = { git = "https://github.com/Sigma-studios/bevy_ensemble", rev = "4880d0b" }
-bevy_ensemble_steam = { git = "https://github.com/Sigma-studios/bevy_ensemble", rev = "4880d0b" }
-bevy_ensemble_loopback = { git = "https://github.com/Sigma-studios/bevy_ensemble", rev = "4880d0b" }
+bevy_ensemble = { git = "https://github.com/Sigma-studios/bevy_ensemble", rev = "3ba5229" }
+bevy_ensemble_webrtc = { git = "https://github.com/Sigma-studios/bevy_ensemble", rev = "3ba5229" }
+bevy_ensemble_steam = { git = "https://github.com/Sigma-studios/bevy_ensemble", rev = "3ba5229" }
+bevy_ensemble_loopback = { git = "https://github.com/Sigma-studios/bevy_ensemble", rev = "3ba5229" }
 
 [dependencies]
 bevy = { version = "0.19", default-features = false, features = ["std", "bevy_log"] }
@@ -36,6 +37,8 @@ tracing = { version = "0.1", features = [
 # The tests and examples run whole apps; the library itself only needs the ECS.
 bevy = "0.19"
 avian3d = "0.7"
+# The source guard and golden helpers; tests only.
+bevy_ticked_testing = { path = "crates/bevy_ticked_testing" }
 
 [[example]]
 name = "bouncing_ball"

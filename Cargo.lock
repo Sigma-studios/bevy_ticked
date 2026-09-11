@@ -1013,17 +1013,18 @@ dependencies = [
 [[package]]
 name = "bevy_ensemble"
 version = "0.1.0"
-source = "git+https://github.com/Sigma-studios/bevy_ensemble?rev=4880d0b#4880d0b2da2ab0377b6012dc207471355f5a71c5"
+source = "git+https://github.com/Sigma-studios/bevy_ensemble?rev=3ba5229#3ba5229c4ae61aa40dff24ac3f86e38aedb6a38f"
 dependencies = [
  "bevy",
  "postcard",
  "serde",
+ "web-time",
 ]
 
 [[package]]
 name = "bevy_ensemble_loopback"
 version = "0.1.0"
-source = "git+https://github.com/Sigma-studios/bevy_ensemble?rev=4880d0b#4880d0b2da2ab0377b6012dc207471355f5a71c5"
+source = "git+https://github.com/Sigma-studios/bevy_ensemble?rev=3ba5229#3ba5229c4ae61aa40dff24ac3f86e38aedb6a38f"
 dependencies = [
  "bevy",
  "bevy_ensemble",
@@ -1032,7 +1033,7 @@ dependencies = [
 [[package]]
 name = "bevy_ensemble_sockets"
 version = "0.1.0"
-source = "git+https://github.com/Sigma-studios/bevy_ensemble?rev=4880d0b#4880d0b2da2ab0377b6012dc207471355f5a71c5"
+source = "git+https://github.com/Sigma-studios/bevy_ensemble?rev=3ba5229#3ba5229c4ae61aa40dff24ac3f86e38aedb6a38f"
 dependencies = [
  "bytes",
  "js-sys",
@@ -1044,13 +1045,14 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+ "web-time",
  "webrtc",
 ]
 
 [[package]]
 name = "bevy_ensemble_steam"
 version = "0.1.0"
-source = "git+https://github.com/Sigma-studios/bevy_ensemble?rev=4880d0b#4880d0b2da2ab0377b6012dc207471355f5a71c5"
+source = "git+https://github.com/Sigma-studios/bevy_ensemble?rev=3ba5229#3ba5229c4ae61aa40dff24ac3f86e38aedb6a38f"
 dependencies = [
  "bevy",
  "bevy-steamworks",
@@ -1062,7 +1064,7 @@ dependencies = [
 [[package]]
 name = "bevy_ensemble_webrtc"
 version = "0.1.0"
-source = "git+https://github.com/Sigma-studios/bevy_ensemble?rev=4880d0b#4880d0b2da2ab0377b6012dc207471355f5a71c5"
+source = "git+https://github.com/Sigma-studios/bevy_ensemble?rev=3ba5229#3ba5229c4ae61aa40dff24ac3f86e38aedb6a38f"
 dependencies = [
  "async-tungstenite",
  "bevy",
@@ -1928,6 +1930,7 @@ version = "0.1.0"
 dependencies = [
  "avian3d",
  "bevy",
+ "bevy_ticked_testing",
  "log",
  "serde",
  "tracing",
@@ -1944,6 +1947,7 @@ dependencies = [
  "bevy_ensemble_steam",
  "bevy_ensemble_webrtc",
  "bevy_ticked",
+ "bevy_ticked_testing",
  "serde",
 ]
 
@@ -1953,6 +1957,7 @@ version = "0.1.0"
 dependencies = [
  "bevy",
  "bevy_ticked",
+ "bevy_ticked_testing",
  "postcard",
  "serde",
 ]
@@ -1969,8 +1974,27 @@ dependencies = [
  "bevy_ensemble_webrtc",
  "bevy_ticked",
  "bevy_ticked_networking",
+ "bevy_ticked_testing",
  "postcard",
  "serde",
+]
+
+[[package]]
+name = "bevy_ticked_testing"
+version = "0.1.0"
+dependencies = [
+ "avian3d",
+ "bevy",
+ "bevy_ensemble",
+ "bevy_ensemble_loopback",
+ "bevy_ticked",
+ "bevy_ticked_lockstep_networking",
+ "bevy_ticked_networking",
+ "bevy_ticked_networking_ensemble",
+ "postcard",
+ "serde",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

@@ -1,3 +1,5 @@
+pub mod checksum;
+pub mod diagnostics;
 pub mod events;
 pub mod interpolation;
 pub mod prelude;
@@ -137,6 +139,7 @@ impl Plugin for TickedPlugin {
             .add_observer(tracked_index::unindex_tracked)
             .init_resource::<HistoryBufferTicks>()
             .init_resource::<Time<Ticked>>()
+            .init_resource::<diagnostics::TickCost>()
             .init_schedule(TickedSimulation)
             .init_schedule(TickedLoop)
             .add_message::<StepForward>()

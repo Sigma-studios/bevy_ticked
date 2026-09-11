@@ -153,7 +153,10 @@ where
             .init_resource::<PendingChecksumReports<H>>()
             .init_resource::<LastAnnouncedChecksum>()
             .add_message::<DesyncDetected<H>>()
-            .register_ensemble_message_type::<ChecksumReport<H>>()
+            .register_control_message_type::<ChecksumReport<H>>(
+                "bevy_ticked_lockstep/ChecksumReport",
+                bevy_ensemble::MessageAuthority::Any,
+            )
             .add_systems(
                 Update,
                 (
@@ -398,7 +401,7 @@ mod tests {
             .write(ReceivedEnsembleMessage {
                 sender: Some(sender),
                 message: ChecksumReport { tick, hash },
-                received_at: core::time::Duration::ZERO,
+                received_at: bevy_ensemble::Instant::now(),
             });
     }
 

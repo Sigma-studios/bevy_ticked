@@ -1,7 +1,8 @@
-//! Noticing that lockstep's promise was broken, and when.
+//! Noticing that two peers' worlds have stopped agreeing, and when.
 //!
-//! This crate's entire premise is that identical actions applied to identical state produce
-//! identical state. Nothing in it used to check whether that held. "Desync" was something people
+//! Lockstep's entire premise is that identical actions applied to identical state produce
+//! identical state, and a rollback client's is that its replay of the authority's ticks lands on
+//! the authority's state. Nothing used to check whether either held. "Desync" was something people
 //! reported by describing what they saw, and by the time it was visible — a building on one
 //! screen and not the other — it had usually happened hundreds of ticks earlier.
 //!
@@ -11,10 +12,11 @@
 //!   are local view, whether a rendering transform counts, what a "section" of the world is.
 //!   That is a statement about a particular simulation, and no crate can make it for you. It is
 //!   the [`WorldHash`] impl.
-//! * **This crate owns the log and the search.** Sampling every N ticks, keeping a bounded
+//! * **This module owns the log and the search.** Sampling every N ticks, keeping a bounded
 //!   history, and — the part that actually saves the day — reporting the *first* tick two peers
 //!   differed on rather than the first one somebody noticed. None of that mentions any
-//!   particular game, and every lockstep game needs exactly it.
+//!   particular game, and every networked game needs exactly it — which is why it lives in the
+//!   core crate rather than in the lockstep one it was written for.
 //!
 //! # Using it
 //!
@@ -43,7 +45,7 @@
 
 use bevy::ecs::intern::Interned;
 use bevy::prelude::*;
-use bevy_ticked::tick::CurrentTick;
+use crate::tick::CurrentTick;
 use std::marker::PhantomData;
 
 /// A game's reduction of its world to something two peers can compare.
@@ -221,12 +223,12 @@ impl<H: WorldHash> Plugin for ChecksumLogPlugin<H> {
         match self.set {
             Some(set) => {
                 app.add_systems(
-                    bevy_ticked::TickedSimulation,
+                    crate::TickedSimulation,
                     record_checksum::<H>.in_set(set),
                 );
             }
             None => {
-                app.add_systems(bevy_ticked::TickedSimulation, record_checksum::<H>);
+                app.add_systems(crate::TickedSimulation, record_checksum::<H>);
             }
         }
     }
