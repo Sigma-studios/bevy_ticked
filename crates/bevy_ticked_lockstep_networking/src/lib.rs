@@ -5,6 +5,7 @@ pub mod authoritative;
 /// existing paths keep working.
 pub use bevy_ticked::checksum;
 pub mod checksum_exchange;
+pub mod checksum_log;
 pub mod join;
 pub mod messages;
 pub mod participants;
@@ -19,23 +20,27 @@ pub use actions::{
 };
 pub use adaptive_buffer::{AdaptiveBufferState, AdaptiveBufferTuning, AdaptiveTickBufferPlugin};
 pub use authoritative::{
-    apply_authoritative_tick, broadcast_authoritative_actions,
+    PENDING_JOIN_WINDOW_TICKS, apply_authoritative_tick, broadcast_authoritative_actions,
     broadcast_buffered_authoritative_actions_to_loaded_clients, cleanup_old_tracker_entries,
     receive_authoritative_actions, replay_stashed_authoritative_actions,
     tracker_has_actions_for_player,
 };
-pub use checksum::{ChecksumLog, ChecksumLogPlugin, Divergence, WorldHash, record_checksum};
+pub use checksum::{ChecksumLog, Divergence, WorldHash, record_checksum};
 pub use checksum_exchange::{
     ChecksumExchangePlugin, ChecksumReport, Desync, DesyncDetected, PendingChecksumReports,
 };
+/// The lockstep sampler, which is the core one gated on a lobby; this path used to name the
+/// core plugin, and a game that wants it unconditionally says `sample_without_lobby()`.
+pub use checksum_log::ChecksumLogPlugin;
 pub use join::{
-    flush_provided_join_snapshots, receive_join_snapshot_requests, receive_join_snapshot_responses,
-    request_join_snapshot_on_client_join, send_client_loaded_after_snapshot_applied,
+    flush_provided_join_snapshots, forget_departed_client_joins, receive_join_snapshot_requests,
+    receive_join_snapshot_responses, request_join_snapshot_on_client_join,
+    send_client_loaded_after_snapshot_applied,
 };
 pub use messages::{
-    ApplyJoinSnapshot, AuthoritativeTick, CaptureJoinSnapshot, ClientLoaded,
-    ClientScheduledActions, JoinSnapshotApplied, JoinSnapshotRequest, JoinSnapshotResponse,
-    ParticipantJoined, ProvideJoinSnapshot,
+    ApplyJoinSnapshot, AuthoritativeTick, CaptureJoinSnapshot, ClientAccepted, ClientLoaded,
+    ClientScheduledActions, JoinSnapshotApplied, JoinSnapshotReceived, JoinSnapshotRequest,
+    JoinSnapshotResponse, ParticipantJoined, ProvideJoinSnapshot,
 };
 pub use participants::{
     LockstepLobbyParticipant, PendingLockstepParticipantJoins, activate_loaded_client_participants,
@@ -46,7 +51,8 @@ pub use participants::{
 pub use pause::sync_lockstep_pause_state;
 pub use plugin::{LockstepConfig, LockstepJoinSet, LockstepPlugin};
 pub use resources::{
-    ActionTracker, ClientSnapshotState, LastBroadcastTick, LocalPendingActions, PendingClientJoins,
+    ActionTracker, ClientSnapshotState, InitialLockstepConfig, JOIN_SNAPSHOT_REQUEST_INTERVAL,
+    LastBroadcastTick, LastJoinSnapshotRequests, LocalPendingActions, PendingClientJoins,
     PendingJoinSnapshotFlushes, StashedAuthoritativeTicks,
 };
 

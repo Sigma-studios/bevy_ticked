@@ -118,6 +118,7 @@ fn peer(uuid: PlayerUUID) -> App {
                 config: LockstepConfig {
                     host_tick_buffer: 6,
                     client_tick_buffer: 6,
+                    ..default()
                 },
                 ..default()
             },

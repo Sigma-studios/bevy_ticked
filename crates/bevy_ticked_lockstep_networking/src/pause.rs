@@ -30,6 +30,11 @@ pub fn sync_lockstep_pause_state<A: LockstepAction, S: JoinSnapshot>(world: &mut
 
     let scoped_lobby = host_lobby.or(client_lobby);
     let Some(scoped_lobby) = scoped_lobby else {
+        // Its own reason, let go of: a client that left while waiting on the next
+        // authoritative tick was still waiting on it, alone, for ever.
+        world
+            .resource_mut::<TickHolds>()
+            .release(TickHoldReason::WaitingForPeers);
         return;
     };
 
@@ -48,10 +53,14 @@ pub fn sync_lockstep_pause_state<A: LockstepAction, S: JoinSnapshot>(world: &mut
     let next_tick = current_tick + 1;
 
     let should_pause = if host_lobby.is_some() {
-        // Host: wait for every required participant whose initial buffer window
-        // has elapsed. During the first `buffer` ticks after joining, a
-        // participant's flush has not yet produced actions for `next_tick` — this
-        // is expected and should not block.
+        // Host: wait for every required *client* whose initial buffer window has elapsed.
+        // During the first `buffer` ticks after joining, a client's flush has not yet produced
+        // actions for `next_tick` — this is expected and should not block.
+        //
+        // Never its own. The host's actions go into `next_tick` in the flush that runs right
+        // after this check, so requiring them here asked for an entry that could not exist yet;
+        // with `host_tick_buffer` at zero that was a hold that the flush — which does not run
+        // while held — could never lift. A host alone in its lobby has nobody to wait for.
         let buffer = world.resource::<LockstepConfig>().host_tick_buffer;
 
         let required_participants: Vec<(u128, u64)> = world
@@ -61,24 +70,22 @@ pub fn sync_lockstep_pause_state<A: LockstepAction, S: JoinSnapshot>(world: &mut
                 &LobbyParticipantOf,
             )>()
             .iter(world)
-            .filter(|(_, lockstep, pof)| {
-                pof.0 == scoped_lobby && participant_is_required_for_tick(lockstep, next_tick)
+            .filter(|(participant, lockstep, pof)| {
+                !participant.is_host
+                    && pof.0 == scoped_lobby
+                    && participant_is_required_for_tick(lockstep, next_tick)
             })
             .map(|(p, lockstep, _)| (p.player_uuid, lockstep.joined_at_tick))
             .collect();
 
-        if required_participants.is_empty() {
-            true
-        } else {
-            let tracker = world.resource::<ActionTracker<A>>();
-            required_participants.iter().any(|(uuid, joined_at_tick)| {
-                // Still in the initial buffer window — actions not expected yet.
-                if next_tick <= joined_at_tick + buffer {
-                    return false;
-                }
-                !tracker_has_actions_for_player(tracker, next_tick, *uuid)
-            })
-        }
+        let tracker = world.resource::<ActionTracker<A>>();
+        required_participants.iter().any(|(uuid, joined_at_tick)| {
+            // Still in the initial buffer window — actions not expected yet.
+            if next_tick <= joined_at_tick + buffer {
+                return false;
+            }
+            !tracker_has_actions_for_player(tracker, next_tick, *uuid)
+        })
     } else {
         // Client: the question is "have I received tick N", and nothing finer. An
         // authoritative tick is complete by construction — the host only broadcasts one it

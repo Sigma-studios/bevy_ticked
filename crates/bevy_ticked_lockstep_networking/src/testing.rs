@@ -23,15 +23,33 @@
 //!   arrived and did nothing", which look identical from the far side of a simulation.
 
 use bevy::prelude::*;
+use bevy_ensemble::LobbyParticipant;
 use bevy_ticked::prelude::{CurrentTick, TickHolds};
 
 use crate::{
     ActionTracker, LastScheduledTick, LocalPendingActions, LockstepAction, LockstepConfig,
+    LockstepLobbyParticipant,
 };
 
 /// The tick this peer has simulated up to.
 pub fn current_tick(app: &App) -> u64 {
     app.world().resource::<CurrentTick>().0
+}
+
+/// The tick from which this peer's roster requires `player_uuid`'s actions, or `None` if that
+/// player is not (yet) a lockstep participant here.
+///
+/// On the host it is the number the joiner's grace window is measured from, which is what a
+/// test of the window asserts about; a second `ClientLoaded` used to move it.
+pub fn participant_joined_at(app: &App, player_uuid: u128) -> Option<u64> {
+    let world = app.world();
+    // `try_query` rather than `query`: it needs no `&mut World`, so this composes with a
+    // network's `run_until`, and a world that has never seen the component has nobody on it.
+    let mut query = world.try_query::<(&LobbyParticipant, &LockstepLobbyParticipant)>()?;
+    query
+        .iter(world)
+        .find(|(participant, _)| participant.player_uuid == player_uuid)
+        .map(|(_, lockstep)| lockstep.joined_at_tick)
 }
 
 /// Whether this peer's simulation is currently held.
@@ -98,13 +116,23 @@ pub fn actions_at<A: LockstepAction>(app: &App, tick: u64) -> Vec<A> {
 
 /// Queue an action as though this peer's local input had produced it.
 ///
-/// It is scheduled by the next flush, `buffer` ticks ahead, exactly as a real one would be — so a
-/// test that pushes an action and then asserts about the very next tick is asserting about the
-/// wrong tick.
+/// It is scheduled by the next flush — into the next tick on a host, `buffer` ticks ahead on a
+/// client — exactly as a real one would be, so a test on a client that pushes an action and
+/// then asserts about the very next tick is asserting about the wrong tick.
+///
+/// # Panics
+///
+/// If this peer has no `LocalPendingActions<A>`, which means `A` is not the peer's action type.
+/// It used to do nothing, and an integer literal that defaulted to `i32` on a peer whose
+/// actions were `u8` made a test pass by pushing nothing at all.
 pub fn push_action<A: LockstepAction>(app: &mut App, action: A) {
-    if let Some(mut pending) = app.world_mut().get_resource_mut::<LocalPendingActions<A>>() {
-        pending.0.push(action);
-    }
+    let Some(mut pending) = app.world_mut().get_resource_mut::<LocalPendingActions<A>>() else {
+        panic!(
+            "this peer has no LocalPendingActions<{}>: is that its action type?",
+            std::any::type_name::<A>()
+        );
+    };
+    pending.0.push(action);
 }
 
 #[cfg(test)]

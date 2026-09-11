@@ -1,11 +1,11 @@
-use crate::{ClientLoaded, LastBroadcastTick, LockstepConfig, ParticipantJoined};
+use crate::{ClientAccepted, ClientLoaded, LastBroadcastTick, LockstepConfig, ParticipantJoined};
 use bevy::prelude::*;
 use bevy_ensemble::{
     Host, Lobby, LobbyClient, LobbyClientMessage, LobbyClientPlayerUuid, LobbyMessage,
     LobbyParticipant, LobbyParticipantOf, ReceivedEnsembleMessage,
 };
 use bevy_ticked::tick::CurrentTick;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LockstepLobbyParticipant {
@@ -43,24 +43,22 @@ pub fn add_host_participant(
     }
 }
 
+/// Host: send a client the roster the moment it is accepted, so it knows whose actions to expect.
 pub fn broadcast_participants_to_loaded_clients(
     mut commands: Commands,
     host_lobby: Option<Single<Entity, (With<Lobby>, With<Host>)>>,
     all_participants: Query<(&LobbyParticipant, &LockstepLobbyParticipant, &LobbyParticipantOf)>,
     lobby_clients: Query<(Entity, &LobbyClientPlayerUuid), With<LobbyClient>>,
-    mut client_loaded_messages: MessageReader<ReceivedEnsembleMessage<ClientLoaded>>,
+    mut accepted: MessageReader<ClientAccepted>,
 ) {
     let Some(host_lobby) = host_lobby else {
         return;
     };
 
-    for loaded_client in client_loaded_messages
-        .read()
-        .filter_map(|message| message.sender)
-    {
+    for accepted in accepted.read() {
         let Some((client_entity, _)) = lobby_clients
             .iter()
-            .find(|(_, player_uuid)| player_uuid.0 == loaded_client)
+            .find(|(_, player_uuid)| player_uuid.0 == accepted.player_uuid)
         else {
             continue;
         };
@@ -80,6 +78,26 @@ pub fn broadcast_participants_to_loaded_clients(
     }
 }
 
+/// Host: a loaded client becomes a participant, from a tick far enough ahead that its first
+/// scheduled actions can be there in time.
+///
+/// # The window is sized from the larger buffer
+///
+/// A client schedules `client_tick_buffer` ticks ahead of its own clock, which trails the host's.
+/// The host requires the client's actions from `joined_at_tick + host_tick_buffer + 1`, and the
+/// window between now and then used to be sized from the host's buffer alone. A client whose
+/// buffer was the larger — the adaptive tuner grows it on a bad link, and a player who joined a
+/// LAN host after a satellite session carried it in — had its first scheduled tick land after
+/// the first required one, and the host waited on the gap for ever. The joiner reports its
+/// buffer in [`ClientLoaded`]; the window is the larger of the two.
+///
+/// # Once
+///
+/// A `ClientLoaded` from a uuid that is already a participant is ignored. Re-running this for it
+/// moved its `joined_at_tick` forward, which reopened the grace window in which its missing
+/// actions count as empty — so a client could keep its window open, and its actions optional,
+/// for as long as it kept saying it had loaded. Accepting exactly once also gates the roster
+/// and the catch-up, which read [`ClientAccepted`] rather than the wire.
 pub fn activate_loaded_client_participants(
     mut commands: Commands,
     current_tick: Res<CurrentTick>,
@@ -92,16 +110,18 @@ pub fn activate_loaded_client_participants(
         &LobbyParticipantOf,
     )>,
     mut client_loaded_messages: MessageReader<ReceivedEnsembleMessage<ClientLoaded>>,
+    mut accepted: MessageWriter<ClientAccepted>,
 ) {
     let Some(host_lobby) = host_lobby else {
         return;
     };
 
-    for loaded_client in client_loaded_messages
-        .read()
-        .filter_map(|message| message.sender)
-    {
-        let Some((participant_entity, _, _, _)) =
+    let mut accepted_this_frame = HashSet::new();
+    for message in client_loaded_messages.read() {
+        let Some(loaded_client) = message.sender else {
+            continue;
+        };
+        let Some((participant_entity, _, lockstep_participant, _)) =
             participants
                 .iter()
                 .find(|(_, participant, _, participant_of)| {
@@ -114,11 +134,19 @@ pub fn activate_loaded_client_participants(
             );
             continue;
         };
+        if lockstep_participant.is_some() || !accepted_this_frame.insert(loaded_client) {
+            debug!("ignoring a repeated ClientLoaded from {loaded_client}, already a participant");
+            continue;
+        }
 
-        let joined_at_tick = current_tick.0 + config.host_tick_buffer + 1;
+        let buffer = config.host_tick_buffer.max(message.message.buffer);
+        let joined_at_tick = current_tick.0 + 1 + buffer;
         commands
             .entity(participant_entity)
             .insert(LockstepLobbyParticipant { joined_at_tick });
+        accepted.write(ClientAccepted {
+            player_uuid: loaded_client,
+        });
     }
 }
 
@@ -148,6 +176,13 @@ pub fn broadcast_new_participants_to_existing_clients(
     }
 }
 
+/// Client: apply the roster the host sent.
+///
+/// Runs in `PreUpdate`, after the packets are drained and before the tick loop, so a
+/// participant is on the roster before the first tick of the frame it arrived in. A game that
+/// spawns a player *inside the tick* at `joined_at_tick` — which is the only way every peer
+/// spawns it on the same tick — needs the roster to precede that tick on every peer, and a
+/// roster applied in `Update` reached the tick loop a frame late.
 pub fn apply_received_participants(
     mut commands: Commands,
     mut messages: MessageReader<ReceivedEnsembleMessage<ParticipantJoined>>,
@@ -223,4 +258,3 @@ pub fn apply_pending_lockstep_participants(
 pub fn participant_is_required_for_tick(participant: &LockstepLobbyParticipant, tick: u64) -> bool {
     tick >= participant.joined_at_tick
 }
-

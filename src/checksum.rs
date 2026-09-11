@@ -154,6 +154,17 @@ impl<H: WorldHash> ChecksumLog<H> {
             .min_by_key(|divergence| divergence.tick)
     }
 
+    /// Forget every sample: the world they describe is gone.
+    ///
+    /// A peer that applies a join snapshot has its world replaced and its clock moved, and the
+    /// hashes it took before then are of a different world at ticks whose numbers the new one
+    /// will reuse. Compared against the host's, they read as a desync at the first tick the
+    /// two logs happened to share. The same on leave: the next session starts at tick numbers
+    /// this one already sampled.
+    pub fn clear(&mut self) {
+        self.samples.clear();
+    }
+
     fn record(&mut self, tick: u64, hash: H) {
         self.samples.push((tick, hash));
         if self.samples.len() > self.capacity {
