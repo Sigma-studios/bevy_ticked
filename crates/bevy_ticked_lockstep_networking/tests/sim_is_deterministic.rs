@@ -41,8 +41,9 @@ fn guard() -> SourceGuard {
             Exception {
                 path: "examples/block_placer.rs",
                 needle: "Sprite",
-                reason: "sprites are spawned by `setup`, the join systems and `sync_visuals`, \
-                         all in Update; `apply_actions` in the tick writes only game state",
+                reason: "sprites are attached in Update by `attach_visuals` to the bodies the \
+                         tick spawned bare; `spawn_joined_players` and `apply_actions` in the \
+                         tick write only game state",
                 expires: None,
             },
         ])

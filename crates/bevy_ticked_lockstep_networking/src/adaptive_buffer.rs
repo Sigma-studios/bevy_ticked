@@ -53,14 +53,6 @@ use bevy_ticked::prelude::SECONDS_PER_TICK;
 
 use crate::LockstepConfig;
 
-/// Never buffer fewer than this many ticks, even on a perfect connection.
-///
-/// Four rather than two, and for the same reason as [`AdaptiveBufferTuning::extra_ticks`]: on a
-/// link fast enough that the RTT rounds to nothing, the two ticks of scheduling overhead are the
-/// *whole* cost, and a floor that does not cover them leaves a LAN game running its simulation at
-/// half speed. Measured before the change: 32 Hz on a 15 ms link.
-const MIN_BUFFER: u64 = 4;
-
 /// The two numbers that decide the trade between input latency and tick rate.
 ///
 /// Split out of the constants they used to be so they can be measured rather than argued about.
@@ -110,6 +102,15 @@ pub struct AdaptiveBufferTuning {
     /// Also, implicitly, a decision that a link needing more than this is not worth playing on:
     /// past the cap the session runs slower than wall-clock and stays that way.
     pub max_buffer: u64,
+    /// Never buffer fewer than this many ticks, even on a perfect connection.
+    ///
+    /// Four by default, and for the same reason as [`extra_ticks`](Self::extra_ticks): on a
+    /// link fast enough that the RTT rounds to nothing, the ticks of scheduling overhead are the
+    /// *whole* cost, and a floor that does not cover them leaves a LAN game running its
+    /// simulation at half speed. Measured with a floor of two: 32 Hz on a 15 ms link. A game
+    /// that has measured its own overhead sets it; the tuner never goes below one, because a
+    /// client that schedules for the tick about to run is late by definition.
+    pub min_buffer: u64,
 }
 
 impl Default for AdaptiveBufferTuning {
@@ -126,6 +127,7 @@ impl Default for AdaptiveBufferTuning {
             // input latency — at 1 s RTT they waited 1065 ms either way — it only decided whether
             // they waited it at 29 Hz or at 64 Hz.
             max_buffer: 96,
+            min_buffer: 4,
         }
     }
 }
@@ -158,6 +160,19 @@ pub struct AdaptiveBufferState {
     /// [`update_estimates`].
     jitter: f32,
     frames_since_shrink: u32,
+}
+
+impl AdaptiveBufferState {
+    /// The smoothed round trip the buffer is currently sized from, or `None` before the first
+    /// sample and again after a session ends.
+    ///
+    /// The estimate is about a link, and a lobby that goes takes its link with it: the next
+    /// lobby is joined on whatever connection *it* has, and an estimate carried over from the
+    /// last one sized the new session's buffer for a peer that was no longer there. The
+    /// lockstep plugin resets this with the lobby; this is how a test sees that it did.
+    pub fn rtt_estimate(&self) -> Option<f32> {
+        self.ema_rtt
+    }
 }
 
 /// Drives [`LockstepConfig`] from [`PeerRtt`]. See the module docs.
@@ -220,7 +235,8 @@ fn target_buffer(state: &AdaptiveBufferState, tuning: &AdaptiveBufferTuning) -> 
     // under full tick rate on a steady link and dips below it whenever the link is not steady.
     let latency = tuning.rtt_factor * ema_rtt + JITTER_SAFETY * state.jitter;
     let ticks = (latency / SECONDS_PER_TICK).ceil() as u64 + tuning.extra_ticks;
-    Some(ticks.clamp(MIN_BUFFER, tuning.max_buffer))
+    let floor = tuning.min_buffer.max(1);
+    Some(ticks.clamp(floor, tuning.max_buffer.max(floor)))
 }
 
 /// Move `buffer` toward `target`: up at once, down a tick at a time.
@@ -330,7 +346,7 @@ mod tests {
 
         assert_eq!(
             target_buffer(&state, &tuning()),
-            Some(MIN_BUFFER),
+            Some(tuning().min_buffer),
             "a link with no measurable latency still costs a tick each side to schedule and \
              apply, and a buffer that does not cover it runs the simulation at half speed"
         );
