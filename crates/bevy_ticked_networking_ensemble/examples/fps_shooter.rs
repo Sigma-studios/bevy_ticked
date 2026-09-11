@@ -132,7 +132,13 @@ fn main() {
             display_name: "Player".into(),
             ..default()
         })
-        .add_plugins(TickedPlugin::default())
+        // `Hz`, not the default `FixedUpdate`: a networked client steers its prediction lead
+        // by running a couple of percent fast or slow, which only a clock this crate owns can
+        // do. The networking plugins refuse to build on `FixedUpdate`.
+        .add_plugins(TickedPlugin {
+            source: TickSource::Hz(64.0),
+            ..default()
+        })
         .add_plugins(PhysicsPlugins::new(TickedSimulation))
         .insert_resource(Gravity(Vec3::NEG_Y * 9.81))
         // bevy_elan in driven mode: every controller system runs chained inside
@@ -484,9 +490,12 @@ fn capture_local_input(
 // --- Simulation systems (run in TickedSimulation) ---
 
 /// Feed elan its clock from the tick counter so its timers are deterministic.
-fn set_controller_time(tick: Res<CurrentTick>, mut controller_time: ResMut<ControllerTime>) {
-    controller_time.delta = SECONDS_PER_TICK;
-    controller_time.elapsed = tick.0 as f32 * SECONDS_PER_TICK;
+///
+/// From `Time`, which inside a tick *is* the tick clock: `delta` is one tick and `elapsed` is
+/// `tick * timestep`, on the first run and on every replay.
+fn set_controller_time(time: Res<Time>, mut controller_time: ResMut<ControllerTime>) {
+    controller_time.delta = time.delta_secs();
+    controller_time.elapsed = time.elapsed_secs();
 }
 
 /// Apply this tick's inputs to each player: drive elan's `ControllerInput`,
@@ -533,7 +542,7 @@ fn apply_inputs(
 }
 
 fn move_bullets(world: &mut World) {
-    let dt = SECONDS_PER_TICK;
+    let dt = world.resource::<Time>().delta_secs();
     let tick = world.resource::<CurrentTick>().0;
 
     // Bullets are spawned only on the host and replicated to clients via

@@ -151,7 +151,7 @@ pub fn latest<T: Component + Clone>(app: &App, id: u64) -> Option<T> {
     app.world().get::<T>(entity).cloned()
 }
 
-/// A copy of a peer's input queue with the order made stable.
+/// A copy of a peer's input queue, taken at one instant so a test can look at it twice.
 #[derive(Clone, Debug)]
 pub struct InputQueueView<I> {
     inputs: BTreeMap<u64, BTreeMap<u128, I>>,
@@ -195,18 +195,6 @@ pub fn input_queue<I: TickedInput>(app: &App) -> InputQueueView<I> {
         .get_resource::<InputQueue<I>>()
         .expect("neither role plugin is on this peer, so it has no input queue");
     InputQueueView {
-        inputs: queue
-            .inputs
-            .iter()
-            .map(|(tick, players)| {
-                (
-                    *tick,
-                    players
-                        .iter()
-                        .map(|(uuid, input)| (*uuid, input.clone()))
-                        .collect(),
-                )
-            })
-            .collect(),
+        inputs: queue.inputs.clone(),
     }
 }

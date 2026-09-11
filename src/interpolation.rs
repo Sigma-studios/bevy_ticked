@@ -96,6 +96,15 @@ pub struct TickedInterpolationPlugin;
 /// transform is not necessarily a registered component, and an entity that is
 /// merely *drawn* from the simulation should not have to be replicated to be
 /// smooth.
+///
+/// # The blend never reaches the simulation
+///
+/// The blended value is written into `Transform` for the renderer, and put back before the
+/// next tick reads it ([`TickedSystems::Restore`](crate::TickedSystems::Restore)). It used to
+/// stay: the tick then integrated from a transform that was `fraction` of the way back toward
+/// the previous tick, and a body meant to cross 99 units in 99 ticks crossed 75. Every consumer
+/// that measured it read it as "physics feels floaty under Hz" and pinned the tick source to
+/// `FixedUpdate` to make it go away.
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct TickedInterpolation {
     previous: Option<Transform>,
@@ -103,6 +112,11 @@ pub struct TickedInterpolation {
 }
 
 impl TickedInterpolation {
+    /// The transform as the simulation last left it: the true state, not a blend.
+    pub fn current(&self) -> Option<Transform> {
+        self.current
+    }
+
     /// The blend of the last two tick states at `fraction` through the tick.
     ///
     /// `None` until two ticks have been seen, so the first frame after a spawn
@@ -125,7 +139,10 @@ impl Plugin for TickedInterpolationPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             crate::TickedLoop,
-            record_tick_states.in_set(crate::TickedSystems::PostTick),
+            (
+                restore_simulation_transform.in_set(crate::TickedSystems::Restore),
+                record_tick_states.in_set(crate::TickedSystems::PostTick),
+            ),
         )
         .add_systems(
             PostUpdate,
@@ -146,6 +163,34 @@ fn record_tick_states(mut bodies: Query<(&Transform, &mut TickedInterpolation)>)
     for (transform, mut interpolation) in &mut bodies {
         interpolation.previous = interpolation.current;
         interpolation.current = Some(*transform);
+    }
+}
+
+/// Before anything in the loop reads a transform, put the true one back.
+///
+/// `GlobalTransform` too, for entities with no parent: propagation only runs in `PostUpdate`,
+/// so between it and the next tick the global transform is the blend, and a physics engine or
+/// a raycast reading it inside the tick would see the presentation value.
+fn restore_simulation_transform(
+    mut bodies: Query<(
+        &mut Transform,
+        Option<&mut GlobalTransform>,
+        Has<ChildOf>,
+        &TickedInterpolation,
+    )>,
+) {
+    for (mut transform, global, has_parent, interpolation) in &mut bodies {
+        let Some(current) = interpolation.current else {
+            continue;
+        };
+        if *transform != current {
+            *transform = current;
+            if let Some(mut global) = global
+                && !has_parent
+            {
+                *global = GlobalTransform::from(current);
+            }
+        }
     }
 }
 

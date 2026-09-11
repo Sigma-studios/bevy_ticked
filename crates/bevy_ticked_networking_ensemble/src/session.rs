@@ -45,10 +45,11 @@ use bevy::prelude::*;
 use bevy_ensemble::prelude::*;
 // `PeerRtt` / `PeerRttJitter` come in via the prelude above; named here so the reason they are
 // wanted is legible at the import site.
-use bevy_ensemble::{PeerRtt, PeerRttJitter};
+use bevy_ensemble::{LobbyClientPlayerUuid, PeerRtt, PeerRttJitter};
 use bevy_ticked::prelude::*;
 use bevy_ticked::time::{Ticked, TickedTime};
 use bevy_ticked_networking::client::{ClientTickBuffer, LocalClientPlayer};
+use bevy_ticked_networking::messages::PeerLeft;
 use bevy_ticked_networking::server::{LocalServerPlayer, SnapshotRecipients};
 
 use crate::handshake::RegistryMismatch;
@@ -64,6 +65,7 @@ impl Plugin for TickedEnsembleSessionPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SnapshotRecipients>()
             .add_plugins(crate::handshake::plugin)
+            .add_observer(forget_departed_client)
             .add_systems(
                 Update,
                 (
@@ -258,6 +260,25 @@ fn forget_mismatch(
 ) {
     if mismatch.is_some() && lobbies.is_empty() {
         commands.remove_resource::<RegistryMismatch>();
+    }
+}
+
+/// Tell the server a client is gone, the moment the lobby crate knows it.
+///
+/// A [`LobbyClient`] lives only on the host, and every way a client can go — kicked, timed out
+/// by liveness, or leaving of its own accord — ends with the backend despawning it. That is the
+/// one place all the ways meet, so it is the one place to write [`PeerLeft`], which is what
+/// makes the server forget the departed uuid's inputs and margin. Read here rather than on the
+/// participant entity because the participant is despawned by a command queued *from* this
+/// same removal, one flush later, and the uuid is still on the client entity while `Remove`
+/// runs.
+fn forget_departed_client(
+    remove: On<Remove, LobbyClient>,
+    uuids: Query<&LobbyClientPlayerUuid>,
+    mut commands: Commands,
+) {
+    if let Ok(uuid) = uuids.get(remove.entity) {
+        commands.trigger(PeerLeft(uuid.0));
     }
 }
 

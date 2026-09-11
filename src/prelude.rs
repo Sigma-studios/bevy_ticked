@@ -1,8 +1,9 @@
 pub use crate::{
     checksum::{ChecksumLog, ChecksumLogPlugin, Divergence, WorldHash},
     diagnostics::TickCost,
-    MaxTicksPerFrame, RunTickedLoop, TickSource, TickedLoop, TickedPlugin, TickedSimulation,
-    TickedSystems,
+    ConfiguredTickSource, HistoryWindowChosen, MaxTicksPerFrame, RestoredThisPass, RunTickedLoop, SimulationExecutor,
+    StepOnce, TickSource,
+    TickedLoop, TickedPlugin, TickedSimulation, TickedSystems, require_steerable_tick_source,
     events::{
         TickedEvent, TickedEventAppExt, TickedEventReader, TickedEventRegistry, TickedEventWriter,
         TickedEvents,

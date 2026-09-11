@@ -150,6 +150,7 @@ fn hz_app(hz: f64, frame_delta: Duration, max_ticks_per_frame: u32) -> App {
         .add_plugins(TickedPlugin {
             source: TickSource::Hz(hz),
             max_ticks_per_frame,
+            ..default()
         })
         .init_resource::<Observed>()
         .insert_resource(TimeUpdateStrategy::ManualDuration(frame_delta))

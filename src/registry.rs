@@ -293,6 +293,27 @@ impl TickedComponentRegistry {
         self.report_husks(world, tick);
     }
 
+    /// Restore only the types that never travel: registered here without serialization, so
+    /// no snapshot can carry them.
+    ///
+    /// A client applying an authoritative snapshot for `tick` gets every networked type from
+    /// the wire, and used to get nothing for the rest: a rollback-only component kept whatever
+    /// value the client's last predicted tick left in it, and the replay from `tick` started
+    /// from a state that was half the authority's and half the client's future. This puts the
+    /// local half back to what it was at `tick`, from history; the networked half is the
+    /// snapshot's job. Husks are not reported: the snapshot's absence rule has already
+    /// despawned what should not exist.
+    pub fn restore_local_only(&self, world: &mut World, tick: u64) {
+        for entry in &self.inner.entries {
+            if entry.serialize_at.is_none() {
+                (entry.restore)(world, tick);
+            }
+        }
+        if let Some(resources) = world.get_resource::<TickedResourceRegistry>().cloned() {
+            resources.restore_local_only(world, tick);
+        }
+    }
+
     /// Warn about tracked entities with no saved state at `tick`.
     fn report_husks(&self, world: &mut World, tick: u64) {
         // Only meaningful if the tick was captured at all; restoring an unknown
@@ -461,27 +482,27 @@ impl TickedAppExt for App {
 // --- Type-erased dispatch functions ---
 
 fn capture_component<T: TickedComponent>(world: &mut World, tick: u64) {
-    let mut state: HashMap<u64, T> = HashMap::new();
+    // A recycled map and the cached query: after warm-up neither line allocates, and nothing
+    // below does either, unless `T::clone` does. See `WorldActions` for why that matters.
+    let (mut state, query) = {
+        let mut actions = world.resource_mut::<WorldActions<T>>();
+        (actions.take_map(), actions.take_query())
+    };
+    let mut query = query.unwrap_or_else(|| world.query::<(&TickTrackedEntity, &T)>());
 
-    let mut query = world.query::<(&TickTrackedEntity, &T)>();
     for (net_id, component) in query.iter(world) {
         state.insert(net_id.0, component.clone());
     }
 
-    world
-        .resource_mut::<WorldActions<T>>()
-        .set_tick(tick, state);
+    let mut actions = world.resource_mut::<WorldActions<T>>();
+    actions.set_tick(tick, state);
+    actions.put_query(query);
 }
 
 fn restore_component<T: TickedComponent>(world: &mut World, tick: u64) {
-    let saved = world
-        .resource::<WorldActions<T>>()
-        .at_tick(tick)
-        .cloned();
-
-    let Some(saved) = saved else {
+    if world.resource::<WorldActions<T>>().at_tick(tick).is_none() {
         return;
-    };
+    }
 
     let mut query = world.query::<(Entity, &TickTrackedEntity)>();
     let entity_map: Vec<(Entity, u64)> = query
@@ -489,9 +510,17 @@ fn restore_component<T: TickedComponent>(world: &mut World, tick: u64) {
         .map(|(entity, net_id)| (entity, net_id.0))
         .collect();
 
+    // One component cloned at a time, rather than the whole tick's map cloned up front: the
+    // saved map is read between two mutations of the world, and cloning it was an allocation
+    // the size of the world on every rollback.
     for (entity, net_id) in &entity_map {
-        if let Some(component) = saved.get(net_id) {
-            world.entity_mut(*entity).insert(component.clone());
+        let saved = world
+            .resource::<WorldActions<T>>()
+            .at_tick(tick)
+            .and_then(|state| state.get(net_id))
+            .cloned();
+        if let Some(component) = saved {
+            world.entity_mut(*entity).insert(component);
         } else {
             world.entity_mut(*entity).remove::<T>();
         }
