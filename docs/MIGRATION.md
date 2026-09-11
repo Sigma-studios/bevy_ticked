@@ -6,6 +6,150 @@ what to change in a game, and why. Both peers of a session must be built from th
 Phases that changed `bevy_ensemble` too say which of its commits they pin; that crate's own
 `docs/MIGRATION.md` covers what changed there.
 
+## T6 — lockstep part 1: join, checksum, late actions, trust
+
+One wire change: `ClientLoaded` carries the joiner's tick buffer. Both peers must be rebuilt;
+`bevy_ensemble`'s protocol hash covers it, so a stale peer is refused at the handshake rather
+than joined and hung.
+
+### The join no longer depends on the two buffers agreeing (F23)
+
+**Before** the host sized a joiner's grace window from `host_tick_buffer` alone, and the joiner
+started its scheduled sequence wherever `client_tick_buffer` put it. When the joiner's buffer
+was the larger — the adaptive tuner grows it on a bad link, and a client that had played on
+satellite and then joined a LAN host carried it in — the joiner's first scheduled tick landed
+after the first tick the host required of it, and the host waited for the ticks in between for
+ever.
+
+**After** `ClientLoaded { buffer }` tells the host what the joiner schedules with, and
+`joined_at_tick = current + 1 + max(host_tick_buffer, joiner's buffer)`. On the joiner,
+`LastScheduledTick` is set to the snapshot's tick once the game has applied it, so the first
+flush fills forward from there; the host drops the batches for ticks it has already simulated.
+When a lobby goes, `LockstepConfig` goes back to what the plugin was built with
+(`InitialLockstepConfig` holds it) and `AdaptiveBufferState` is reset, so a buffer grown on one
+link is not carried into a session on another.
+
+**What to change** Nothing in a game that used `LockstepPlugin` as documented. A game that
+constructed `ClientLoaded` itself gives it the buffer. A game that constructed `LockstepConfig`
+by field adds `..default()` (it has a new field, below).
+
+### The host has no input lag, and never waits on itself (F29)
+
+**Before** the host scheduled its own actions `host_tick_buffer` ahead, as though it were a
+client of itself, and its pause check required its own entry — which the flush that would have
+inserted it does not run while held. With `host_tick_buffer: 0` that was a session that never
+started.
+
+**After** the host's actions go into the tick about to run; the authoritative broadcast carries
+them to every client with that tick. `host_tick_buffer` is what it always effectively was: the
+grace window a client's actions get after its `joined_at_tick`. It is clamped to at least one
+at build, with a warning. The host's own participant is never in the set the pause check or the
+broadcast waits on. A peer with no `LocalMultiplayerPlayerId` drops its local actions with a
+`warn_once!` rather than filing them under uuid 0, a player no roster contains.
+`AdaptiveBufferTuning::min_buffer` (default 4, never below 1) replaces the private constant.
+
+**What to change** A game that read `host_tick_buffer` as "the host's input lag" reads it as
+the grace window. A game that measured host-side input latency measures it again.
+
+### The checksum log follows the session (F24)
+
+**Before** a peer's `ChecksumLog` sampled whenever it ticked, lobby or not, and kept what it
+had across a join. A player who idled in a menu and then joined had samples at tick numbers
+the host was also at, of a different world, and the exchange reported a desync at the first tick
+both logs shared.
+
+**After** `ChecksumLog::clear()` (new, core crate) is called when a join snapshot arrives and
+when the lobby goes; the exchange's parked reports go with it. `JoinSnapshotReceived` (local,
+never on the wire) is the untyped message that carries "the world is about to be replaced" to
+parts of the crate that do not know the game's snapshot type; the exchange reads it after
+`LockstepJoinSet::ApplyJoinSnapshot` and before the finalize set flips the client to ready.
+`bevy_ticked_lockstep_networking::ChecksumLogPlugin` is now the lockstep crate's own: the core
+sampler gated on `With<Lobby>`, with the same `in_set`. It samples nothing while there is no
+lobby unless built with `.sample_without_lobby()`.
+
+```rust
+// Before: the core plugin, via the lockstep crate's re-export
+app.add_plugins(ChecksumLogPlugin::<MyHash>::default());
+// After: the same line, now the lockstep sampler. To keep sampling solo:
+app.add_plugins(ChecksumLogPlugin::<MyHash>::default().sample_without_lobby());
+```
+
+**What to change** A game that relied on solo samples — a determinism test comparing two solo
+runs — adds `.sample_without_lobby()`, or names `bevy_ticked::checksum::ChecksumLogPlugin`
+explicitly. A game that imports both preludes and names `ChecksumLogPlugin` unqualified now has
+two: import the one it means. `bevy_ticked_testing`'s lockstep peers use the core plugin and are
+unaffected.
+
+### Late and far-future client actions (F25)
+
+**Before** `receive_client_actions` merged whatever a client scheduled, for whatever tick. An
+action for a tick the host had already simulated changed the host's record of it: the clients
+had applied the tick without it, the next client to join was caught up *with* it from the
+tracker, and the two disagreed from then on. This happens on every join — the joiner's first
+flush now fills from its snapshot tick, and the host is past that by the time the batch lands.
+An action for a tick a million ahead was a tracker entry kept for a million ticks. A client
+that requested a snapshot and went quiet pinned the tracker's floor for the rest of the session.
+
+**After** the host drops a batch for `tick <= current` and for `tick > current +
+action_horizon`, with a `debug!` each. `LockstepConfig::action_horizon` is new, default 128.
+`PendingClientJoins` forgets a uuid when its `LobbyClient` is removed
+(`forget_departed_client_joins`, an observer on `Remove`) and when it has been pending longer
+than `PENDING_JOIN_WINDOW_TICKS` (4096) — the tracker's keep-floor is bounded by that.
+
+**What to change** `LockstepConfig { .. }` literals add `..default()`. A game that read
+`PendingClientJoins` to keep its own catch-up state reads it knowing entries can leave.
+
+### Trust (F27)
+
+**Before** every message from a client was taken at face value.
+
+**After**
+- A `JoinSnapshotRequest` from a uuid that is already a participant is ignored; a repeat from
+  the same uuid within `JOIN_SNAPSHOT_REQUEST_INTERVAL` (1 s, on the frame clock) is answered
+  by the capture already under way. `LastJoinSnapshotRequests` is the bookkeeping.
+- A `ClientLoaded` from a uuid that is already a participant is ignored: it used to re-issue
+  `joined_at_tick`, which reopened the grace window in which the sender's missing actions
+  count as empty. The three systems that read `ClientLoaded` off the wire now read
+  `ClientAccepted` (local, never on the wire), written once per accepted join by
+  `activate_loaded_client_participants`.
+- `ClientScheduledActions` and `ChecksumReport` are accepted only from
+  `LockstepLobbyParticipant`s of the local lobby.
+- On the host a `ChecksumReport` latches `Desync` only against the host's own sample at that
+  tick; a report for a tick the host has no sample for is dropped, not parked. A client still
+  parks, because it is behind the host by construction.
+
+**What to change** Nothing, unless a game sent one of these itself. A game whose clients sent
+`ClientLoaded` more than once — some did, on every snapshot — sees the repeats logged at
+`debug` and ignored.
+
+### The roster is applied before the tick loop
+
+`apply_received_participants` and `apply_pending_lockstep_participants` moved from `Update` to
+`PreUpdate`, after `EnsembleSet::ReceivePackets`. A participant is on the roster before the
+first tick of the frame its `ParticipantJoined` arrived in, which is what lets a game spawn the
+player *inside the tick* at `joined_at_tick` and have every peer do it on the same tick. A game
+that ordered against those systems in `Update` removes the ordering.
+
+### `block_placer` (F28)
+
+The example spawns players inside `TickedSimulation` from the roster's `joined_at_tick`
+(`spawn_joined_players`), sorted by uuid, rather than from an `Update` observer on the frame
+the roster arrived — which was a different tick on every peer. Sprites are attached in `Update`
+by `attach_visuals` to the bodies the tick spawned bare. The join snapshot carries velocity;
+one that carried only positions handed the joiner a body at rest where the host's was moving.
+`ChecksumLogPlugin<GameHash>` (in `PhysicsSystems::Last`) and `ChecksumExchangePlugin` are
+wired in, and a desync is an `error!` and a line in the UI. A departed player's body stays:
+there is no tick every peer agrees the player left on until part 2 puts a leave on the tick
+timeline, and despawning on the frame the roster changed would desync exactly as the old
+spawn did.
+
+### Tests
+
+`crates/bevy_ticked_lockstep_networking/tests/{join_buffers,checksum_lifecycle,trust}.rs`, over
+a shared `tests/common` fixture whose world is one counter. `testing::participant_joined_at` is
+new; `testing::push_action` panics when the peer has no `LocalPendingActions<A>` (an integer
+literal defaulting to `i32` on a `u8` peer used to push nothing and pass).
+
 ## T5 — `TickHolds`: one pause vocabulary
 
 Nothing on the wire changed.

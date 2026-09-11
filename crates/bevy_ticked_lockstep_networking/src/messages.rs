@@ -11,8 +11,19 @@ pub struct JoinSnapshotResponse<S> {
     pub snapshot: S,
 }
 
+/// A client has applied its join snapshot and is simulating from it.
+///
+/// Carries the client's tick buffer because the host sizes the joiner's grace window from it. A
+/// joiner schedules its actions `client_tick_buffer` ticks ahead of its own clock, and the host
+/// used to size the window from *its own* buffer alone — so a client whose adaptive buffer had
+/// grown to forty on a satellite link, joining a LAN host whose buffer was four, had its first
+/// scheduled tick land well past the first tick the host required of it, and the host waited on
+/// the ticks in between for ever.
 #[derive(Message, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct ClientLoaded;
+pub struct ClientLoaded {
+    /// The sender's `LockstepConfig::client_tick_buffer` at the moment it loaded.
+    pub buffer: u64,
+}
 
 #[derive(Message, Serialize, Deserialize, Debug, Clone)]
 pub struct ClientScheduledActions<A> {
@@ -80,4 +91,33 @@ impl<S> JoinSnapshotApplied<S> {
             marker: PhantomData,
         }
     }
+}
+
+/// Local, never on the wire: a join snapshot has arrived and is about to replace this peer's
+/// world.
+///
+/// The untyped twin of [`ApplyJoinSnapshot`], for the parts of this crate that do not know the
+/// game's snapshot type and still have to act on the world being swapped out — the checksum
+/// exchange, which must forget every hash it took of the world that is going. It is written in
+/// the same frame and before [`LockstepJoinSet::ApplyJoinSnapshot`], so a reader ordered after
+/// that set sees it before the first tick of the new world is sampled.
+///
+/// [`LockstepJoinSet::ApplyJoinSnapshot`]: crate::LockstepJoinSet::ApplyJoinSnapshot
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JoinSnapshotReceived {
+    pub snapshot_tick: u64,
+}
+
+/// Local, never on the wire: the host accepted a [`ClientLoaded`] and made its sender a
+/// participant.
+///
+/// Three systems used to read `ClientLoaded` off the wire independently — one to activate the
+/// participant, one to send it the roster, one to send it the ticks it missed — and each of them
+/// re-ran for every copy a client sent. A second `ClientLoaded` from an established participant
+/// re-issued its `joined_at_tick`, which reopened its grace window, and re-sent a catch-up whose
+/// ticks the client had already simulated. Now one system decides, once, and the others act on
+/// its decision.
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClientAccepted {
+    pub player_uuid: u128,
 }

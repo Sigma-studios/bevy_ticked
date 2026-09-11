@@ -1,15 +1,14 @@
 use crate::{
-    ActionTracker, ClientSnapshotState, JoinSnapshot, LastBroadcastTick, LastScheduledTick,
-    LocalPendingActions,
+    ActionTracker, AdaptiveBufferState, ClientSnapshotState, InitialLockstepConfig, JoinSnapshot,
+    LastBroadcastTick, LastJoinSnapshotRequests, LastScheduledTick, LocalPendingActions,
     LockstepAction, PendingClientJoins, PendingJoinSnapshotFlushes,
     PendingLockstepParticipantJoins, StashedAuthoritativeTicks,
     activate_loaded_client_participants, add_host_participant,
     apply_pending_lockstep_participants, apply_received_participants,
-    broadcast_authoritative_actions,
-    broadcast_buffered_authoritative_actions_to_loaded_clients,
+    broadcast_authoritative_actions, broadcast_buffered_authoritative_actions_to_loaded_clients,
     broadcast_new_participants_to_existing_clients, broadcast_participants_to_loaded_clients,
     cleanup_old_tracker_entries, flush_pending_actions, flush_provided_join_snapshots,
-    receive_authoritative_actions, receive_client_actions,
+    forget_departed_client_joins, receive_authoritative_actions, receive_client_actions,
     receive_join_snapshot_requests, receive_join_snapshot_responses,
     replay_stashed_authoritative_actions, request_join_snapshot_on_client_join,
     send_client_loaded_after_snapshot_applied, sync_lockstep_pause_state,
@@ -21,8 +20,23 @@ use std::marker::PhantomData;
 
 #[derive(Resource, Clone, Copy, Debug)]
 pub struct LockstepConfig {
+    /// The grace window the host gives a client's actions, in ticks: from a client's
+    /// `joined_at_tick`, this many ticks of missing actions count as empty before the host waits
+    /// on them. Also the window a joiner's `joined_at_tick` is placed after, when the joiner's
+    /// own buffer is not larger. Never below one; a zero is clamped at build.
+    ///
+    /// Not the host's own input lag: the host's actions go into the tick about to run.
     pub host_tick_buffer: u64,
+    /// How many ticks ahead of its own clock a client schedules its actions, so that they have
+    /// crossed the link and been ruled on before the tick they name is simulated.
     pub client_tick_buffer: u64,
+    /// How far past the host's current tick a client may schedule, in ticks.
+    ///
+    /// Every tick a client names is a tracker entry the host keeps until it simulates that
+    /// tick. Without a bound one message could reserve a tick at `u64::MAX`, kept for ever, or
+    /// a million of them. 128 is two seconds at 64 Hz — more than the largest buffer the
+    /// adaptive tuner will size, with room for a client whose clock has run ahead.
+    pub action_horizon: u64,
 }
 
 impl Default for LockstepConfig {
@@ -30,6 +44,7 @@ impl Default for LockstepConfig {
         Self {
             host_tick_buffer: 6,
             client_tick_buffer: 6,
+            action_horizon: 128,
         }
     }
 }
@@ -55,17 +70,28 @@ impl<A, S> Default for LockstepPlugin<A, S> {
     }
 }
 
+/// Put every piece of session state back to what it was before the lobby existed.
+///
+/// Including the buffer. The adaptive tuner writes `LockstepConfig`, and what it wrote is a fact
+/// about a link that is gone: a client whose buffer had grown to forty on a bad link carried it
+/// into the next session, on whatever link that was, and paid the input latency until the tuner
+/// had shrunk it back a tick every two seconds. The tuner's smoothed estimate goes with it, or
+/// the next session's first samples are averaged into a round trip nobody measured on it.
 fn reset_lockstep_state_on_lobby_removed<A: LockstepAction, S: JoinSnapshot>(
     mut removed_lobbies: RemovedComponents<Lobby>,
     mut tracker: ResMut<ActionTracker<A>>,
     pending_actions: Option<ResMut<LocalPendingActions<A>>>,
     mut pending_client_joins: ResMut<PendingClientJoins>,
+    mut last_requests: ResMut<LastJoinSnapshotRequests>,
     mut pending_participant_joins: ResMut<PendingLockstepParticipantJoins>,
     mut stashed_ticks: ResMut<StashedAuthoritativeTicks<A>>,
     mut last_broadcast_tick: ResMut<LastBroadcastTick>,
     mut last_scheduled_tick: ResMut<LastScheduledTick>,
     mut snapshot_state: ResMut<ClientSnapshotState<S>>,
     mut pending_snapshot_flushes: ResMut<PendingJoinSnapshotFlushes<S>>,
+    initial_config: Res<InitialLockstepConfig>,
+    mut config: ResMut<LockstepConfig>,
+    adaptive_state: Option<ResMut<AdaptiveBufferState>>,
 ) {
     if removed_lobbies.read().next().is_none() {
         return;
@@ -75,6 +101,7 @@ fn reset_lockstep_state_on_lobby_removed<A: LockstepAction, S: JoinSnapshot>(
         pending_actions.0.clear();
     }
     pending_client_joins.0.clear();
+    last_requests.0.clear();
     pending_participant_joins.0.clear();
     stashed_ticks.0.clear();
     last_broadcast_tick.0 = 0;
@@ -82,6 +109,10 @@ fn reset_lockstep_state_on_lobby_removed<A: LockstepAction, S: JoinSnapshot>(
     last_scheduled_tick.0 = None;
     snapshot_state.ready = true;
     pending_snapshot_flushes.pending.clear();
+    *config = initial_config.0;
+    if let Some(mut adaptive_state) = adaptive_state {
+        *adaptive_state = AdaptiveBufferState::default();
+    }
 }
 
 impl<A, S> Plugin for LockstepPlugin<A, S>
@@ -90,10 +121,21 @@ where
     S: JoinSnapshot,
 {
     fn build(&self, app: &mut App) {
-        app.insert_resource(self.config)
+        let mut config = self.config;
+        if config.host_tick_buffer == 0 {
+            // A zero was a hang: the host's pause check required its own entry for the tick its
+            // flush had not yet inserted, held, and the flush does not run while held. The
+            // host no longer waits on itself, but a client's grace window of zero ticks still
+            // asks its first batch to arrive before it can have been sent.
+            warn!("LockstepConfig::host_tick_buffer of 0 is clamped to 1");
+            config.host_tick_buffer = 1;
+        }
+        app.insert_resource(config)
+            .insert_resource(InitialLockstepConfig(config))
             .init_resource::<ActionTracker<A>>()
             .init_resource::<LocalPendingActions<A>>()
             .init_resource::<PendingClientJoins>()
+            .init_resource::<LastJoinSnapshotRequests>()
             .init_resource::<PendingLockstepParticipantJoins>()
             .init_resource::<StashedAuthoritativeTicks<A>>()
             .init_resource::<LastBroadcastTick>()
@@ -104,6 +146,9 @@ where
             .add_message::<crate::ApplyJoinSnapshot<S>>()
             .add_message::<crate::JoinSnapshotApplied<S>>()
             .add_message::<crate::ProvideJoinSnapshot<S>>()
+            .add_message::<crate::JoinSnapshotReceived>()
+            .add_message::<crate::ClientAccepted>()
+            .add_observer(forget_departed_client_joins::<S>)
             .configure_sets(
                 Update,
                 (
@@ -178,8 +223,6 @@ where
                             broadcast_buffered_authoritative_actions_to_loaded_clients::<A>,
                         ),
                     broadcast_new_participants_to_existing_clients,
-                    apply_received_participants,
-                    apply_pending_lockstep_participants.after(apply_received_participants),
                     broadcast_buffered_authoritative_actions_to_loaded_clients::<A>,
                     reset_lockstep_state_on_lobby_removed::<A, S>,
                 ),
@@ -199,8 +242,11 @@ where
             // 50ms link leaves at `host_tick_buffer` 6. It is also invisible to the buffer
             // controller, because `PeerRtt` measures the socket seam and this happens above it.
             //
-            // Nothing else moves: the join handshake above is not on the per-tick critical path,
-            // and a frame either way there is not worth the reordering.
+            // The roster is here for a different reason: a participant has to be on it before
+            // the first tick of the frame its `ParticipantJoined` arrived in, or a game that
+            // spawns the player inside the tick at `joined_at_tick` spawns it a tick late on
+            // this peer and on time on the others. The rest of the join handshake is not on the
+            // per-tick critical path and stays in `Update`.
             .add_systems(
                 PreUpdate,
                 (
@@ -211,6 +257,8 @@ where
                     replay_stashed_authoritative_actions::<A, S>
                         .before(receive_authoritative_actions::<A, S>),
                     receive_authoritative_actions::<A, S>,
+                    apply_received_participants,
+                    apply_pending_lockstep_participants.after(apply_received_participants),
                 )
                     .after(EnsembleSet::ReceivePackets),
             );

@@ -1,7 +1,7 @@
 use crate::{
-    ActionTracker, AuthoritativeTick, ClientSnapshotState, LastBroadcastTick, LockstepAction,
-    LockstepConfig, LockstepLobbyParticipant, PendingClientJoins, StashedAuthoritativeTicks,
-    participant_is_required_for_tick,
+    ActionTracker, AuthoritativeTick, ClientAccepted, ClientSnapshotState, LastBroadcastTick,
+    LockstepAction, LockstepConfig, LockstepLobbyParticipant, PendingClientJoins,
+    StashedAuthoritativeTicks, participant_is_required_for_tick,
 };
 use bevy::prelude::*;
 use bevy_ensemble::{
@@ -9,6 +9,18 @@ use bevy_ensemble::{
     LobbyParticipant, LobbyParticipantOf, ReceivedEnsembleMessage,
 };
 use bevy_ticked::tick::CurrentTick;
+
+/// How many ticks a client may stay between "sent a snapshot" and "said it loaded" before the
+/// host stops keeping the tracker for it.
+///
+/// While a join is pending the tracker retains every tick after the snapshot, so the catch-up
+/// can be sent when the client loads. A client that requested a snapshot and then went quiet —
+/// a crash, or a peer written to do exactly this — pinned that floor for the rest of the
+/// session, and the tracker grew by one tick's worth of everybody's actions per tick until the
+/// host ran out of memory. A minute at 64 Hz is far longer than any join that is going to
+/// finish; a client that loads after it is caught up from the current tick and is the one
+/// with the gap.
+pub const PENDING_JOIN_WINDOW_TICKS: u64 = 4096;
 
 pub fn tracker_has_actions_for_player<A>(
     tracker: &ActionTracker<A>,
@@ -42,10 +54,10 @@ pub fn broadcast_buffered_authoritative_actions_to_loaded_clients<A: LockstepAct
     tracker: Res<ActionTracker<A>>,
     mut pending_client_joins: ResMut<PendingClientJoins>,
     lobby_clients: Query<(Entity, &LobbyClientPlayerUuid), With<LobbyClient>>,
-    mut messages: MessageReader<ReceivedEnsembleMessage<crate::ClientLoaded>>,
+    mut accepted: MessageReader<ClientAccepted>,
 ) {
     let end_tick = current_tick.0;
-    for loaded_client in messages.read().filter_map(|message| message.sender) {
+    for loaded_client in accepted.read().map(|accepted| accepted.player_uuid) {
         let Some((client_entity, _)) = lobby_clients
             .iter()
             .find(|(_, player_uuid)| player_uuid.0 == loaded_client)
@@ -137,7 +149,9 @@ pub fn broadcast_authoritative_actions<A: LockstepAction>(
                 pof.0 == *host_lobby && participant_is_required_for_tick(lockstep_participant, tick)
             })
         {
-            if players_actions.contains_key(&participant.player_uuid) {
+            // The host's own actions are in the tick when it is simulated or not at all, so
+            // its entry is never outstanding; an absent one is a tick it did nothing on.
+            if participant.is_host || players_actions.contains_key(&participant.player_uuid) {
                 continue;
             }
             // Participant is required but missing from the tracker for this tick.
@@ -259,13 +273,26 @@ pub fn apply_authoritative_tick<A: Clone>(
     }
 }
 
-/// Remove tracker entries for ticks that have already been simulated and broadcast,
-/// but preserve any ticks still needed by pending client joins.
+/// Remove tracker entries for ticks that have already been simulated and broadcast, but
+/// preserve any ticks still needed by pending client joins — for at most
+/// [`PENDING_JOIN_WINDOW_TICKS`], after which the join is given up on and the floor released.
 pub fn cleanup_old_tracker_entries<A: LockstepAction>(
     mut tracker: ResMut<ActionTracker<A>>,
     current_tick: Res<CurrentTick>,
-    pending_client_joins: Res<PendingClientJoins>,
+    mut pending_client_joins: ResMut<PendingClientJoins>,
 ) {
+    let oldest_kept = current_tick.0.saturating_sub(PENDING_JOIN_WINDOW_TICKS);
+    pending_client_joins.0.retain(|uuid, snapshot_tick| {
+        let kept = *snapshot_tick >= oldest_kept;
+        if !kept {
+            warn!(
+                "giving up on the pending join of {uuid}: it was sent a snapshot for tick \
+                 {snapshot_tick} and has not loaded by tick {}",
+                current_tick.0
+            );
+        }
+        kept
+    });
     let min_keep = pending_client_joins
         .0
         .values()

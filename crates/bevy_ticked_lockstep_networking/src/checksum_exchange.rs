@@ -60,11 +60,15 @@
 //! it makes it by reading [`DesyncDetected`].
 
 use bevy::prelude::*;
-use bevy_ensemble::{EnsembleAppExt, Host, Lobby, LobbyMessage, ReceivedEnsembleMessage, SendMode};
+use bevy_ensemble::{
+    EnsembleAppExt, Host, Lobby, LobbyMessage, LobbyParticipant, LobbyParticipantOf,
+    ReceivedEnsembleMessage, SendMode,
+};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::marker::PhantomData;
 
 use crate::checksum::{ChecksumLog, Divergence, WorldHash};
+use crate::{JoinSnapshotReceived, LockstepJoinSet, LockstepLobbyParticipant};
 
 /// What one peer's world hashed to at one tick.
 ///
@@ -153,6 +157,9 @@ where
             .init_resource::<PendingChecksumReports<H>>()
             .init_resource::<LastAnnouncedChecksum>()
             .add_message::<DesyncDetected<H>>()
+            // Idempotent with `LockstepPlugin`'s own registration, and needed here so this
+            // plugin builds on its own.
+            .add_message::<JoinSnapshotReceived>()
             .register_control_message_type::<ChecksumReport<H>>(
                 "bevy_ticked_lockstep/ChecksumReport",
                 bevy_ensemble::MessageAuthority::Any,
@@ -165,6 +172,12 @@ where
                     compare_arrived_checksums::<H>,
                 )
                     .chain(),
+            )
+            .add_systems(
+                Update,
+                forget_samples_on_join::<H>
+                    .after(LockstepJoinSet::ApplyJoinSnapshot)
+                    .before(LockstepJoinSet::FinalizeJoinSnapshot),
             );
     }
 }
@@ -228,6 +241,22 @@ fn announce_checksum<H>(
 /// solved, because closing it means keeping the search open for ever on the chance of a report
 /// arriving an entire [`ChecksumLog::interval`] late and out of order — a second, on a link whose
 /// reordering is measured in milliseconds, and only ever costing the report a tick's precision.
+///
+/// # Only a participant's report is compared
+///
+/// A report from a uuid that is not on this peer's roster is dropped at the door. A connected
+/// client that has not loaded is simulating nothing, so nothing it reports is a hash of the
+/// session; and the latch is one-shot for the whole session, so a peer that could trip it
+/// with one message could silence the checker for everybody with one message.
+///
+/// # The host parks nothing
+///
+/// A client parks a report for a tick it has not reached because it is behind the host by
+/// construction. The host is behind nobody: a report for a tick it has not sampled is a report
+/// for a tick that does not exist yet, and parking it would let a client choose a tick far in
+/// the future and have the host compare against it — and latch on it — a minute later. On the
+/// host a divergence is only ever what its own log says it is: the reported hash, against the
+/// host's own sample at that tick, and nothing else.
 fn compare_arrived_checksums<H>(
     mut commands: Commands,
     mut arrivals: MessageReader<ReceivedEnsembleMessage<ChecksumReport<H>>>,
@@ -235,7 +264,9 @@ fn compare_arrived_checksums<H>(
     mut detected: MessageWriter<DesyncDetected<H>>,
     log: Res<ChecksumLog<H>>,
     desync: Option<Res<Desync<H>>>,
+    host_lobby: Option<Single<Entity, (With<Lobby>, With<Host>)>>,
     client_lobby: Option<Single<Entity, (With<Lobby>, Without<Host>)>>,
+    participants: Query<(&LobbyParticipant, &LobbyParticipantOf), With<LockstepLobbyParticipant>>,
 ) where
     H: WorldHash + Serialize + DeserializeOwned,
 {
@@ -245,10 +276,26 @@ fn compare_arrived_checksums<H>(
         return;
     }
 
+    let is_host = host_lobby.is_some();
+    let lobby = host_lobby
+        .as_deref()
+        .or(client_lobby.as_deref())
+        .copied();
     for arrival in arrivals.read() {
         let Some(sender) = arrival.sender else {
             continue;
         };
+        if let Some(lobby) = lobby
+            && !participants
+                .iter()
+                .any(|(participant, of)| of.0 == lobby && participant.player_uuid == sender)
+        {
+            debug!(
+                "dropping a checksum report for tick {} from {sender}, which is not a participant",
+                arrival.message.tick
+            );
+            continue;
+        }
         pending.reports.push((sender, arrival.message));
     }
     if pending.reports.is_empty() {
@@ -292,6 +339,14 @@ fn compare_arrived_checksums<H>(
             );
             return false;
         }
+        if is_host {
+            debug!(
+                "dropping a checksum report from {sender} for tick {}, which this host has not \
+                 sampled",
+                report.tick
+            );
+            return false;
+        }
         true
     });
 
@@ -324,12 +379,18 @@ fn compare_arrived_checksums<H>(
     commands.insert_resource(Desync { peer, divergence });
 }
 
-/// Forget a session's divergence when its lobby goes, so the next one is judged on its own.
+/// Forget a session's divergence — and its samples — when its lobby goes, so the next one is
+/// judged on its own.
+///
+/// The samples too, because the next session starts at tick numbers this one already sampled,
+/// and a log that still held this world's hashes at those numbers would compare them against
+/// the next world's and call the difference a desync.
 fn forget_desync_on_lobby_removed<H>(
     mut commands: Commands,
     mut removed_lobbies: RemovedComponents<Lobby>,
     mut pending: ResMut<PendingChecksumReports<H>>,
     mut last_announced: ResMut<LastAnnouncedChecksum>,
+    mut log: ResMut<ChecksumLog<H>>,
 ) where
     H: WorldHash,
 {
@@ -338,7 +399,36 @@ fn forget_desync_on_lobby_removed<H>(
     }
     pending.reports.clear();
     last_announced.0 = None;
+    log.clear();
     commands.remove_resource::<Desync<H>>();
+}
+
+/// Forget every sample when a join snapshot replaces the world.
+///
+/// The samples a joiner took before the join are of the world it was simulating alone — in the
+/// menu, in a single-player warm-up, in the previous session — at tick numbers the snapshot
+/// moves it away from and the new world will reuse. A player who idled a while before joining
+/// had samples at the ticks the host was also at, of a different world, and the exchange
+/// reported a desync at the first tick both logs happened to share.
+///
+/// Ordered after [`LockstepJoinSet::ApplyJoinSnapshot`] and before the finalize set flips the
+/// client to ready, so it runs in the frame the world is replaced and before the first tick of
+/// the new world is sampled. The parked reports go with the samples: they were parked against
+/// a clock that no longer exists.
+fn forget_samples_on_join<H>(
+    mut received: MessageReader<JoinSnapshotReceived>,
+    mut log: ResMut<ChecksumLog<H>>,
+    mut pending: ResMut<PendingChecksumReports<H>>,
+    mut last_announced: ResMut<LastAnnouncedChecksum>,
+) where
+    H: WorldHash,
+{
+    if received.read().next().is_none() {
+        return;
+    }
+    log.clear();
+    pending.reports.clear();
+    last_announced.0 = None;
 }
 
 #[cfg(test)]
