@@ -6,6 +6,85 @@ what to change in a game, and why. Both peers of a session must be built from th
 Phases that changed `bevy_ensemble` too say which of its commits they pin; that crate's own
 `docs/MIGRATION.md` covers what changed there.
 
+## T10 — existence history, spawn/despawn rollback, deterministic ids
+
+**Ids changed shape** (`sequence << 8 | slot`) and the id allocator is on the wire as
+`bevy_ticked::TrackedIdAllocator`, so every peer rebuilds; the handshake refuses a peer from
+before.
+
+### Existence is in the history
+
+**Before** a rewind past a spawn left a husk (still tracked, every registered component
+stripped, captured forever) and a rewind past a despawn could not bring the entity back. A
+client's snapshot despawned anything it did not name, which made a predicted spawn
+impossible: the next snapshot deleted it.
+**After** `TrackedEntityLifetimes` records when each tracked id was born and died, driven
+by the same capture, restore, truncate and prune calls as the component histories.
+`restore_all` tombstones what did not exist at the target tick, revives what did, and
+rebuilds from the histories what a plain despawn destroyed. `apply_full_body` tombstones an
+absent id only if it was born at or before the snapshot's tick; an id spawned after is left
+to the rollback, which knows whether the replay spawns it again. There are no husks.
+
+### `despawn_ticked`
+
+```rust
+// Before
+commands.entity(bullet).despawn();
+// After
+commands.entity(bullet).despawn_ticked();   // TickedEntityCommandsExt, also on EntityWorldMut
+```
+
+A tombstone: the entity and its children are `Disabled` (every query, capture and snapshot
+skips them), it is unindexed, and it is kept until the history window has passed its death.
+A rewind to a tick it was alive at revives it intact, same `Entity`, children, observers and
+local-only state. A plain `despawn` on a tracked entity still works: an observer records the
+death, a rewind past it rebuilds the entity through the spawn path (re-dressed by the game's
+`On<Add, TickTrackedEntity>` observer) with local-only state lost, and it warns once. The
+clippy `disallowed-methods` snippet in `docs/ROLLBACK_RULES.md` catches the rest.
+
+### Ids carry a slot; clients mint
+
+`TickTrackedEntity::new(SpawnerSlot, sequence)`, `.slot()`, `.sequence()`, `SLOT_BITS = 8`.
+The authority is slot `0`; the host gives each client a slot `1..=255` in the welcome
+(`LocalSpawnerSlot`, a core resource; the host holds slot 0). Two peers minting in the same
+tick cannot collide, so a client predicts a spawn — a bullet leaving its own gun — and the
+host, running the same simulation from the relayed input, mints the *same id* and confirms
+it, onto the same entity.
+
+`TickTrackedEntityCounter` is gone. `TrackedIdAllocator` (`next(slot)`, `next_authority()`,
+`raise_to(id)`, `peek(slot)`) is a ticked resource (rolled back, so a replay re-mints the same
+ids) and a networked one (the authority's snapshot corrects a client's slot-0 sequence).
+Spawn with `TrackedSpawner` (`spawn(bundle)` under the local slot, `spawn_by(slot, bundle)`
+under the shooter's) or `TrackedWorldExt::{spawn_tracked, spawn_tracked_by}`; a mint whose id
+has a tombstone revives it. `HealthWarnings.client_minted_tracked_id` now means a client
+minted under the authority's slot.
+
+**Delete** the game's `spawn_tracked`/`LocalPlayerUuid` authority module, its host-only
+gate around bullet spawns, its `debug_assert!` on the counter, and every `Explosion`-style
+tracked entity that existed only to fire a sound on every peer (a `TickedEvent` does that).
+**Watch** a test that asserted sequential ids (`[1, 2, 3]`): the authority's are now
+`[256, 512, 768]`; spell them with `TickTrackedEntity::new(SpawnerSlot::AUTHORITY, n)`.
+
+### The examples and the harness
+
+Both examples now add `TickedEnsembleSessionPlugin::default()` and drop their hand-rolled
+`on_lobby_ready`: the session plugin adopts the roles, runs the registry handshake and hands
+each client a slot. Player bodies carry a networked `PlayerSlot(u8)` set by the host from
+`SpawnerSlots` (0 for itself); a body is spawned only once its player's slot is known.
+Bullets are spawned by every peer inside the simulation with
+`world.spawn_tracked_by(SpawnerSlot(shooter's slot), ..)` in uuid order, so the shooter
+sees its bullet the frame it fires and the host confirms it under the same id; the host gate
+is gone. Expired and hit bullets use `despawn_ticked`.
+
+The harness fixture gained `Input::FIRE`, `EntityKind::PELLET`, a `PlayerSlot` on every body
+(set by `seat_everyone` from each client's `LocalSpawnerSlot`), a `Fuse` and a pellet spawned
+under the shooter's slot; `view::tracked_entity_count` and `view::tombstone_count`. The
+bridge suite `lifecycle_rollback.rs` is run-2d's grenade tests over it: a predicted bullet
+survives the snapshot that predates it, a mispredicted spawn is tombstoned when the authority
+never confirms it, a predicted despawn the host contradicts is undone, two clients firing in
+the same tick never collide, a client never mints an id the host will reuse, `On<Add>` fires
+once for a confirmed prediction, a spawn survives a lossy link, and a grenade does not blink.
+
 ## T9 — the misprediction fast path, send rate, bounded replay
 
 Nothing on the wire changed.

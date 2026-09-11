@@ -1,7 +1,7 @@
 //! No id is ever issued twice in a session.
 //!
 //! §3.12 of `shooting_ropes/docs/upstream-needs.md`. `reset_on_host` and
-//! `reset_on_join` used to zero `TickTrackedEntityCounter` while entities minted
+//! `reset_on_join` used to zero the id counter while entities minted
 //! from the old counter were still standing, so the next `next()` handed out an id
 //! that was already in use. Because `apply_snapshot` keys the whole world by id,
 //! the symptom looked nothing like an id collision: a rope colliding with a player
@@ -12,7 +12,7 @@ use std::time::Duration;
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
 use bevy_ticked::prelude::*;
-use bevy_ticked::tracked_entity::{TickTrackedEntity, TickTrackedEntityCounter};
+use bevy_ticked::tracked_entity::{SpawnerSlot, TickTrackedEntity, TrackedIdAllocator};
 use bevy_ticked_networking::client::LocalClientPlayer;
 use bevy_ticked_networking::prelude::*;
 use bevy_ticked_networking::server::LocalServerPlayer;
@@ -44,7 +44,7 @@ fn peer() -> App {
 fn spawn_tracked(app: &mut App, count: usize) -> Vec<u64> {
     let mut ids = Vec::new();
     for i in 0..count {
-        let id = app.world_mut().resource_mut::<TickTrackedEntityCounter>().next();
+        let id = app.world_mut().resource_mut::<TrackedIdAllocator>().next_authority();
         ids.push(id.0);
         app.world_mut().spawn((id, Pos(i as i32)));
     }
@@ -64,17 +64,18 @@ fn tracked_ids(app: &mut App) -> Vec<u64> {
 fn hosting_never_reissues_an_id_that_is_already_in_use() {
     let mut app = peer();
     let before = spawn_tracked(&mut app, 3);
-    assert_eq!(before, vec![1, 2, 3]);
+    let authority = |n| TickTrackedEntity::new(SpawnerSlot::AUTHORITY, n).0;
+    assert_eq!(before, vec![authority(1), authority(2), authority(3)]);
 
     app.insert_resource(LocalServerPlayer(1));
     app.update();
 
     assert_eq!(
         tracked_ids(&mut app),
-        vec![1, 2, 3],
+        before,
         "a solo world must survive being opened to others"
     );
-    let next = app.world_mut().resource_mut::<TickTrackedEntityCounter>().next();
+    let next = app.world_mut().resource_mut::<TrackedIdAllocator>().next_authority();
     assert!(
         !before.contains(&next.0),
         "issued {} again, which is already in use -- apply_snapshot keys the world \
@@ -98,9 +99,9 @@ fn joining_clears_the_world_it_is_about_to_be_given() {
         "the host's world is about to replace this one entirely"
     );
     assert_eq!(
-        app.world().resource::<TickTrackedEntityCounter>().0,
-        0,
-        "and with nothing left standing, zero is safe"
+        app.world().resource::<TrackedIdAllocator>(),
+        &TrackedIdAllocator::default(),
+        "and with nothing left standing, a fresh allocator is safe"
     );
 }
 

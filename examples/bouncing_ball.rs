@@ -26,7 +26,7 @@ fn setup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    mut counter: ResMut<TickTrackedEntityCounter>,
+    mut counter: ResMut<TrackedIdAllocator>,
 ) {
     // Camera
     commands.spawn((
@@ -60,7 +60,7 @@ fn setup(
         RigidBody::Dynamic,
         Collider::sphere(0.5),
         Restitution::new(0.8),
-        counter.next(),
+        counter.next_authority(),
     ));
 
     // Second ball for variety
@@ -71,7 +71,7 @@ fn setup(
         RigidBody::Dynamic,
         Collider::sphere(0.3),
         Restitution::new(0.6),
-        counter.next(),
+        counter.next_authority(),
     ));
 
     // UI

@@ -118,11 +118,9 @@ struct LobbyTrackingPlugin;
 
 impl Plugin for LobbyTrackingPlugin {
     fn build(&self, app: &mut App) {
-        app.add_observer(
-            |add: On<Add, Lobby>, mut commands: Commands| {
-                commands.insert_resource(TickedSessionLobby(add.entity));
-            },
-        )
+        app.add_observer(|add: On<Add, Lobby>, mut commands: Commands| {
+            commands.insert_resource(TickedSessionLobby(add.entity));
+        })
         .add_observer(
             |remove: On<Remove, Lobby>,
              lobby: Option<Res<TickedSessionLobby>>,
@@ -425,7 +423,9 @@ mod tests {
             app.update();
         }
         assert!(
-            app.world().get_resource::<LocalMultiplayerPlayerId>().is_none(),
+            app.world()
+                .get_resource::<LocalMultiplayerPlayerId>()
+                .is_none(),
             "until the backend knows the identity, there is none"
         );
         assert_eq!(

@@ -52,11 +52,7 @@ fn play(seed: u64) -> Run {
     let positions = net
         .peers()
         .into_iter()
-        .flat_map(|peer| {
-            seats
-                .iter()
-                .map(move |(_, id)| (peer, *id))
-        })
+        .flat_map(|peer| seats.iter().map(move |(_, id)| (peer, *id)))
         .map(|(peer, id)| latest::<Pos>(net.app(peer), id))
         .collect();
     Run {
@@ -71,11 +67,19 @@ fn the_same_seed_replays_the_same_trace() {
     let a = play(0xC0FFEE);
     let b = play(0xC0FFEE);
     assert!(!a.fates.is_empty());
-    assert_eq!(a.fates.len(), b.fates.len(), "the two runs sent a different number of packets");
+    assert_eq!(
+        a.fates.len(),
+        b.fates.len(),
+        "the two runs sent a different number of packets"
+    );
     for (i, (x, y)) in a.fates.iter().zip(&b.fates).enumerate() {
         assert_eq!(x, y, "packet {i} differs between two runs of the same seed");
     }
-    assert_eq!(a.sizes.len(), b.sizes.len(), "a different number of ticked packets crossed");
+    assert_eq!(
+        a.sizes.len(),
+        b.sizes.len(),
+        "a different number of ticked packets crossed"
+    );
     assert_eq!(a.positions, b.positions);
     assert!(a.positions.iter().all(|pos| pos.is_some()));
 }

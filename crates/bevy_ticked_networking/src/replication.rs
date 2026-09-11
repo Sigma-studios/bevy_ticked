@@ -169,6 +169,23 @@ pub(crate) fn install_owner(app: &mut App) {
     if !registered {
         app.register_networked_ticked_component::<Owner>("bevy_ticked::Owner");
     }
+    // The allocator is rolled back by the core; on the wire, the authority's snapshot corrects
+    // a client's counters (slot 0 above all: the ids the host has handed out).
+    use crate::networked_registry::NetworkedTickedResourceAppExt;
+    let allocator_networked = app
+        .world()
+        .get_resource::<bevy_ticked::resource_registry::TickedResourceRegistry>()
+        .is_some_and(|registry| {
+            registry
+                .index_of::<bevy_ticked::tracked_entity::TrackedIdAllocator>()
+                .is_some()
+                && registry.wire_names_unfrozen_contains("bevy_ticked::TrackedIdAllocator")
+        });
+    if !allocator_networked {
+        app.register_networked_ticked_resource::<bevy_ticked::tracked_entity::TrackedIdAllocator>(
+            "bevy_ticked::TrackedIdAllocator",
+        );
+    }
 }
 
 /// Shows every interpolated entity at the authority's state, a few ticks back.

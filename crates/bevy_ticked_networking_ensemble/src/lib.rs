@@ -8,8 +8,7 @@ pub use handshake::{
     SpawnerSlots, TickedPeerVerified, TickedRegistryHandshake, TickedSessionWelcome,
 };
 pub use session::{
-    TickedEnsembleSessionPlugin, TickedSessionLobby, is_authoritative, is_solo,
-    may_spawn_tracked,
+    TickedEnsembleSessionPlugin, TickedSessionLobby, is_authoritative, is_solo, may_spawn_tracked,
 };
 
 use std::marker::PhantomData;
@@ -86,20 +85,20 @@ impl<T: TickedInput + Serialize + for<'de> Deserialize<'de>> Plugin
             bevy_ensemble::MessageAuthority::HostOnly,
         )
         .register_ensemble_message_type::<EnsembleInputMessage<T>>("bevy_ticked/Input")
-            // After the transport has drained its socket, and not merely in the same
-            // schedule. These read `Messages` the backend writes from an exclusive
-            // system, and the multi-threaded executor puts an exclusive system
-            // behind every parallel system that is already ready -- so with no
-            // ordering these ran first, and every packet was read the frame after
-            // it arrived. A frame on the input path and a frame on the snapshot
-            // path, on native, on every frame.
-            .add_systems(
-                PreUpdate,
-                (forward_received_snapshots, forward_received_inputs::<T>)
-                    .after(EnsembleSet::ReceivePackets),
-            )
-            .add_observer(forward_outgoing_snapshots)
-            .add_observer(forward_outgoing_inputs::<T>);
+        // After the transport has drained its socket, and not merely in the same
+        // schedule. These read `Messages` the backend writes from an exclusive
+        // system, and the multi-threaded executor puts an exclusive system
+        // behind every parallel system that is already ready -- so with no
+        // ordering these ran first, and every packet was read the frame after
+        // it arrived. A frame on the input path and a frame on the snapshot
+        // path, on native, on every frame.
+        .add_systems(
+            PreUpdate,
+            (forward_received_snapshots, forward_received_inputs::<T>)
+                .after(EnsembleSet::ReceivePackets),
+        )
+        .add_observer(forward_outgoing_snapshots)
+        .add_observer(forward_outgoing_inputs::<T>);
     }
 }
 
@@ -207,19 +206,23 @@ fn forward_outgoing_snapshots(
                 debug!("a snapshot for {uuid:#x} has no client to go to; it left");
                 return;
             };
-            commands.entity(client).trigger(move |entity| LobbyClientMessage {
-                entity,
-                message,
-                send_mode: SendMode::Unreliable,
-            });
+            commands
+                .entity(client)
+                .trigger(move |entity| LobbyClientMessage {
+                    entity,
+                    message,
+                    send_mode: SendMode::Unreliable,
+                });
         }
         None => {
             let Some(lobby) = lobby else { return };
-            commands.entity(lobby.0).trigger(move |entity| LobbyMessage {
-                entity,
-                message,
-                send_mode: SendMode::Unreliable,
-            });
+            commands
+                .entity(lobby.0)
+                .trigger(move |entity| LobbyMessage {
+                    entity,
+                    message,
+                    send_mode: SendMode::Unreliable,
+                });
         }
     }
 }
@@ -240,11 +243,13 @@ fn forward_outgoing_inputs<T: TickedInput + Serialize + for<'de> Deserialize<'de
     // Unreliable: a lost packet is cheaper than head-of-line blocking the
     // inputs behind it, and the redundant history in each payload means a
     // drop only matters if INPUT_REDUNDANCY consecutive packets are lost.
-    commands.entity(lobby.0).trigger(move |entity| LobbyMessage {
-        entity,
-        message,
-        send_mode: SendMode::Unreliable,
-    });
+    commands
+        .entity(lobby.0)
+        .trigger(move |entity| LobbyMessage {
+            entity,
+            message,
+            send_mode: SendMode::Unreliable,
+        });
 }
 
 #[cfg(test)]
@@ -314,11 +319,10 @@ mod tests {
             }
         }
         let mut app = bridged_app();
-        app.add_systems(PreUpdate, (busy, busy, busy))
-            .add_systems(
-                PreUpdate,
-                fake_transport.in_set(EnsembleSet::ReceivePackets),
-            );
+        app.add_systems(PreUpdate, (busy, busy, busy)).add_systems(
+            PreUpdate,
+            fake_transport.in_set(EnsembleSet::ReceivePackets),
+        );
 
         for _ in 0..8 {
             app.update();
@@ -374,7 +378,9 @@ mod tests {
         app.update();
         assert!(app.world().resource::<Arrivals>().0.is_empty());
         assert_eq!(
-            app.world().resource::<ReplayStats>().dropped_before_handshake,
+            app.world()
+                .resource::<ReplayStats>()
+                .dropped_before_handshake,
             1
         );
 
