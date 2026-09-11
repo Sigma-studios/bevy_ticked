@@ -34,9 +34,28 @@ use serde::{Deserialize, Serialize};
 /// carried opaque: the server encodes once per recipient and the bridge does not decode and
 /// re-encode on the way out, which is what made the old shape cost an extra postcard pass per
 /// broadcast just to count bytes.
+
 #[derive(Message, Clone, Debug, Serialize, Deserialize)]
 pub struct EnsembleSnapshotMessage {
     pub bytes: Vec<u8>,
+}
+
+/// Trigger an entity event on `entity` if it still exists when the command is applied.
+///
+/// A client that left has its entity despawned by the backend in the same flush as the
+/// snapshot or handshake queued for it a system earlier; `EntityCommands::trigger` on the
+/// departed entity is an error, and the default handler makes it a panic. The first real
+/// session over WebRTC found this on the client's exit.
+pub(crate) fn trigger_if_alive<E: for<'a> Event<Trigger<'a>: Default>>(
+    commands: &mut Commands,
+    entity: Entity,
+    make: impl FnOnce(Entity) -> E + Send + 'static,
+) {
+    commands.queue(move |world: &mut World| {
+        if world.get_entity(entity).is_ok() {
+            world.trigger(make(entity));
+        }
+    });
 }
 
 /// Ensemble message type wrapping a player's input.
@@ -218,23 +237,19 @@ fn forward_outgoing_snapshots(
                 debug!("a snapshot for {uuid:#x} has no client to go to; it left");
                 return;
             };
-            commands
-                .entity(client)
-                .trigger(move |entity| LobbyClientMessage {
-                    entity,
-                    message,
-                    send_mode: SendMode::Unreliable,
-                });
+            trigger_if_alive(&mut commands, client, move |entity| LobbyClientMessage {
+                entity,
+                message,
+                send_mode: SendMode::Unreliable,
+            });
         }
         None => {
             let Some(lobby) = lobby else { return };
-            commands
-                .entity(lobby.0)
-                .trigger(move |entity| LobbyMessage {
-                    entity,
-                    message,
-                    send_mode: SendMode::Unreliable,
-                });
+            trigger_if_alive(&mut commands, lobby.0, move |entity| LobbyMessage {
+                entity,
+                message,
+                send_mode: SendMode::Unreliable,
+            });
         }
     }
 }
@@ -256,13 +271,11 @@ fn forward_outgoing_inputs<T: TickedInput + Serialize + for<'de> Deserialize<'de
     // Unreliable: a lost packet is cheaper than head-of-line blocking the
     // inputs behind it, and the redundant history in each payload means a
     // drop only matters if INPUT_REDUNDANCY consecutive packets are lost.
-    commands
-        .entity(lobby.0)
-        .trigger(move |entity| LobbyMessage {
-            entity,
-            message,
-            send_mode: SendMode::Unreliable,
-        });
+    trigger_if_alive(&mut commands, lobby.0, move |entity| LobbyMessage {
+        entity,
+        message,
+        send_mode: SendMode::Unreliable,
+    });
 }
 
 /// A client's pause or resume request, carried to the host.
@@ -281,13 +294,11 @@ fn forward_outgoing_pause_requests(
     let message = EnsemblePauseRequest {
         pause: trigger.event().pause,
     };
-    commands
-        .entity(lobby.0)
-        .trigger(move |entity| LobbyMessage {
-            entity,
-            message,
-            send_mode: SendMode::Reliable,
-        });
+    trigger_if_alive(&mut commands, lobby.0, move |entity| LobbyMessage {
+        entity,
+        message,
+        send_mode: SendMode::Reliable,
+    });
 }
 
 fn forward_received_pause_requests(

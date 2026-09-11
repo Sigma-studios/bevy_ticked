@@ -371,13 +371,11 @@ pub mod minimal {
 
     const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 
-    impl WorldHash for MinimalHash {
-        fn sample(world: &mut World) -> Self {
-            let mut rows: Vec<(u64, i64, i64)> = world
-                .query::<(&TickTrackedEntity, &Pos, &Vel)>()
-                .iter(world)
-                .map(|(tracked, pos, vel)| (tracked.0, pos.0, vel.0))
-                .collect();
+    impl MinimalHash {
+        /// The hash of `(id, pos, vel)` rows, in any order. What [`WorldHash::sample`] folds
+        /// from the live world; a client folds the same from the authoritative records it was
+        /// sent, to compare what it was told with what the host had.
+        pub fn from_rows(mut rows: Vec<(u64, i64, i64)>) -> Self {
             rows.sort_unstable();
             let mut bodies = FNV_OFFSET;
             let mut positions = FNV_OFFSET;
@@ -392,6 +390,17 @@ pub mod minimal {
                 positions,
                 velocities,
             }
+        }
+    }
+
+    impl WorldHash for MinimalHash {
+        fn sample(world: &mut World) -> Self {
+            let rows: Vec<(u64, i64, i64)> = world
+                .query::<(&TickTrackedEntity, &Pos, &Vel)>()
+                .iter(world)
+                .map(|(tracked, pos, vel)| (tracked.0, pos.0, vel.0))
+                .collect();
+            Self::from_rows(rows)
         }
 
         fn value(&self) -> u64 {

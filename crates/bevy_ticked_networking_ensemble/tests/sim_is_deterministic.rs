@@ -45,6 +45,14 @@ fn guard() -> SourceGuard {
                 expires: None,
             },
             Exception {
+                path: "examples/netpeer.rs",
+                needle: "Instant::now",
+                reason: "the process runner paces `update()` to a tick's worth of wall clock, \
+                         bounds the session by a deadline and stamps the pulse; all of it is \
+                         outside `TickedLoop`, and the simulation is the fixture's",
+                expires: None,
+            },
+            Exception {
                 path: "examples/fps_shooter.rs",
                 needle: "ButtonInput",
                 reason: "the lobby keys and `capture_local_input` run in Update; the tick \
