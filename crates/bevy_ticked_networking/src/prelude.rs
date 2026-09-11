@@ -15,7 +15,7 @@ pub use crate::{
         NetworkedTickedResourceAppExt,
     },
     reset_on_leave,
-    server::{LocalServerPlayer, SnapshotRecipientList, TickedServerPlugin},
+    server::{LocalServerPlayer, SendEvery, SnapshotRecipientList, TickedServerPlugin},
     snapshot::{
         EntityRecord, FullBody, SnapshotBody, SnapshotPacket, apply_full_body, build_full_body,
         decode_packet, encode_packet,

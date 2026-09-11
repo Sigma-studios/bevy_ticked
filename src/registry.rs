@@ -121,6 +121,10 @@ pub struct WireFns {
     pub finish_tick: fn(&mut World, u64),
     /// Whether `(tick, id)` has a saved value.
     pub has_at: fn(&World, u64, u64) -> bool,
+    /// Compare the value at the front of `bytes` with the one saved for `(tick, id)`, by
+    /// encoding. Returns `(equal, consumed)`; `consumed` is meaningful only when equal; `None`
+    /// if nothing is saved there or it did not encode.
+    pub matches_at: fn(&World, u64, u64, &[u8]) -> Option<(bool, usize)>,
 }
 
 impl TickedComponentRegistry {
@@ -490,6 +494,26 @@ impl TickedComponentRegistry {
     ) -> Option<usize> {
         let (_, wire) = self.wire_entry(wire_index)?;
         (wire.decode_one)(world, tick, entity, id, bytes)
+    }
+
+    /// Compare one value of wire type `wire_index` at the front of `bytes` with what this peer
+    /// saved for `(tick, id)`. Returns `(equal, consumed)`, or `None` if the bytes did not
+    /// decode or the index is not on this peer's wire.
+    pub fn matches_at(
+        &self,
+        world: &World,
+        wire_index: u16,
+        tick: u64,
+        id: u64,
+        bytes: &[u8],
+    ) -> Option<(bool, usize)> {
+        let (_, wire) = self.wire_entry(wire_index)?;
+        (wire.matches_at)(world, tick, id, bytes)
+    }
+
+    /// Every networked wire index this peer has a saved value for at `(tick, id)`.
+    pub fn saved_wire_types_at(&self, world: &World, tick: u64, id: u64) -> TypeMask {
+        self.present_at(world, tick, id)
     }
 
     /// Take one value of wire type `wire_index` from the front of `bytes` and insert it on

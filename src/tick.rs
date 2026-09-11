@@ -62,6 +62,9 @@ pub enum TickHoldReason {
     /// A client that has not heard from its host for long enough to stop predicting into a
     /// future the host may never produce.
     SoftHold,
+    /// A client in the middle of a replay it could not finish in one frame: the clock waits
+    /// for the rest of it rather than running ahead of a world that is not caught up.
+    Replaying,
     /// A game's own reason, for something not listed.
     Custom(u8),
 }

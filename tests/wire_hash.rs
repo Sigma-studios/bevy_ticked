@@ -32,6 +32,7 @@ fn stub_wire() -> WireFns {
         encode_one: |_, _, _, _| false,
         decode_one: |_, _, _, _, _| None,
         insert_one: |_, _, _| None,
+        matches_at: |_, _, _, _| None,
         begin_tick: |_, _| {},
         finish_tick: |_, _| {},
         has_at: |_, _, _| false,

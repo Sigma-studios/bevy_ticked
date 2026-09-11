@@ -39,7 +39,11 @@ fn client() -> App {
         .add_plugins(TickedClientPlugin::<Input>::new())
         .insert_resource(TimeUpdateStrategy::ManualDuration(TICK))
         .register_networked_ticked_component::<Pos>("Pos");
-    app.world_mut().spawn((TickTrackedEntity(1), Pos(0)));
+    app.world_mut().spawn((
+        TickTrackedEntity(1),
+        Pos(0),
+        bevy_ticked_networking::replication::ReplicationMode::Predicted,
+    ));
     app.insert_resource(LocalClientPlayer(LOCAL));
     app
 }
@@ -71,9 +75,33 @@ fn deliver(app: &mut App, tick: u64) {
     app.world_mut().trigger(ReceivedNetworkSnapshot(snapshot));
 }
 
+/// A packet that disagrees with the prediction, so it costs a rollback: the identical fast
+/// path (T9) makes a matching one cost nothing, which is what most of these count.
+fn snapshot_differing(app: &mut App, tick: u64) -> SnapshotPacket {
+    let mut packet = snapshot_matching(app, tick);
+    let index = app
+        .world()
+        .resource::<TickedComponentRegistry>()
+        .wire_index_of::<Pos>()
+        .unwrap();
+    if let SnapshotBody::Full(body) = &mut packet.body {
+        body.put(EntityRecord::new(1).with(index, &Pos(1000)));
+    }
+    packet
+}
+
+fn deliver_differing(app: &mut App, tick: u64) {
+    let snapshot = snapshot_differing(app, tick);
+    app.world_mut().trigger(ReceivedNetworkSnapshot(snapshot));
+}
+
 fn sync(app: &mut App) {
     app.update();
-    app.world_mut().spawn((TickTrackedEntity(1), Pos(0)));
+    app.world_mut().spawn((
+        TickTrackedEntity(1),
+        Pos(0),
+        bevy_ticked_networking::replication::ReplicationMode::Predicted,
+    ));
     deliver(app, 0);
     app.update();
 }
@@ -93,7 +121,7 @@ fn every_applied_snapshot_is_counted_and_its_replay_distance_is_the_lead() {
 
     let lead = app.world().resource::<ClientTickBuffer>().target_replay_distance;
     let current = app.world().resource::<CurrentTick>().0;
-    deliver(&mut app, current - lead);
+    deliver_differing(&mut app, current - lead);
     app.update();
 
     let after = replay(&app);
@@ -150,7 +178,7 @@ fn tick_cost_counts_replayed_ticks_as_ticks() {
 
     let lead = app.world().resource::<ClientTickBuffer>().target_replay_distance;
     let current = app.world().resource::<CurrentTick>().0;
-    deliver(&mut app, current - lead);
+    deliver_differing(&mut app, current - lead);
     app.update();
 
     let after = app.world().resource::<TickCost>().ticks;
@@ -222,6 +250,16 @@ fn a_snapshot_older_than_the_history_window_is_counted() {
     // itself extend the history back to `tick`.
     let mut snapshot = SnapshotPacket::full(tick, build_full_body(app.world_mut(), tick));
     snapshot.your_margin = 2;
+    // Nothing in the client's history for that tick, so it cannot compare and takes the
+    // full path; it would anyway, since a body is moved.
+    if let SnapshotBody::Full(body) = &mut snapshot.body {
+        let index = app
+            .world()
+            .resource::<TickedComponentRegistry>()
+            .wire_index_of::<Pos>()
+            .unwrap();
+        body.put(EntityRecord::new(1).with(index, &Pos(5)));
+    }
     app.world_mut().trigger(ReceivedNetworkSnapshot(snapshot));
     app.update();
 
