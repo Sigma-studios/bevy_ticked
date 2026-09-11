@@ -17,6 +17,8 @@ bevy_ensemble_steam = { workspace = true, optional = true }
 serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
+# The block_placer example's one-shell local session (`TICKED_LOCAL_SESSION=N`).
+bevy_ticked_networking_ensemble = { path = "../bevy_ticked_networking_ensemble", features = ["local-session"] }
 # The tests and examples run whole apps; the library itself only needs the ECS.
 bevy = "0.19"
 avian2d = { version = "0.7", features = ["serialize"] }

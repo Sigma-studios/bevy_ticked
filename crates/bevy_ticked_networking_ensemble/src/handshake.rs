@@ -285,15 +285,13 @@ fn announce_registry(
     let ours = TickedRegistryHandshake::from_registries(&components, resources.as_deref());
     let entity = verified.entity;
     if clients.contains(entity) {
-        commands
-            .entity(entity)
-            .trigger(move |entity| LobbyClientMessage {
-                entity,
-                message: ours,
-                send_mode: SendMode::Reliable,
-            });
+        crate::trigger_if_alive(&mut commands, entity, move |entity| LobbyClientMessage {
+            entity,
+            message: ours,
+            send_mode: SendMode::Reliable,
+        });
     } else {
-        commands.entity(entity).trigger(move |entity| LobbyMessage {
+        crate::trigger_if_alive(&mut commands, entity, move |entity| LobbyMessage {
             entity,
             message: ours,
             send_mode: SendMode::Reliable,

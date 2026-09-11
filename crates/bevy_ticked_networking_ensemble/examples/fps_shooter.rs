@@ -22,6 +22,7 @@ use bevy_ensemble_webrtc::{BevyEnsembleWebrtcPlugin, JoinWebrtcLobby, RefreshLob
 use bevy_ticked::prelude::*;
 use bevy_ticked_avian::avian3d::TickedAvianPlugin;
 use bevy_ticked_networking::prelude::*;
+use bevy_ticked_networking_ensemble::local_session::{self, TickedLocalSessionPlugin};
 use bevy_ticked_networking_ensemble::{
     SpawnerSlots, TickedEnsembleSessionPlugin, TickedNetworkingEnsemblePlugin,
 };
@@ -124,10 +125,9 @@ struct LocalLook {
 // --- Plugin setup ---
 
 fn main() {
-    let server_url = std::env::var("SIGNALLING_SERVER_URL")
-        .ok()
-        .or_else(|| option_env!("SIGNALLING_SERVER_URL").map(String::from))
-        .unwrap_or_else(|| "ws://localhost:9090/ws".into());
+    // `SIGNALLING_SERVER_URL`, or the launcher's own in-process server under
+    // `TICKED_LOCAL_SESSION=N`, or the local default.
+    let server_url = local_session::signalling_url();
 
     App::new()
         .add_plugins(DefaultPlugins)
@@ -162,6 +162,8 @@ fn main() {
         // The session plugin adopts the roles, runs the registry handshake and hands each
         // client a spawner slot; the example used to do the first by hand and the rest not at all.
         .add_plugins(TickedEnsembleSessionPlugin::default())
+        // `TICKED_LOCAL_SESSION=2 cargo run --example ...`: two windows from one shell.
+        .add_plugins(TickedLocalSessionPlugin)
         // The renderer blends each body between its last two tick states, and a correction
         // to a predicted body slides into place instead of blinking there. Neither touches
         // what the simulation reads.
@@ -401,7 +403,12 @@ fn server_spawn_players(
     mut counter: ResMut<TrackedIdAllocator>,
     slots: Option<Res<SpawnerSlots>>,
     local_player: Option<Res<LocalMultiplayerPlayerId>>,
+    // Not before the host role is adopted: the ids minted before it would be a client's.
+    role: Option<Res<LocalServerPlayer>>,
 ) {
+    if role.is_none() {
+        return;
+    }
     let Some(lobby_entity) = host_lobbies.iter().next() else {
         return;
     };
@@ -790,14 +797,17 @@ fn on_entity_spawned(
 
     match kind {
         EntityKind::Player => {
+            // The controller bundle is needed on every peer: the host and a predicting
+            // client simulate the body, an interpolating client shows it. Its dynamic body
+            // is overridden by the second insert for a body this peer only shows — a second
+            // insert, because one bundle may not name `RigidBody` twice.
+            commands
+                .entity(entity)
+                .insert(character_controller_bundle());
             commands.entity(entity).insert((
-                // The controller bundle is needed on every peer: the host and a predicting
-                // client simulate the body, an interpolating client shows it. Its dynamic
-                // body is overridden below for a body this peer only shows.
+                body_kind(local_client.as_deref(), owner, mode),
                 // Rotation is present up front so apply_inputs can yaw the body
                 // from the first tick.
-                character_controller_bundle(),
-                body_kind(local_client.as_deref(), owner, mode),
                 Rotation::default(),
                 Mesh3d(meshes.add(Cuboid::new(0.4, 1.3, 0.4))),
                 MeshMaterial3d(materials.add(unlit(Color::srgb(0.2, 0.7, 0.35)))),

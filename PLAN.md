@@ -6,9 +6,7 @@ replaced. It was kept long past its usefulness and read as current by more than 
 
 What is current:
 
-- **The crates and how they fit together:** the crate-level docs of `bevy_ticked`,
-  `bevy_ticked_networking`, `bevy_ticked_networking_ensemble` and
-  `bevy_ticked_lockstep_networking`, and `ARCHITECTURE.md` once the overhaul lands it.
+- **The crates and how they fit together:** `ARCHITECTURE.md`.
 - **What changed and how to migrate a game:** `docs/MIGRATION.md`, appended one section per
   phase of the overhaul, and the per-game checklists under `docs/migration/`.
 - **The rules a simulation has to follow to roll back:** `docs/ROLLBACK_RULES.md`.

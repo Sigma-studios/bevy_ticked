@@ -17,10 +17,10 @@ members = [
 # rather than a hunt through six manifests and a lock file that had quietly fallen nine commits
 # behind the branch they all named.
 [workspace.dependencies]
-bevy_ensemble = { git = "https://github.com/Sigma-studios/bevy_ensemble", rev = "3ba5229" }
-bevy_ensemble_webrtc = { git = "https://github.com/Sigma-studios/bevy_ensemble", rev = "3ba5229" }
-bevy_ensemble_steam = { git = "https://github.com/Sigma-studios/bevy_ensemble", rev = "3ba5229" }
-bevy_ensemble_loopback = { git = "https://github.com/Sigma-studios/bevy_ensemble", rev = "3ba5229" }
+bevy_ensemble = { git = "https://github.com/Sigma-studios/bevy_ensemble", rev = "9f7f245" }
+bevy_ensemble_webrtc = { git = "https://github.com/Sigma-studios/bevy_ensemble", rev = "9f7f245" }
+bevy_ensemble_steam = { git = "https://github.com/Sigma-studios/bevy_ensemble", rev = "9f7f245" }
+bevy_ensemble_loopback = { git = "https://github.com/Sigma-studios/bevy_ensemble", rev = "9f7f245" }
 
 [dependencies]
 bevy = { version = "0.19", default-features = false, features = ["std", "bevy_log"] }
