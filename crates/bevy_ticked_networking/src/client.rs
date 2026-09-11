@@ -23,6 +23,18 @@ use crate::{
 #[derive(Resource)]
 pub struct LocalClientPlayer(pub u128);
 
+/// Where in `TickedSystems::PreTick` a client's snapshot is applied, so a game or a plugin can
+/// run before it (record what the renderer showed) and after it (measure what changed).
+#[derive(SystemSet, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ClientSet {
+    /// Before the pending snapshot is applied and replayed.
+    BeforeSnapshot,
+    /// `handle_server_snapshot`: apply, roll back, replay.
+    ApplySnapshot,
+    /// After the replay, still before the tick.
+    AfterSnapshot,
+}
+
 /// The newest snapshot that has arrived and not yet been applied.
 ///
 /// Written in place from the observer rather than inserted through `Commands`:
@@ -47,6 +59,11 @@ struct PendingSnapshot(Option<SnapshotPacket>);
 /// make every snapshot of the next one look old.
 #[derive(Resource, Default, Debug, Clone, Copy)]
 pub struct AppliedSnapshotTick(pub Option<u64>);
+
+/// The tick of the snapshot waiting to be applied this pass, if any. Read by measurements
+/// that want to sample the prediction for that tick before it is overwritten.
+#[derive(Resource, Default, Debug, Clone, Copy)]
+pub struct PendingSnapshotTick(pub Option<u64>);
 
 /// `seq` of the newest snapshot this client applied, acknowledged on every input packet.
 #[derive(Resource, Default, Debug, Clone, Copy)]
@@ -216,6 +233,7 @@ impl<T: TickedInput> Default for TickedClientPlugin<T> {
 impl<T: TickedInput> Plugin for TickedClientPlugin<T> {
     fn build(&self, app: &mut App) {
         crate::input::install_input_queue::<T>(app);
+        crate::replication::install_owner(app);
         // A rollback never reaches further back than one one-way trip plus the lead, and the
         // lead is capped at `MAX_TICKS`; twice that is every tick a snapshot could still name.
         // The core default is a hundred seconds, sized for scrubbing, and on a client that was
@@ -227,6 +245,7 @@ impl<T: TickedInput> Plugin for TickedClientPlugin<T> {
         app.init_resource::<ClientTickBuffer>()
             .init_resource::<PendingSnapshot>()
             .init_resource::<AppliedSnapshotTick>()
+            .init_resource::<PendingSnapshotTick>()
             .init_resource::<LastAppliedSeq>()
             .init_resource::<ReplayStats>()
             .init_resource::<HealthWarnings>()
@@ -241,10 +260,21 @@ impl<T: TickedInput> Plugin for TickedClientPlugin<T> {
                 crate::reset_on_leave::<T>.run_if(resource_removed::<LocalClientPlayer>),
             )
             .init_resource::<CounterAfterSnapshot>()
+            .configure_sets(
+                TickedLoop,
+                (
+                    ClientSet::BeforeSnapshot,
+                    ClientSet::ApplySnapshot,
+                    ClientSet::AfterSnapshot,
+                )
+                    .chain()
+                    .in_set(TickedSystems::PreTick),
+            )
+            .add_plugins(crate::replication::RemoteInterpolationPlugin)
             .add_systems(
                 TickedLoop,
                 (
-                    handle_server_snapshot::<T>.in_set(TickedSystems::PreTick),
+                    handle_server_snapshot::<T>.in_set(ClientSet::ApplySnapshot),
                     (send_local_input::<T>, watch_for_client_minted_ids)
                         .in_set(TickedSystems::PostTick),
                 ),
@@ -266,7 +296,9 @@ fn receive_snapshot(
     trigger: On<ReceivedNetworkSnapshot>,
     applied: Res<AppliedSnapshotTick>,
     mut pending: ResMut<PendingSnapshot>,
+    mut pending_tick: ResMut<PendingSnapshotTick>,
     mut stats: ResMut<ReplayStats>,
+    mut history: ResMut<crate::replication::AuthoritativeHistory>,
 ) {
     let tick = trigger.event().0.tick;
     let newest_seen = applied
@@ -276,9 +308,27 @@ fn receive_snapshot(
         .max();
     if newest_seen.is_some_and(|newest| tick <= newest) {
         stats.dropped_stale += 1;
+        // Stale for the rollback, still the authority's word about that tick: an interpolated
+        // entity drawn from the history would otherwise see a hole where the late packet was
+        // and jump across it.
+        if let SnapshotBody::Full(body) = &trigger.event().0.body
+            && history.oldest_tick().is_none_or(|oldest| tick >= oldest)
+            && !history.has_tick(tick)
+        {
+            history.record(tick, body.entities.iter().cloned());
+        }
         return;
     }
-    pending.0 = Some(trigger.event().0.clone());
+    // A packet still waiting when a newer one lands is superseded for the rollback, and kept
+    // for the drawn path like a stale one: three snapshots in one frame used to leave two
+    // holes in the history, and an interpolated body jumped across them.
+    if let Some(superseded) = pending.0.replace(trigger.event().0.clone())
+        && let SnapshotBody::Full(body) = &superseded.body
+        && !history.has_tick(superseded.tick)
+    {
+        history.record(superseded.tick, body.entities.iter().cloned());
+    }
+    pending_tick.0 = Some(tick);
 }
 
 /// When `LocalClientPlayer` is inserted, reset tick state and pause
@@ -314,6 +364,10 @@ fn reset_on_join<T: TickedInput>(world: &mut World) {
     world.insert_resource(AppliedSnapshotTick::default());
     world.insert_resource(LastAppliedSeq::default());
     world.resource_mut::<InputQueue<T>>().inputs.clear();
+    if let Some(mut history) = world.get_resource_mut::<crate::replication::AuthoritativeHistory>() {
+        history.clear();
+    }
+    world.insert_resource(crate::replication::DisplayTick::default());
     let registry = world.resource::<TickedComponentRegistry>().clone();
     registry.clear_all(world);
     // Registered resources go back to their defaults: the host's first snapshot brings the
@@ -348,6 +402,7 @@ fn handle_server_snapshot<T: TickedInput>(world: &mut World) {
     let Some(packet) = world.resource_mut::<PendingSnapshot>().0.take() else {
         return;
     };
+    world.resource_mut::<PendingSnapshotTick>().0 = None;
     let body = match &packet.body {
         SnapshotBody::Full(body) => body,
         SnapshotBody::Delta(_) => {
@@ -402,6 +457,9 @@ fn handle_server_snapshot<T: TickedInput>(world: &mut World) {
 
     // Apply the authoritative snapshot (sets CurrentTick to snapshot_tick)
     let applied = apply_full_body(world, snapshot_tick, body);
+    world
+        .resource_mut::<crate::replication::AuthoritativeHistory>()
+        .record(snapshot_tick, body.entities.iter().cloned());
     if !applied.duplicate_ids.is_empty() {
         let mut health = world.resource_mut::<HealthWarnings>();
         let mut count = health.duplicate_ids_in_snapshot;

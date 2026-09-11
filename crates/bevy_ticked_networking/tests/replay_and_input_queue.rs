@@ -16,6 +16,7 @@ use bevy_ticked_networking::client::{ClientTickBuffer, LocalClientPlayer, Snapsh
 use bevy_ticked_networking::input::InputQueue;
 use bevy_ticked_networking::messages::ReceivedNetworkSnapshot;
 use bevy_ticked_networking::prelude::*;
+use bevy_ticked_networking::replication::ReplicationMode;
 use bevy_ticked_networking::snapshot::{EntityRecord, SnapshotBody, SnapshotPacket, build_full_body};
 use serde::{Deserialize, Serialize};
 
@@ -49,7 +50,9 @@ fn client_with_role(role: bool) -> App {
         .init_resource::<SimRuns>()
         .register_networked_ticked_component::<Pos>("Pos")
         .add_systems(TickedSimulation, |mut runs: ResMut<SimRuns>| runs.0 += 1);
-    app.world_mut().spawn((TickTrackedEntity(1), Pos(0)));
+    // The local player's body: predicted, so a snapshot's value is what the world shows.
+    app.world_mut()
+        .spawn((TickTrackedEntity(1), Pos(0), ReplicationMode::Predicted));
     if role {
         app.insert_resource(LocalClientPlayer(LOCAL));
     }
@@ -98,7 +101,8 @@ fn deliver(app: &mut App, tick: u64) {
 /// "the first snapshot brought a body".
 fn sync(app: &mut App) {
     app.update();
-    app.world_mut().spawn((TickTrackedEntity(1), Pos(0)));
+    app.world_mut()
+        .spawn((TickTrackedEntity(1), Pos(0), ReplicationMode::Predicted));
     deliver(app, 0);
     app.update();
 }

@@ -59,6 +59,7 @@ impl NetworkedTickedAppExt for App {
             WireFns {
                 encode_one: encode_one::<T>,
                 decode_one: decode_one::<T>,
+                insert_one: insert_one::<T>,
                 begin_tick: begin_tick::<T>,
                 finish_tick: finish_tick::<T>,
                 has_at: has_at::<T>,
@@ -204,6 +205,17 @@ fn decode_one<T: NetworkedTickedComponent>(
             None
         }
     }
+}
+
+fn insert_one<T: NetworkedTickedComponent>(
+    world: &mut World,
+    entity: Entity,
+    bytes: &[u8],
+) -> Option<usize> {
+    let (value, rest) = postcard::take_from_bytes::<T>(bytes).ok()?;
+    let consumed = bytes.len() - rest.len();
+    world.get_entity_mut(entity).ok()?.insert(value);
+    Some(consumed)
 }
 
 fn begin_tick<T: NetworkedTickedComponent>(world: &mut World, tick: u64) {

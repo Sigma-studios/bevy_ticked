@@ -4,7 +4,9 @@ pub mod input;
 pub mod messages;
 pub mod networked_registry;
 pub mod prelude;
+pub mod replication;
 pub mod server;
+pub mod smoothing;
 pub mod snapshot;
 
 use bevy::prelude::*;
@@ -89,6 +91,12 @@ pub fn reset_on_leave<T: TickedInput>(world: &mut World) {
     }
     if let Some(mut seq) = world.get_resource_mut::<client::LastAppliedSeq>() {
         seq.0 = None;
+    }
+    if let Some(mut history) = world.get_resource_mut::<replication::AuthoritativeHistory>() {
+        history.clear();
+    }
+    if let Some(mut display) = world.get_resource_mut::<replication::DisplayTick>() {
+        display.0 = None;
     }
     if let Some(mut seqs) = world.get_resource_mut::<server::SnapshotSeq>() {
         seqs.0.clear();

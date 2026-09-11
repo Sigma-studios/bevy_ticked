@@ -86,6 +86,7 @@ impl<T: TickedInput> Default for TickedServerPlugin<T> {
 impl<T: TickedInput> Plugin for TickedServerPlugin<T> {
     fn build(&self, app: &mut App) {
         crate::input::install_input_queue::<T>(app);
+        crate::replication::install_owner(app);
         app.init_resource::<InputMargins>()
             .init_resource::<NewestInputTick>()
             .init_resource::<InputStats>()
