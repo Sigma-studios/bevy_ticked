@@ -103,6 +103,7 @@ impl<T: TickedInput> Plugin for TickedServerPlugin<T> {
     fn build(&self, app: &mut App) {
         crate::input::install_input_queue::<T>(app);
         crate::replication::install_owner(app);
+        crate::pause::install(app);
         app.insert_resource(SendEvery(self.send_every.max(1)))
             .init_resource::<InputMargins>()
             .init_resource::<NewestInputTick>()
@@ -296,11 +297,14 @@ fn broadcast_snapshot<T: TickedInput>(
     if !tick.0.is_multiple_of(send_every.0.max(1)) {
         return;
     }
+    // The first held pass always sends, so a pause reaches every client the tick it starts;
+    // after that, once every `HELD_BROADCAST_EVERY` passes.
     if holds.is_held() {
-        *passes_held += 1;
-        if !(*passes_held).is_multiple_of(HELD_BROADCAST_EVERY) {
+        if *passes_held > 0 && !(*passes_held).is_multiple_of(HELD_BROADCAST_EVERY) {
+            *passes_held += 1;
             return;
         }
+        *passes_held += 1;
     } else {
         *passes_held = 0;
     }

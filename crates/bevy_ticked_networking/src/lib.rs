@@ -3,6 +3,7 @@ pub mod diagnostics;
 pub mod input;
 pub mod messages;
 pub mod networked_registry;
+pub mod pause;
 pub mod prelude;
 pub mod replication;
 pub mod server;

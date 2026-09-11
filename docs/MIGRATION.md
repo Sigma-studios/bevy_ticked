@@ -6,6 +6,49 @@ what to change in a game, and why. Both peers of a session must be built from th
 Phases that changed `bevy_ensemble` too say which of its commits they pin; that crate's own
 `docs/MIGRATION.md` covers what changed there.
 
+## T11 — the session pause
+
+One new networked resource, `bevy_ticked::SessionPause`, covered by the handshake.
+
+### A pause is the authority's word, replicated
+
+**Before** there was no session pause. A host that alt-tabbed on the web got one frame a
+second; every client kept ticking into a future the host had not produced, piled up two
+seconds of lead and shed it at a couple of percent a second: the audit measured about 1900
+ticks of excess lead, gone after twenty-five minutes. A game that wanted a pause menu had to
+replicate it itself.
+**After** `SessionPause(Option<Paused { at, reason }>)` is a networked ticked resource the
+host writes. `PauseSession(reason)` / `ResumeSession` messages on the host take effect at
+the next loop pass: the pause is stamped on the *next* tick (a snapshot for a tick a client
+has already applied is dropped as stale, so a pause stamped on the current tick would never
+arrive), the host runs that one tick, holds `TickHoldReason::SessionPause`, and keeps
+broadcasting (the first held pass always sends). A client that receives it runs up to the
+paused tick if behind, rolls back to it and forgets its prediction if ahead, and holds.
+`ResumeSession` clears it; the host runs, and each client re-acquires its lead forward
+through the "at or behind" path, no replay burst. The lead-taking jump now discards the
+frame accumulator's backlog, so a two-second frame after a tab switch does not put the lead
+sixteen ticks past target.
+
+`PausePolicy` (resource, installed by both role plugins): `who_may_pause: HostOnly |
+AnyParticipant` (a client's `PauseSession` becomes a `SendPauseRequest` the bridge carries as
+`bevy_ticked/PauseRequest`; the host applies it as `PauseReason::Participant(uuid)` only
+under `AnyParticipant`), `auto_pause_on_focus_loss: true` (`window` feature of
+`bevy_ticked_networking`, default on: `WindowFocused` lost pauses as `HostUnfocused`,
+regained resumes), `auto_pause_after_real_gap: Some(500 ms)` (a frame that long after the
+previous one is a stall the host just came back from: it pauses as `HostStalled` at the tick
+it is still on, so clients drop what they predicted, and resumes next frame),
+`client_soft_hold_after: Some(250 ms)` (a client that has applied no snapshot for that long
+holds `TickHoldReason::SoftHold` rather than run ahead of a host that may be gone; the next
+snapshot releases it).
+
+**Delete** the game's own "host lost focus, tear down the lobby" handling and any
+replicated pause flag. **Watch** a unit test that runs a client for many frames without a
+snapshot stream: it soft-holds after a quarter second; set
+`PausePolicy { client_soft_hold_after: None, .. }` if the test is about something else.
+
+`a_host_alt_tab_auto_pauses_and_no_lead_piles_up` is un-ignored: after a two-second host
+freeze the client is within a tick or two of its target lead one second later.
+
 ## T10 — existence history, spawn/despawn rollback, deterministic ids
 
 **Ids changed shape** (`sequence << 8 | slot`) and the id allocator is on the wire as
