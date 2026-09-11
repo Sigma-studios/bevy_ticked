@@ -85,6 +85,9 @@ impl<T: TickedInput + Serialize + for<'de> Deserialize<'de>> Plugin
             bevy_ensemble::MessageAuthority::HostOnly,
         )
         .register_ensemble_message_type::<EnsembleInputMessage<T>>("bevy_ticked/Input")
+        // A client asking for a pause; the host's policy decides. Reliable: a request that
+        // is lost is a menu that never opens for anybody else.
+        .register_ensemble_message_type::<EnsemblePauseRequest>("bevy_ticked/PauseRequest")
         // After the transport has drained its socket, and not merely in the same
         // schedule. These read `Messages` the backend writes from an exclusive
         // system, and the multi-threaded executor puts an exclusive system
@@ -94,11 +97,16 @@ impl<T: TickedInput + Serialize + for<'de> Deserialize<'de>> Plugin
         // path, on native, on every frame.
         .add_systems(
             PreUpdate,
-            (forward_received_snapshots, forward_received_inputs::<T>)
+            (
+                forward_received_snapshots,
+                forward_received_inputs::<T>,
+                forward_received_pause_requests,
+            )
                 .after(EnsembleSet::ReceivePackets),
         )
         .add_observer(forward_outgoing_snapshots)
-        .add_observer(forward_outgoing_inputs::<T>);
+        .add_observer(forward_outgoing_inputs::<T>)
+        .add_observer(forward_outgoing_pause_requests);
     }
 }
 
@@ -250,6 +258,46 @@ fn forward_outgoing_inputs<T: TickedInput + Serialize + for<'de> Deserialize<'de
             message,
             send_mode: SendMode::Unreliable,
         });
+}
+
+/// A client's pause or resume request, carried to the host.
+#[derive(Message, Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct EnsemblePauseRequest {
+    /// `Some(reason)` to pause, `None` to resume.
+    pub pause: Option<bevy_ticked_networking::pause::PauseReason>,
+}
+
+fn forward_outgoing_pause_requests(
+    trigger: On<bevy_ticked_networking::pause::SendPauseRequest>,
+    lobby: Option<Res<TickedSessionLobby>>,
+    mut commands: Commands,
+) {
+    let Some(lobby) = lobby else { return };
+    let message = EnsemblePauseRequest {
+        pause: trigger.event().pause,
+    };
+    commands
+        .entity(lobby.0)
+        .trigger(move |entity| LobbyMessage {
+            entity,
+            message,
+            send_mode: SendMode::Reliable,
+        });
+}
+
+fn forward_received_pause_requests(
+    mut messages: MessageReader<ReceivedEnsembleMessage<EnsemblePauseRequest>>,
+    mut commands: Commands,
+) {
+    for msg in messages.read() {
+        let Some(sender) = msg.sender else {
+            continue;
+        };
+        commands.trigger(bevy_ticked_networking::pause::ReceivedPauseRequest {
+            sender,
+            pause: msg.message.pause,
+        });
+    }
 }
 
 #[cfg(test)]
