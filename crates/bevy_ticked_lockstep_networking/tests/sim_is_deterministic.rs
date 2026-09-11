@@ -18,6 +18,20 @@ fn guard() -> SourceGuard {
         .ban(DEFAULT_NEEDLES)
         .allow(&[
             Exception {
+                path: "src/session.rs",
+                needle: "Res<Time<Real>",
+                reason: "`track_stall` measures how long a peer has been waited on, in Update, \
+                         on the frame clock: a stall is a wall-clock fact and nothing else \
+                         could see it",
+                expires: None,
+            },
+            Exception {
+                path: "src/session.rs",
+                needle: "Time<Real>",
+                reason: "the same frame-side system names the type in its signature",
+                expires: None,
+            },
+            Exception {
                 path: "src/adaptive_buffer.rs",
                 needle: "SECONDS_PER_TICK",
                 reason: "turns a measured round trip into a number of ticks of input buffer; \
