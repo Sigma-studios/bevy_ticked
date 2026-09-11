@@ -10,6 +10,16 @@ members = [
     "crates/bevy_ticked_lockstep_networking",
 ]
 
+# bevy_ensemble is pinned here, once, by commit. Every crate in this workspace takes it with
+# `workspace = true`, so bumping the transport is one edit and one `cargo update -p bevy_ensemble`
+# rather than a hunt through six manifests and a lock file that had quietly fallen nine commits
+# behind the branch they all named.
+[workspace.dependencies]
+bevy_ensemble = { git = "https://github.com/Sigma-studios/bevy_ensemble", rev = "4880d0b" }
+bevy_ensemble_webrtc = { git = "https://github.com/Sigma-studios/bevy_ensemble", rev = "4880d0b" }
+bevy_ensemble_steam = { git = "https://github.com/Sigma-studios/bevy_ensemble", rev = "4880d0b" }
+bevy_ensemble_loopback = { git = "https://github.com/Sigma-studios/bevy_ensemble", rev = "4880d0b" }
+
 [dependencies]
 bevy = { version = "0.19", default-features = false, features = ["std", "bevy_log"] }
 serde = { version = "1", features = ["derive"] }
