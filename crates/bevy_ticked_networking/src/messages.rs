@@ -21,6 +21,18 @@ pub struct ReceivedNetworkInput<T: TickedInput> {
     pub input: T,
 }
 
+/// Incoming event: a client has left the session.
+///
+/// Transport layers trigger this on the host when a client goes — kicked, disconnected, or
+/// gone of its own accord. The server forgets everything it held per sender for that uuid: its
+/// queued inputs at every tick, its [`InputMargins`](crate::server::InputMargins) entry, its
+/// [`NewestInputTick`](crate::server::NewestInputTick) high-water mark. Without this a departed
+/// player's last inputs kept being applied to its body until the window pruned them, its margin
+/// kept riding in every snapshot, and a peer that rejoined under the same uuid inherited a
+/// "newest tick" from its previous life that made its first inputs all read as stale.
+#[derive(Event, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PeerLeft(pub u128);
+
 /// Outgoing event: request to send a world snapshot to clients.
 ///
 /// The multiplayer server triggers this after each tick. Transport layers observe it.

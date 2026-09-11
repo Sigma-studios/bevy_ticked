@@ -73,7 +73,12 @@ fn main() {
             display_name: "Player".into(),
             ..default()
         })
-        .add_plugins(TickedPlugin::default())
+        // `Hz`, not the default `FixedUpdate`: the networking plugins need a clock they can
+        // steer, and refuse to build on Bevy's fixed one.
+        .add_plugins(TickedPlugin {
+            source: TickSource::Hz(64.0),
+            ..default()
+        })
         .add_plugins(PhysicsPlugins::new(TickedSimulation).with_length_unit(1.0))
         .insert_resource(Gravity(Vec2::ZERO))
         .add_plugins(TickedServerPlugin::<PlayerInput>::new())
@@ -393,6 +398,7 @@ fn capture_local_input(
 
 fn apply_inputs(
     tick: Res<CurrentTick>,
+    time: Res<Time>,
     input_queue: Res<InputQueue<PlayerInput>>,
     mut players: Query<(
         &mut LinearVelocity,
@@ -405,6 +411,7 @@ fn apply_inputs(
     let Some(tick_inputs) = input_queue.at_tick(tick.0) else {
         return;
     };
+    let dt = time.delta_secs();
 
     for (mut vel, mut aim, mut cooldown, uuid, kind) in players.iter_mut() {
         if *kind != EntityKind::Player {
@@ -412,7 +419,7 @@ fn apply_inputs(
         }
         if let Some(input) = tick_inputs.get(&uuid.0) {
             let movement = Vec2::new(input.movement[0], input.movement[1]);
-            vel.0 += movement * MOVE_ACCEL * SECONDS_PER_TICK;
+            vel.0 += movement * MOVE_ACCEL * dt;
             aim.0 = input.aim_angle;
 
             if cooldown.0 > 0 {
@@ -423,7 +430,7 @@ fn apply_inputs(
 }
 
 fn move_bullets(world: &mut World) {
-    let dt = SECONDS_PER_TICK;
+    let dt = world.resource::<Time>().delta_secs();
     let tick = world.resource::<CurrentTick>().0;
     let input_queue = world.resource::<InputQueue<PlayerInput>>();
 

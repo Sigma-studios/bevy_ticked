@@ -37,9 +37,15 @@ use std::{
 use bevy::prelude::*;
 
 /// Trait bound for resources that can be tracked by the tick system.
-pub trait TickedResource: Resource + Clone + Send + Sync + 'static {}
+///
+/// `Default` is the bound that lets [`TickedResourceRegistry::reset_all`] exist: it is what a
+/// registered resource goes back to when a session ends. A registered resource is session
+/// state by definition — that is what registering it says — and session state has to have a
+/// value that means "no session". A type with no sensible default is one whose value is not
+/// session state, and should be a component on a tracked entity or not registered at all.
+pub trait TickedResource: Resource + Clone + Default + Send + Sync + 'static {}
 
-impl<R> TickedResource for R where R: Resource + Clone + Send + Sync + 'static {}
+impl<R> TickedResource for R where R: Resource + Clone + Default + Send + Sync + 'static {}
 
 /// The history of one registered resource type across ticks.
 #[derive(Resource)]
@@ -111,6 +117,7 @@ struct RegisteredTickedResource {
     truncate_after: fn(&mut World, u64),
     prune_before: fn(&mut World, u64),
     clear: fn(&mut World),
+    reset: fn(&mut World),
     serialize_at: Option<fn(&World, u64) -> Option<Vec<u8>>>,
     deserialize_and_apply: Option<fn(&mut World, u64, &[u8])>,
 }
@@ -161,6 +168,7 @@ impl TickedResourceRegistry {
             truncate_after: truncate_resource::<R>,
             prune_before: prune_resource::<R>,
             clear: clear_resource::<R>,
+            reset: reset_resource::<R>,
             serialize_at,
             deserialize_and_apply,
         });
@@ -221,6 +229,16 @@ impl TickedResourceRegistry {
         }
     }
 
+    /// Restore only the resources registered without serialization. See
+    /// [`TickedComponentRegistry::restore_local_only`](crate::registry::TickedComponentRegistry::restore_local_only).
+    pub fn restore_local_only(&self, world: &mut World, tick: u64) {
+        for entry in &self.inner.entries {
+            if entry.serialize_at.is_none() {
+                (entry.restore)(world, tick);
+            }
+        }
+    }
+
     pub fn truncate_all_after(&self, world: &mut World, tick: u64) {
         for entry in &self.inner.entries {
             (entry.truncate_after)(world, tick);
@@ -236,6 +254,23 @@ impl TickedResourceRegistry {
     pub fn clear_all(&self, world: &mut World) {
         for entry in &self.inner.entries {
             (entry.clear)(world);
+        }
+    }
+
+    /// Put every registered resource back to `R::default()` and forget its history.
+    ///
+    /// Called when a session ends, by the networking crate's leave path. Registering a resource
+    /// says it is part of the session, and the previous session's last value — the round that
+    /// was on, the score, who held the objective — must not be the first thing the next lobby
+    /// sees. Every consumer with a `RoundState` wrote a `reset_round_on_leave` system for exactly
+    /// this; now none of them has to.
+    ///
+    /// A resource that is registered but not currently in the world is left absent: absence is
+    /// a state the game chose, and inserting a default behind its back would be a change it
+    /// never asked for. A resource that is present is overwritten, whatever it held.
+    pub fn reset_all(&self, world: &mut World) {
+        for entry in &self.inner.entries {
+            (entry.reset)(world);
         }
     }
 
@@ -305,6 +340,15 @@ fn clear_resource<R: TickedResource>(world: &mut World) {
     if let Some(mut actions) = world.get_resource_mut::<ResourceActions<R>>() {
         actions.clear();
     }
+}
+
+fn reset_resource<R: TickedResource>(world: &mut World) {
+    // Inserted rather than assigned through `get_resource_mut`, which an immutable resource
+    // cannot offer; a present resource is replaced either way.
+    if world.contains_resource::<R>() {
+        world.insert_resource(R::default());
+    }
+    clear_resource::<R>(world);
 }
 
 /// Register a resource for rollback.

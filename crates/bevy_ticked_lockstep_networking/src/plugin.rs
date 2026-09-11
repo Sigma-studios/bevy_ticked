@@ -215,4 +215,11 @@ where
                     .after(EnsembleSet::ReceivePackets),
             );
     }
+
+    fn finish(&self, app: &mut App) {
+        // A lockstep client has no prediction lead to steer, but it does dilate its rate to
+        // catch up after a join (part 2 of the lockstep phase), and the same clock rule keeps
+        // one story for every networked role.
+        bevy_ticked::require_steerable_tick_source(app, "LockstepPlugin");
+    }
 }

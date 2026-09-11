@@ -211,6 +211,14 @@ fn elapsed_at(timestep: Duration, tick: u64) -> Duration {
 /// The clock is rebuilt from `tick` on every call rather than advanced, so
 /// re-running a tick during rollback reproduces the original values exactly and
 /// moving backwards is not a special case.
+///
+/// The frame clocks are swapped too. `Time<Virtual>`, `Time<Fixed>` and `Time<Real>` read the
+/// tick's delta and elapsed for the duration of the schedule, and are put back afterwards. A
+/// system that reaches for `Time<Virtual>` inside the simulation — a timer, a cooldown, a
+/// tween — used to get the *frame's* delta, which is one value on the tick that first ran and
+/// another on the replay, and the replay diverged by the difference. Now it gets the tick's,
+/// same as `Time`. The source guard in `bevy_ticked_testing` still flags the read, because
+/// `Time<Real>` inside a tick is a wrong question even when the answer is made harmless.
 pub fn run_tick_schedule(world: &mut World, tick: u64, schedule: impl ScheduleLabel) {
     let context = *world.resource::<Time<Ticked>>().context();
 
@@ -222,12 +230,65 @@ pub fn run_tick_schedule(world: &mut World, tick: u64, schedule: impl ScheduleLa
 
     let outer = *world.resource::<Time>();
     *world.resource_mut::<Time>() = clock.as_generic();
+    let frame_clocks = swap_frame_clocks(world, &clock);
+
     let started = std::time::Instant::now();
     world.run_schedule(schedule);
     let elapsed = started.elapsed();
+
+    restore_frame_clocks(world, frame_clocks);
     *world.resource_mut::<Time>() = outer;
     if let Some(mut cost) = world.get_resource_mut::<crate::diagnostics::TickCost>() {
         cost.record(elapsed);
+    }
+}
+
+/// The frame clocks as they were outside the tick, so they can be put back.
+struct FrameClocks {
+    virtual_: Option<Time<Virtual>>,
+    fixed: Option<Time<Fixed>>,
+    real: Option<Time<Real>>,
+}
+
+/// Point every frame clock at the tick's delta and elapsed. Each keeps its own context (pause
+/// state, relative speed, timestep), only the readings change.
+fn swap_frame_clocks(world: &mut World, tick: &Time<Ticked>) -> FrameClocks {
+    let delta = tick.delta();
+    let elapsed = tick.elapsed();
+    fn reclocked<T: Default + Clone>(outer: &Time<T>, elapsed: Duration, delta: Duration) -> Time<T> {
+        let mut clock = Time::new_with(outer.context().clone());
+        clock.advance_by(elapsed.saturating_sub(delta));
+        clock.advance_by(delta);
+        clock
+    }
+    let virtual_ = world.get_resource::<Time<Virtual>>().cloned();
+    let fixed = world.get_resource::<Time<Fixed>>().cloned();
+    let real = world.get_resource::<Time<Real>>().cloned();
+    if let Some(outer) = &virtual_ {
+        *world.resource_mut::<Time<Virtual>>() = reclocked(outer, elapsed, delta);
+    }
+    if let Some(outer) = &fixed {
+        *world.resource_mut::<Time<Fixed>>() = reclocked(outer, elapsed, delta);
+    }
+    if let Some(outer) = &real {
+        *world.resource_mut::<Time<Real>>() = reclocked(outer, elapsed, delta);
+    }
+    FrameClocks {
+        virtual_,
+        fixed,
+        real,
+    }
+}
+
+fn restore_frame_clocks(world: &mut World, clocks: FrameClocks) {
+    if let Some(outer) = clocks.virtual_ {
+        *world.resource_mut::<Time<Virtual>>() = outer;
+    }
+    if let Some(outer) = clocks.fixed {
+        *world.resource_mut::<Time<Fixed>>() = outer;
+    }
+    if let Some(outer) = clocks.real {
+        *world.resource_mut::<Time<Real>>() = outer;
     }
 }
 

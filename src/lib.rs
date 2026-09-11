@@ -52,6 +52,13 @@ pub struct TickedLoop;
 /// System sets for ordering relative to tick advancement, within [`TickedLoop`].
 #[derive(SystemSet, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum TickedSystems {
+    /// The first thing in the loop: put the world back the way the simulation left it.
+    ///
+    /// Anything that writes a *presentation* value into a simulated component between ticks —
+    /// [`TickedInterpolationPlugin`](interpolation::TickedInterpolationPlugin) blending a
+    /// `Transform` for the renderer — undoes that write here, before any system in the loop
+    /// reads the component. Nothing else belongs in this set.
+    Restore,
     /// Runs before tick advancement (e.g. client rollback on snapshot).
     PreTick,
     /// The core tick advancement: increment, run TickedSimulation, capture.
@@ -94,6 +101,50 @@ pub enum TickSource {
     Manual,
 }
 
+impl TickSource {
+    /// Whether this source can be steered: run a little fast or slow to move a networked
+    /// client's prediction lead without adding or dropping whole ticks.
+    ///
+    /// Only [`Hz`](Self::Hz) owns an accumulator to stretch. [`Manual`](Self::Manual) is
+    /// steered by whoever drives it, which a test harness does. [`FixedUpdate`](Self::FixedUpdate)
+    /// hands the clock to Bevy and can only nudge by a whole tick, so a networked client on it
+    /// jumps a tick every time its lead drifts — visibly, in everything the simulation draws.
+    pub fn is_steerable(&self) -> bool {
+        !matches!(self, Self::FixedUpdate)
+    }
+}
+
+/// Which [`TickSource`] the app was built with, for anything that has to know.
+///
+/// Inserted by [`TickedPlugin`]. The networking plugins read it to refuse a source they cannot
+/// steer (see [`require_steerable_tick_source`]).
+#[derive(Resource, Debug, Clone, Copy, PartialEq)]
+pub struct ConfiguredTickSource(pub TickSource);
+
+/// Refuse to build a networked role on a tick source that cannot be steered.
+///
+/// Call it from a plugin's `finish`, where every plugin's `build` has run. Panics with a
+/// message naming `plugin` and the fix, because the alternative was what every consumer had:
+/// a client that ran on `FixedUpdate` for months, nudging its lead by a whole tick at a time,
+/// and a bug report that said "the remote players stutter".
+///
+/// # Panics
+///
+/// If [`TickedPlugin`] was not added, or was added with [`TickSource::FixedUpdate`].
+pub fn require_steerable_tick_source(app: &App, plugin: &str) {
+    let Some(source) = app.world().get_resource::<ConfiguredTickSource>() else {
+        panic!("{plugin} needs TickedPlugin, added before it");
+    };
+    assert!(
+        source.0.is_steerable(),
+        "{plugin} cannot run on TickSource::FixedUpdate: a networked client steers its \
+         prediction lead by running a couple of percent fast or slow, and Bevy's fixed clock \
+         cannot be stretched. Build TickedPlugin with `source: TickSource::Hz(64.0)` (the \
+         simulation rate you had) and add TickedInterpolationPlugin for smooth visuals. \
+         TickedPlugin::default() keeps FixedUpdate for solo play and scrubbing."
+    );
+}
+
 /// Plugin that installs the deterministic tick simulation.
 ///
 /// Defaults to one tick per `FixedUpdate` step, which is the classic
@@ -111,6 +162,33 @@ pub struct TickedPlugin {
     /// accumulated time is dropped rather than queued, trading a small time
     /// discontinuity for not spiralling.
     pub max_ticks_per_frame: u32,
+    /// How many ticks of history to keep, or `None` to let whoever knows better decide.
+    ///
+    /// `None` installs [`HISTORY_BUFFER_TICKS`](tick::HISTORY_BUFFER_TICKS) (a hundred
+    /// seconds, for scrubbing) and marks it as a default, which a plugin added later may
+    /// replace — the networking plugins size it from what a rollback can actually reach.
+    /// `Some(n)` is a game's own choice and nothing replaces it. See
+    /// [`HistoryWindowChosen`].
+    pub history_ticks: Option<u64>,
+    /// How [`TickedSimulation`] runs its systems.
+    ///
+    /// Single-threaded by default, because the simulation is supposed to be deterministic and
+    /// a multi-threaded executor is the easiest way to lose that: two systems that both write a
+    /// component with no ordering between them run in an order that differs per frame and per
+    /// peer, and the world hash disagrees for a reason no test can reproduce. A game whose
+    /// systems are all explicitly ordered can take `MultiThreaded` back; it gains little, since
+    /// a tick is short and the executor's overhead is not.
+    pub simulation_executor: SimulationExecutor,
+}
+
+/// Which executor runs [`TickedSimulation`]. See [`TickedPlugin::simulation_executor`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SimulationExecutor {
+    /// Systems run one at a time, in a fixed order. Deterministic by construction.
+    #[default]
+    SingleThreaded,
+    /// Bevy's default: systems without an ordering between them may run in any order.
+    MultiThreaded,
 }
 
 impl Default for TickedPlugin {
@@ -120,6 +198,8 @@ impl Default for TickedPlugin {
             // 250ms of catch-up at 64Hz, matching Time<Virtual>'s default
             // max_delta.
             max_ticks_per_frame: 16,
+            history_ticks: None,
+            simulation_executor: SimulationExecutor::SingleThreaded,
         }
     }
 }
@@ -127,6 +207,12 @@ impl Default for TickedPlugin {
 /// Runtime copy of [`TickedPlugin::max_ticks_per_frame`].
 #[derive(Resource, Clone, Copy, Debug)]
 pub struct MaxTicksPerFrame(pub u32);
+
+/// Present when the game chose its own [`HistoryBufferTicks`] through
+/// [`TickedPlugin::history_ticks`]. A plugin with a better default for its role replaces the
+/// window only when this is absent.
+#[derive(Resource, Clone, Copy, Debug)]
+pub struct HistoryWindowChosen;
 
 impl Plugin for TickedPlugin {
     fn build(&self, app: &mut App) {
@@ -137,7 +223,7 @@ impl Plugin for TickedPlugin {
             .init_resource::<tracked_index::TrackedEntityIndex>()
             .add_observer(tracked_index::index_tracked)
             .add_observer(tracked_index::unindex_tracked)
-            .init_resource::<HistoryBufferTicks>()
+            .insert_resource(ConfiguredTickSource(self.source))
             .init_resource::<Time<Ticked>>()
             .init_resource::<diagnostics::TickCost>()
             .init_schedule(TickedSimulation)
@@ -161,6 +247,7 @@ impl Plugin for TickedPlugin {
         app.configure_sets(
             TickedLoop,
             (
+                TickedSystems::Restore,
                 TickedSystems::PreTick,
                 TickedSystems::Tick,
                 TickedSystems::PostTick,
@@ -168,8 +255,22 @@ impl Plugin for TickedPlugin {
                 .chain(),
         )
         .add_systems(TickedLoop, advance_tick_system.in_set(TickedSystems::Tick));
+        if self.simulation_executor == SimulationExecutor::SingleThreaded {
+            app.edit_schedule(TickedSimulation, |schedule| {
+                schedule.set_executor(bevy::ecs::schedule::SingleThreadedExecutor::new());
+            });
+        }
 
         app.insert_resource(MaxTicksPerFrame(self.max_ticks_per_frame));
+        match self.history_ticks {
+            Some(ticks) => {
+                app.insert_resource(HistoryBufferTicks(ticks))
+                    .insert_resource(HistoryWindowChosen);
+            }
+            None => {
+                app.init_resource::<HistoryBufferTicks>();
+            }
+        }
 
         match self.source {
             TickSource::FixedUpdate => {
@@ -195,6 +296,18 @@ impl Plugin for TickedPlugin {
         }
     }
 }
+
+/// Present while a manual [`StepForward`] runs [`TickedLoop`], so the tick advances even though
+/// the simulation is paused. Removed before the loop returns.
+#[derive(Resource, Debug, Clone, Copy)]
+pub struct StepOnce;
+
+/// Present while [`TickedLoop`] runs after a manual [`StepBackward`] or [`ResetToTick`]: the
+/// world has just been restored to [`CurrentTick`] and the tick must not advance, but everything
+/// around it — the interpolation pair, a broadcast, a checksum — has to see the restored world.
+/// Removed before the loop returns.
+#[derive(Resource, Debug, Clone, Copy)]
+pub struct RestoredThisPass;
 
 /// Give [`RunTickedLoop`] the frame slot immediately after `FixedMain`.
 fn install_run_ticked_loop(app: &mut App) {
@@ -302,9 +415,15 @@ fn advance_one_tick(world: &mut World) {
     }
 }
 
-/// Auto-advance one tick per `FixedUpdate` step, unless paused.
+/// Auto-advance one tick per pass of the loop, unless paused.
+///
+/// A manual step passes with [`StepOnce`] present and advances regardless; a manual rewind
+/// passes with [`RestoredThisPass`] present and never advances.
 fn advance_tick_system(world: &mut World) {
-    if world.get_resource::<TicksPaused>().is_some() {
+    if world.contains_resource::<RestoredThisPass>() {
+        return;
+    }
+    if world.contains_resource::<TicksPaused>() && !world.contains_resource::<StepOnce>() {
         return;
     }
     advance_one_tick(world);
@@ -334,33 +453,47 @@ fn apply_manual_controls(world: &mut World) {
         actions.push(ManualControlAction::Reset(reset.0));
     }
 
+    // Every manual action goes through `TickedLoop`, not around it. A step used to call
+    // `advance_one_tick` directly, so nothing in `PreTick` or `PostTick` ran: the interpolation
+    // pair was not shifted, a host stepping its paused world broadcast nothing, a checksum was
+    // not sampled. Scrubbing was a different simulation from playing.
     for action in actions {
         match action {
             ManualControlAction::StepForward => {
-                advance_one_tick(world);
+                world.insert_resource(StepOnce);
+                world.run_schedule(TickedLoop);
+                world.remove_resource::<StepOnce>();
             }
             ManualControlAction::StepBackward => {
                 let current_tick = world.resource::<CurrentTick>().0;
                 if current_tick == 0 {
                     continue;
                 }
-                let target = current_tick - 1;
-                let registry = world.resource::<TickedComponentRegistry>().clone();
-                registry.restore_all(world, target);
-                events::TickedEventRegistry::truncate_all_after(world, target);
-                world.resource_mut::<CurrentTick>().0 = target;
+                restore_to(world, current_tick - 1);
+                run_loop_restored(world);
             }
             ManualControlAction::Reset(target) => {
                 let current_tick = world.resource::<CurrentTick>().0;
                 if target <= current_tick {
-                    let registry = world.resource::<TickedComponentRegistry>().clone();
-                    registry.restore_all(world, target);
-                    events::TickedEventRegistry::truncate_all_after(world, target);
-                    world.resource_mut::<CurrentTick>().0 = target;
+                    restore_to(world, target);
                 } else {
                     rollback_and_resimulate(world, current_tick, target, TickedSimulation);
                 }
+                run_loop_restored(world);
             }
         }
     }
+}
+
+fn restore_to(world: &mut World, target: u64) {
+    let registry = world.resource::<TickedComponentRegistry>().clone();
+    registry.restore_all(world, target);
+    events::TickedEventRegistry::truncate_all_after(world, target);
+    world.resource_mut::<CurrentTick>().0 = target;
+}
+
+fn run_loop_restored(world: &mut World) {
+    world.insert_resource(RestoredThisPass);
+    world.run_schedule(TickedLoop);
+    world.remove_resource::<RestoredThisPass>();
 }

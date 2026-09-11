@@ -34,7 +34,7 @@ fn client() -> App {
     let mut app = App::new();
     app.add_plugins(MinimalPlugins)
         .add_plugins(TickedPlugin {
-            source: TickSource::FixedUpdate,
+            source: TickSource::Hz(64.0),
             ..default()
         })
         .add_plugins(TickedClientPlugin::<Input>::new())
@@ -49,7 +49,7 @@ fn host() -> App {
     let mut app = App::new();
     app.add_plugins(MinimalPlugins)
         .add_plugins(TickedPlugin {
-            source: TickSource::FixedUpdate,
+            source: TickSource::Hz(64.0),
             ..default()
         })
         .add_plugins(TickedServerPlugin::<Input>::new())
