@@ -98,51 +98,47 @@ fn setup(
 }
 
 fn keyboard_controls(
-    mut commands: Commands,
     keys: Res<ButtonInput<KeyCode>>,
-    ticks_paused: Option<Res<TicksPaused>>,
+    mut holds: ResMut<TickHolds>,
     mut step_forward: MessageWriter<StepForward>,
     mut step_backward: MessageWriter<StepBackward>,
     mut reset: MessageWriter<ResetToTick>,
 ) {
     if keys.just_pressed(KeyCode::Space) {
-        if ticks_paused.is_some() {
-            commands.remove_resource::<TicksPaused>();
-        } else {
-            commands.insert_resource(TicksPaused);
-        }
+        let paused = holds.holds(TickHoldReason::Manual);
+        holds.set(TickHoldReason::Manual, !paused);
     }
     // A/D: step once on press
     if keys.just_pressed(KeyCode::KeyD) {
-        commands.insert_resource(TicksPaused);
+        holds.hold(TickHoldReason::Manual);
         step_forward.write(StepForward);
     }
     if keys.just_pressed(KeyCode::KeyA) {
-        commands.insert_resource(TicksPaused);
+        holds.hold(TickHoldReason::Manual);
         step_backward.write(StepBackward);
     }
     // Q/E: step continuously while held
     if keys.pressed(KeyCode::KeyE) {
-        commands.insert_resource(TicksPaused);
+        holds.hold(TickHoldReason::Manual);
         step_forward.write(StepForward);
     }
     if keys.pressed(KeyCode::KeyQ) {
-        commands.insert_resource(TicksPaused);
+        holds.hold(TickHoldReason::Manual);
         step_backward.write(StepBackward);
     }
     if keys.just_pressed(KeyCode::KeyR) {
-        commands.insert_resource(TicksPaused);
+        holds.hold(TickHoldReason::Manual);
         reset.write(ResetToTick(0));
     }
 }
 
 fn update_ui(
     tick: Res<CurrentTick>,
-    ticks_paused: Option<Res<TicksPaused>>,
+    holds: Res<TickHolds>,
     mut query: Query<&mut Text, With<TickUiText>>,
 ) {
     for mut text in &mut query {
-        let status = if ticks_paused.is_some() { "PAUSED" } else { "PLAYING" };
+        let status = if holds.is_held() { "PAUSED" } else { "PLAYING" };
         **text = format!("Tick: {} [{}]", tick.0, status);
     }
 }

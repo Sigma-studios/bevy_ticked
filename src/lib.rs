@@ -18,9 +18,7 @@ use bevy::prelude::*;
 
 use registry::TickedComponentRegistry;
 use rollback::rollback_and_resimulate;
-use tick::{
-    CurrentTick, HistoryBufferTicks, ResetToTick, StepBackward, StepForward, TicksPaused,
-};
+use tick::{CurrentTick, HistoryBufferTicks, ResetToTick, StepBackward, StepForward, TickHolds};
 use time::{run_tick_schedule, TickRateDilation, Ticked, TickedTime};
 use tracked_entity::{TickTrackedEntity, TickTrackedEntityCounter};
 
@@ -224,6 +222,7 @@ impl Plugin for TickedPlugin {
             .add_observer(tracked_index::index_tracked)
             .add_observer(tracked_index::unindex_tracked)
             .insert_resource(ConfiguredTickSource(self.source))
+            .init_resource::<TickHolds>()
             .init_resource::<Time<Ticked>>()
             .init_resource::<diagnostics::TickCost>()
             .init_schedule(TickedSimulation)
@@ -298,7 +297,7 @@ impl Plugin for TickedPlugin {
 }
 
 /// Present while a manual [`StepForward`] runs [`TickedLoop`], so the tick advances even though
-/// the simulation is paused. Removed before the loop returns.
+/// the clock is held. Removed before the loop returns.
 #[derive(Resource, Debug, Clone, Copy)]
 pub struct StepOnce;
 
@@ -415,7 +414,7 @@ fn advance_one_tick(world: &mut World) {
     }
 }
 
-/// Auto-advance one tick per pass of the loop, unless paused.
+/// Auto-advance one tick per pass of the loop, unless something holds the clock.
 ///
 /// A manual step passes with [`StepOnce`] present and advances regardless; a manual rewind
 /// passes with [`RestoredThisPass`] present and never advances.
@@ -423,7 +422,7 @@ fn advance_tick_system(world: &mut World) {
     if world.contains_resource::<RestoredThisPass>() {
         return;
     }
-    if world.contains_resource::<TicksPaused>() && !world.contains_resource::<StepOnce>() {
+    if world.resource::<TickHolds>().is_held() && !world.contains_resource::<StepOnce>() {
         return;
     }
     advance_one_tick(world);

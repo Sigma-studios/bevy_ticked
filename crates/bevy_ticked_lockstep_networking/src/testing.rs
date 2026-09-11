@@ -23,7 +23,7 @@
 //!   arrived and did nothing", which look identical from the far side of a simulation.
 
 use bevy::prelude::*;
-use bevy_ticked::prelude::{CurrentTick, TicksPaused};
+use bevy_ticked::prelude::{CurrentTick, TickHolds};
 
 use crate::{
     ActionTracker, LastScheduledTick, LocalPendingActions, LockstepAction, LockstepConfig,
@@ -39,7 +39,7 @@ pub fn current_tick(app: &App) -> u64 {
 /// On a client that usually means it is waiting for an authoritative tick, which is the normal
 /// resting state of a peer that has caught up — not a fault by itself.
 pub fn is_paused(app: &App) -> bool {
-    app.world().get_resource::<TicksPaused>().is_some()
+    app.world().resource::<TickHolds>().is_held()
 }
 
 /// What the client-side buffer has settled on, in ticks.
