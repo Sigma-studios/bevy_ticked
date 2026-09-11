@@ -41,6 +41,8 @@ jobs:
       - run: cargo fmt --all -- --check
       - name: the tick does not read the frame
         run: cargo test --workspace --test sim_is_deterministic
+      - name: the examples, with the one-shell local session
+        run: cargo check -p bevy_ticked_networking_ensemble --features local-session --examples
       - run: cargo clippy --workspace --all-targets -- -D warnings -A clippy::collapsible_if -A clippy::manual_is_multiple_of -A clippy::explicit_counter_loop
 
   wasm:

@@ -48,6 +48,12 @@ real join over WebRTC found two ordering bugs in E2's join handshake, both fixed
   rules: assert on the peer under test, cut logs at `LOG_SESSION_START`, exit 3 when the
   transport never connected.
 - `ARCHITECTURE.md`, `CHANGELOG.md`, `docs/migration/`, `.github/workflows/ci.yml`.
+- `bevy_ticked_networking_ensemble::local_session` (feature `local-session`): one shell, N
+  windows. `TICKED_LOCAL_SESSION=2 cargo run --example fps_shooter` starts a signalling
+  server in-process, launches a second copy of the executable as a client, and hosts; the
+  copies host and join on their own. A game adds two lines: `server_url:
+  local_session::signalling_url()` on its WebRTC plugin and `TickedLocalSessionPlugin`.
+  `TICKED_ROLE=host|client` alone drives one process against `SIGNALLING_SERVER_URL`.
 
 **Do** keep the client role adoption on a *promoted* lobby (the bridge does now:
 `adopt_role` ignores `PendingLobby` for clients). **Watch** a game's own per-entity sends:

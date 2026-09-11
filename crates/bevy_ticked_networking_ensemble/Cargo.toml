@@ -8,12 +8,17 @@ default = ["overlay"]
 # Publishes the simulation's counters (tick cost, replays, snapshot bytes) to bevy_ensemble's
 # net-debug overlay under `ticked.*`.
 overlay = ["bevy_ensemble/netdebug"]
+# One shell, N windows: `TICKED_LOCAL_SESSION=N cargo run` starts an in-process signalling
+# server, launches N-1 more copies of the executable as clients, and hosts itself. See
+# `local_session`.
+local-session = ["dep:bevy_ensemble_webrtc", "bevy_ensemble_webrtc/server"]
 
 [dependencies]
 bevy = { version = "0.19", default-features = false, features = ["std", "bevy_log"] }
 bevy_ticked = { path = "../.." }
 bevy_ticked_networking = { path = "../bevy_ticked_networking" }
 bevy_ensemble = { workspace = true }
+bevy_ensemble_webrtc = { workspace = true, optional = true }
 postcard = { version = "1", features = ["alloc"] }
 serde = { version = "1", features = ["derive"] }
 
@@ -31,10 +36,12 @@ bevy_ticked_testing = { path = "../bevy_ticked_testing" }
 [[example]]
 name = "top_down_shooter"
 path = "examples/top_down_shooter.rs"
+required-features = ["local-session"]
 
 [[example]]
 name = "fps_shooter"
 path = "examples/fps_shooter.rs"
+required-features = ["local-session"]
 
 [[example]]
 name = "netpeer"

@@ -8,6 +8,7 @@ use bevy_ensemble_webrtc::{BevyEnsembleWebrtcPlugin, JoinWebrtcLobby, RefreshLob
 use bevy_ticked::prelude::*;
 use bevy_ticked_avian::avian2d::TickedAvianPlugin;
 use bevy_ticked_networking::prelude::*;
+use bevy_ticked_networking_ensemble::local_session::{self, TickedLocalSessionPlugin};
 use bevy_ticked_networking_ensemble::{
     SpawnerSlots, TickedEnsembleSessionPlugin, TickedNetworkingEnsemblePlugin,
 };
@@ -65,10 +66,9 @@ struct UiText;
 // --- Plugin setup ---
 
 fn main() {
-    let server_url = std::env::var("SIGNALLING_SERVER_URL")
-        .ok()
-        .or_else(|| option_env!("SIGNALLING_SERVER_URL").map(String::from))
-        .unwrap_or_else(|| "ws://localhost:9090/ws".into());
+    // `SIGNALLING_SERVER_URL`, or the launcher's own in-process server under
+    // `TICKED_LOCAL_SESSION=N`, or the local default.
+    let server_url = local_session::signalling_url();
 
     App::new()
         .add_plugins(DefaultPlugins)
@@ -96,6 +96,8 @@ fn main() {
         // The session plugin adopts the roles, runs the registry handshake and hands each
         // client a spawner slot; the example used to do the first by hand and the rest not at all.
         .add_plugins(TickedEnsembleSessionPlugin::default())
+        // `TICKED_LOCAL_SESSION=2 cargo run --example ...`: two windows from one shell.
+        .add_plugins(TickedLocalSessionPlugin)
         // The renderer blends each body between its last two tick states, and a correction
         // to a predicted body slides into place instead of blinking there. Neither touches
         // what the simulation reads.

@@ -2021,6 +2021,7 @@ dependencies = [
  "bevy_ensemble_steam",
  "bevy_ensemble_webrtc",
  "bevy_ticked",
+ "bevy_ticked_networking_ensemble",
  "bevy_ticked_testing",
  "serde",
 ]

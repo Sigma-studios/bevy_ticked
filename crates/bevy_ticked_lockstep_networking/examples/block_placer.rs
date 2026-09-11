@@ -217,10 +217,10 @@ fn main() {
 
     #[cfg(feature = "transport-webrtc")]
     {
-        let server_url = std::env::var("SIGNALLING_SERVER_URL")
-            .ok()
-            .or_else(|| option_env!("SIGNALLING_SERVER_URL").map(String::from))
-            .unwrap_or_else(|| "ws://localhost:9090/ws".into());
+        // `SIGNALLING_SERVER_URL`, or the launcher's own in-process server under
+        // `TICKED_LOCAL_SESSION=N` (two windows from one shell), or the local default.
+        let server_url = bevy_ticked_networking_ensemble::local_session::signalling_url();
+        app.add_plugins(bevy_ticked_networking_ensemble::local_session::TickedLocalSessionPlugin);
         app.add_plugins(BevyEnsembleWebrtcPlugin {
             server_url,
             display_name: "Player".into(),
