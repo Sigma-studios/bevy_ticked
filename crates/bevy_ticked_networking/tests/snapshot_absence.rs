@@ -103,7 +103,8 @@ fn a_removed_component_is_replicated() {
     let mut host = peer();
     let mut client = peer();
 
-    host.world_mut().spawn((TickTrackedEntity(1), Pos(0), Ride(7)));
+    host.world_mut()
+        .spawn((TickTrackedEntity(1), Pos(0), Ride(7)));
     sync(&mut host, &mut client, 1);
     assert_eq!(only::<Ride>(&mut client), Some(Ride(7)), "the ride arrived");
 
@@ -132,7 +133,8 @@ fn the_snapshot_path_and_the_rollback_path_agree() {
     let mut host = peer();
     let mut client = peer();
 
-    host.world_mut().spawn((TickTrackedEntity(1), Pos(0), Ride(7)));
+    host.world_mut()
+        .spawn((TickTrackedEntity(1), Pos(0), Ride(7)));
     sync(&mut host, &mut client, 1);
 
     let entity = entity_with::<Ride>(&mut host);
@@ -145,7 +147,10 @@ fn the_snapshot_path_and_the_rollback_path_agree() {
     let after_rollback = only::<Ride>(&mut client);
 
     assert_eq!(after_snapshot, None);
-    assert_eq!(after_rollback, after_snapshot, "the two paths must not disagree");
+    assert_eq!(
+        after_rollback, after_snapshot,
+        "the two paths must not disagree"
+    );
 }
 
 // ── what the fix must not break ──────────────────────────────────────────────
@@ -183,12 +188,17 @@ fn an_entity_spawned_by_the_same_snapshot_keeps_its_components() {
     host.world_mut().spawn((TickTrackedEntity(1), Pos(0)));
     sync(&mut host, &mut client, 1);
 
-    host.world_mut().spawn((TickTrackedEntity(2), Pos(9), Ride(3)));
+    host.world_mut()
+        .spawn((TickTrackedEntity(2), Pos(9), Ride(3)));
     sync(&mut host, &mut client, 2);
 
-    let mut q = client.world_mut().query::<(&TickTrackedEntity, Option<&Ride>)>();
-    let mut seen: Vec<(u64, Option<u64>)> =
-        q.iter(client.world()).map(|(t, r)| (t.0, r.map(|r| r.0))).collect();
+    let mut q = client
+        .world_mut()
+        .query::<(&TickTrackedEntity, Option<&Ride>)>();
+    let mut seen: Vec<(u64, Option<u64>)> = q
+        .iter(client.world())
+        .map(|(t, r)| (t.0, r.map(|r| r.0)))
+        .collect();
     seen.sort();
     assert_eq!(
         seen,
@@ -209,7 +219,8 @@ fn an_entity_stripped_of_every_networked_component_survives_bare() {
     let mut client = peer();
 
     host.world_mut().spawn((TickTrackedEntity(1), Pos(0)));
-    host.world_mut().spawn((TickTrackedEntity(2), Pos(0), Ride(7)));
+    host.world_mut()
+        .spawn((TickTrackedEntity(2), Pos(0), Ride(7)));
     sync(&mut host, &mut client, 1);
     assert_eq!(tracked_ids(&mut client), vec![1, 2]);
 
@@ -230,7 +241,10 @@ fn an_entity_stripped_of_every_networked_component_survives_bare() {
         .find(|(t, _, _)| t.0 == 2)
         .map(|(_, pos, ride)| (pos.copied(), ride.copied()));
     assert_eq!(bare, Some((None, None)), "with nothing on it");
-    assert!(host.world().get_entity(entity).is_ok(), "...and the host still has it");
+    assert!(
+        host.world().get_entity(entity).is_ok(),
+        "...and the host still has it"
+    );
 }
 
 /// §3.3's precondition, checked rather than assumed: a tracked entity whose whole

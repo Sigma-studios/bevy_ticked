@@ -112,9 +112,12 @@ fn adaptive_state_is_reset_with_the_lobby() {
     net.add_client(2, peer_with(2, recipe));
     net.set_link(Link::satellite());
 
-    run_until(&mut net, 500, "the tuner growing the client's buffer", |net| {
-        client_tick_buffer(net.app(CLIENT_PEER)) > 6
-    });
+    run_until(
+        &mut net,
+        500,
+        "the tuner growing the client's buffer",
+        |net| client_tick_buffer(net.app(CLIENT_PEER)) > 6,
+    );
     assert!(
         net.app(CLIENT_PEER)
             .world()

@@ -80,7 +80,10 @@ fn an_id_reclaimed_by_a_new_entity_is_not_unindexed_by_the_old_one() {
 
     let new = app.world_mut().spawn((TickTrackedEntity(7), Pos(2))).id();
     app.update();
-    assert_eq!(app.world().resource::<TrackedEntityIndex>().get(7), Some(new));
+    assert_eq!(
+        app.world().resource::<TrackedEntityIndex>().get(7),
+        Some(new)
+    );
 
     app.world_mut().despawn(old);
     app.update();
@@ -130,7 +133,10 @@ fn leaving_a_session_clears_the_input_queue_and_the_tick() {
     app.update();
 
     assert!(
-        app.world().resource::<InputQueue<Input>>().inputs.is_empty(),
+        app.world()
+            .resource::<InputQueue<Input>>()
+            .inputs
+            .is_empty(),
         "inputs from the last session must not be applied to the next one"
     );
     assert_eq!(app.world().resource::<CurrentTick>().0, 0);
@@ -144,7 +150,9 @@ fn leaving_before_the_first_snapshot_does_not_leave_the_clock_stopped() {
     app.world_mut().insert_resource(LocalClientPlayer(1));
     app.update();
     assert!(
-        app.world().resource::<TickHolds>().holds(TickHoldReason::AwaitingSync),
+        app.world()
+            .resource::<TickHolds>()
+            .holds(TickHoldReason::AwaitingSync),
         "a joining client is held until the host's world arrives"
     );
 
@@ -180,7 +188,8 @@ fn a_host_with_no_recipients_builds_no_snapshot() {
 
     app.world_mut().insert_resource(LocalServerPlayer(1));
     app.world_mut().spawn((TickTrackedEntity(1), Pos(0)));
-    app.world_mut().insert_resource(SnapshotRecipientList(Vec::new()));
+    app.world_mut()
+        .insert_resource(SnapshotRecipientList(Vec::new()));
     for _ in 0..4 {
         run_tick(&mut app);
     }
@@ -190,7 +199,8 @@ fn a_host_with_no_recipients_builds_no_snapshot() {
         "nobody is listening, so nothing is serialised"
     );
 
-    app.world_mut().insert_resource(SnapshotRecipientList(vec![2]));
+    app.world_mut()
+        .insert_resource(SnapshotRecipientList(vec![2]));
     for _ in 0..4 {
         run_tick(&mut app);
     }

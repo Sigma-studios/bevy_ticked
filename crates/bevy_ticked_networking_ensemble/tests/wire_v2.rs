@@ -217,12 +217,25 @@ fn a_mismatched_client_is_told_which_registration_differs() {
     assert_eq!(mismatch.peer, net.uuid(net.host()));
     assert_eq!(
         mismatch.theirs.component_names,
-        ["EntityKind", "Fuse", "PlayerSlot", "Pos", "Vel", "bevy_ticked::Owner"],
+        [
+            "EntityKind",
+            "Fuse",
+            "PlayerSlot",
+            "Pos",
+            "Vel",
+            "bevy_ticked::Owner"
+        ],
         "the host's sorted names travel with the handshake"
     );
     assert_eq!(
         mismatch.ours.component_names,
-        ["EntityKind", "Fuse", "PlayerSlot", "Vel", "bevy_ticked::Owner"]
+        [
+            "EntityKind",
+            "Fuse",
+            "PlayerSlot",
+            "Vel",
+            "bevy_ticked::Owner"
+        ]
     );
 
     // The host's side of the same story names the same registration.

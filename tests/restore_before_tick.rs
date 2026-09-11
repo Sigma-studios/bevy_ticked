@@ -91,8 +91,7 @@ fn the_true_transform_is_back_before_pre_tick() {
         (|bodies: Query<(&Transform, &TickedInterpolation)>, mut seen: ResMut<SeenInPreTick>| {
             for (transform, interpolation) in &bodies {
                 if let Some(current) = interpolation.current() {
-                    seen.0
-                        .push(transform.translation.x - current.translation.x);
+                    seen.0.push(transform.translation.x - current.translation.x);
                 }
             }
         })
@@ -110,7 +109,13 @@ fn the_true_transform_is_back_before_pre_tick() {
     // And the renderer still gets a blend: after a frame the transform is between two ticks.
     let shown = x(&mut app);
     let mut q = app.world_mut().query::<&TickedInterpolation>();
-    let current = q.single(app.world()).unwrap().current().unwrap().translation.x;
+    let current = q
+        .single(app.world())
+        .unwrap()
+        .current()
+        .unwrap()
+        .translation
+        .x;
     assert!(
         shown < current,
         "the frame ended on a partial tick, so the shown x ({shown}) should lag the simulated \
@@ -154,7 +159,12 @@ fn the_frame_clocks_read_tick_values_inside_the_simulation() {
     assert!(deltas.len() > 10);
     let tick = 1.0 / 64.0;
     for (t, v, f, r) in deltas {
-        for (name, value) in [("Time", t), ("Time<Virtual>", v), ("Time<Fixed>", f), ("Time<Real>", r)] {
+        for (name, value) in [
+            ("Time", t),
+            ("Time<Virtual>", v),
+            ("Time<Fixed>", f),
+            ("Time<Real>", r),
+        ] {
             assert!(
                 (value - tick).abs() < 1e-6,
                 "{name}::delta inside a tick was {value}, not one tick ({tick}); a system \
@@ -193,7 +203,8 @@ fn stepping_app() -> App {
                     .in_set(TickedSystems::PostTick),
             ),
         );
-    app.world_mut().spawn((TickTrackedEntity(1), Transform::default(), Speed(64.0)));
+    app.world_mut()
+        .spawn((TickTrackedEntity(1), Transform::default(), Speed(64.0)));
     app
 }
 
@@ -238,7 +249,10 @@ fn a_manual_rewind_runs_the_loop_without_advancing() {
          saw {passes:?}"
     );
     assert_eq!(app.world().resource::<CurrentTick>().0, 2);
-    assert!((x(&mut app) - 2.0).abs() < 1e-6, "the world is the restored tick's");
+    assert!(
+        (x(&mut app) - 2.0).abs() < 1e-6,
+        "the world is the restored tick's"
+    );
 }
 
 #[test]

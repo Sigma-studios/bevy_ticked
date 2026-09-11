@@ -21,7 +21,7 @@ use registry::TickedComponentRegistry;
 use resource_registry::TickedResourceAppExt;
 use rollback::rollback_and_resimulate;
 use tick::{CurrentTick, HistoryBufferTicks, ResetToTick, StepBackward, StepForward, TickHolds};
-use time::{run_tick_schedule, TickRateDilation, Ticked, TickedTime};
+use time::{TickRateDilation, Ticked, TickedTime, run_tick_schedule};
 use tracked_entity::{TickTrackedEntity, TrackedIdAllocator};
 
 /// The schedule where all tick-driven simulation systems run.

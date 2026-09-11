@@ -37,11 +37,7 @@ impl<A> ActionTracker<A> {
 
     /// The newest tick the tracker holds anything for.
     pub fn newest_tick(&self) -> Option<u64> {
-        self.ticks
-            .keys()
-            .chain(self.system.keys())
-            .copied()
-            .max()
+        self.ticks.keys().chain(self.system.keys()).copied().max()
     }
 }
 

@@ -11,7 +11,9 @@ fn the_core_default_is_a_hundred_seconds_for_scrubbing() {
     let mut app = App::new();
     app.add_plugins(MinimalPlugins)
         .add_plugins(TickedPlugin::default())
-        .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_micros(15_625)));
+        .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_micros(
+            15_625,
+        )));
     app.finish();
     assert_eq!(
         app.world().resource::<HistoryBufferTicks>().0,

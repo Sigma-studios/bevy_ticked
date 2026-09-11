@@ -117,7 +117,11 @@ pub fn broadcast_authoritative_actions<A: LockstepAction>(
     tracker: Res<ActionTracker<A>>,
     host_lobby: Option<Single<Entity, (With<Lobby>, With<Host>)>>,
     lobby_clients: Query<(), With<LobbyClient>>,
-    participants: Query<(&LobbyParticipant, &LockstepLobbyParticipant, &LobbyParticipantOf)>,
+    participants: Query<(
+        &LobbyParticipant,
+        &LockstepLobbyParticipant,
+        &LobbyParticipantOf,
+    )>,
     margins: Res<crate::ArrivalMargins>,
 ) {
     let Some(host_lobby) = host_lobby else {
@@ -148,9 +152,12 @@ pub fn broadcast_authoritative_actions<A: LockstepAction>(
             .collect();
 
         for (participant, lockstep_participant, _) in
-            participants.iter().filter(|(_, lockstep_participant, pof)| {
-                pof.0 == *host_lobby && participant_is_required_for_tick(lockstep_participant, tick)
-            })
+            participants
+                .iter()
+                .filter(|(_, lockstep_participant, pof)| {
+                    pof.0 == *host_lobby
+                        && participant_is_required_for_tick(lockstep_participant, tick)
+                })
         {
             // The host's own actions are in the tick when it is simulated or not at all, so
             // its entry is never outstanding; an absent one is a tick it did nothing on.
@@ -175,7 +182,11 @@ pub fn broadcast_authoritative_actions<A: LockstepAction>(
             tick,
             players_actions: broadcast_actions,
             system: tracker.system_actions_for_tick(tick).to_vec(),
-            margins: margins.0.iter().map(|(uuid, margin)| (*uuid, *margin)).collect(),
+            margins: margins
+                .0
+                .iter()
+                .map(|(uuid, margin)| (*uuid, *margin))
+                .collect(),
         };
         // Not held back to be packed: every client's simulation is stopped until this lands, and
         // the next one is a tick away, so a coalescing send waits for company that never comes and
@@ -333,10 +344,7 @@ mod tests {
     fn a_tick_nobody_acted_on_still_counts_as_received() {
         let mut tracker = ActionTracker::<u8>::default();
 
-        apply_authoritative_tick(
-            &mut tracker,
-            &AuthoritativeTick::new(7, Vec::new()),
-        );
+        apply_authoritative_tick(&mut tracker, &AuthoritativeTick::new(7, Vec::new()));
 
         assert!(
             tracker.ticks.contains_key(&7),

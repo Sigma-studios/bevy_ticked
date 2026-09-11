@@ -61,7 +61,11 @@ fn an_extra_rollback_only_type_is_not_a_mismatch() {
     });
     assert_eq!(short.wire_hash(), long.wire_hash());
     assert_eq!(long.wire_names().count(), 0, "nothing here is on the wire");
-    assert_eq!(long.registered_names().count(), 2, "but both are registered");
+    assert_eq!(
+        long.registered_names().count(),
+        2,
+        "but both are registered"
+    );
 }
 
 #[test]

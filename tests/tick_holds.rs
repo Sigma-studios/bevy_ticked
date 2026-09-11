@@ -13,7 +13,9 @@ fn app() -> App {
             source: TickSource::Hz(64.0),
             ..default()
         })
-        .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_micros(15_625)));
+        .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_micros(
+            15_625,
+        )));
     app.update();
     app
 }
@@ -44,7 +46,10 @@ fn the_clock_advances_only_when_nobody_holds_it() {
     assert!(holds(&mut app).release(TickHoldReason::Manual));
     app.update();
     assert_eq!(tick(&app), 2, "the last reason gone: running");
-    assert!(!holds(&mut app).release(TickHoldReason::Manual), "releasing twice is a no-op");
+    assert!(
+        !holds(&mut app).release(TickHoldReason::Manual),
+        "releasing twice is a no-op"
+    );
 }
 
 #[test]
@@ -56,9 +61,17 @@ fn reasons_are_reported_in_a_fixed_order() {
     let reasons: Vec<_> = app.world().resource::<TickHolds>().reasons().collect();
     assert_eq!(
         reasons,
-        [TickHoldReason::Manual, TickHoldReason::SoftHold, TickHoldReason::Custom(3)]
+        [
+            TickHoldReason::Manual,
+            TickHoldReason::SoftHold,
+            TickHoldReason::Custom(3)
+        ]
     );
-    assert!(!app.world().resource::<TickHolds>().held_only_by(TickHoldReason::Manual));
+    assert!(
+        !app.world()
+            .resource::<TickHolds>()
+            .held_only_by(TickHoldReason::Manual)
+    );
 }
 
 #[test]
@@ -71,7 +84,9 @@ fn a_manual_step_advances_through_a_hold() {
     app.update();
     assert_eq!(tick(&app), before + 1);
     assert!(
-        app.world().resource::<TickHolds>().holds(TickHoldReason::Manual),
+        app.world()
+            .resource::<TickHolds>()
+            .holds(TickHoldReason::Manual),
         "a step does not lift the hold"
     );
 }

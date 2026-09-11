@@ -165,7 +165,10 @@ pub fn tracked_entity_count(app: &App) -> usize {
 
 /// How many tracked entities are tombstoned: despawned, kept for a rewind.
 pub fn tombstone_count(app: &App) -> usize {
-    app.world().resource::<TrackedEntityIndex>().tombstones().count()
+    app.world()
+        .resource::<TrackedEntityIndex>()
+        .tombstones()
+        .count()
 }
 
 /// What history says `T` was on `id` at `tick`.

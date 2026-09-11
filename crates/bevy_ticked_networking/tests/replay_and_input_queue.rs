@@ -17,7 +17,9 @@ use bevy_ticked_networking::input::InputQueue;
 use bevy_ticked_networking::messages::ReceivedNetworkSnapshot;
 use bevy_ticked_networking::prelude::*;
 use bevy_ticked_networking::replication::ReplicationMode;
-use bevy_ticked_networking::snapshot::{EntityRecord, SnapshotBody, SnapshotPacket, build_full_body};
+use bevy_ticked_networking::snapshot::{
+    EntityRecord, SnapshotBody, SnapshotPacket, build_full_body,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
@@ -200,9 +202,11 @@ fn the_input_queue_is_pruned_to_the_history_window() {
 
     for _ in 0..40 {
         let tick = app.world().resource::<CurrentTick>().0;
-        app.world_mut()
-            .resource_mut::<InputQueue<Input>>()
-            .insert(tick + 1, LOCAL, Input { forward: true });
+        app.world_mut().resource_mut::<InputQueue<Input>>().insert(
+            tick + 1,
+            LOCAL,
+            Input { forward: true },
+        );
         app.update();
     }
 
@@ -325,7 +329,10 @@ fn the_client_already_holds_what_a_comparison_would_need() {
 
     let target = app.world().resource::<CurrentTick>().0.saturating_sub(2);
     assert!(
-        app.world().resource::<WorldActions<Pos>>().at_tick(target).is_some(),
+        app.world()
+            .resource::<WorldActions<Pos>>()
+            .at_tick(target)
+            .is_some(),
         "WorldActions<T>::at_tick(snapshot_tick) is the prediction to compare against"
     );
 }
@@ -389,6 +396,10 @@ fn two_snapshots_in_one_frame_keep_the_newest_whichever_came_first() {
     app.update();
 
     let seen: Vec<u64> = applied(&mut app).iter().map(|s| s.tick).collect();
-    assert_eq!(seen, vec![12], "the waiting slot kept the older one: {seen:?}");
+    assert_eq!(
+        seen,
+        vec![12],
+        "the waiting slot kept the older one: {seen:?}"
+    );
     assert_eq!(pos(&mut app), Some(Pos(12)));
 }

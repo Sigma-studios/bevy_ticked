@@ -22,7 +22,9 @@ use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
 use bevy_ensemble::{EnsemblePlugin, LocalMultiplayerPlayerId, PlayerUUID};
 use bevy_ensemble_loopback::{LoopbackNetwork, LoopbackTransportPlugin};
-use bevy_ticked::prelude::{CurrentTick, TickHoldReason, TickHolds, TickSource, TickedPlugin, TickedSimulation};
+use bevy_ticked::prelude::{
+    CurrentTick, TickHoldReason, TickHolds, TickSource, TickedPlugin, TickedSimulation,
+};
 use bevy_ticked_lockstep_networking::{
     ActionTracker, ApplyJoinSnapshot, CaptureJoinSnapshot, ChecksumExchangePlugin, ChecksumLog,
     ChecksumLogPlugin, Desync, JoinSnapshotApplied, LocalPendingActions, LockstepConfig,
@@ -264,7 +266,10 @@ fn a_user_pause_is_not_lifted_by_an_arriving_authoritative_tick() {
     net.run(100);
 
     let holds = net.app(client).world().resource::<TickHolds>();
-    assert!(holds.holds(TickHoldReason::Manual), "the menu is still open");
+    assert!(
+        holds.holds(TickHoldReason::Manual),
+        "the menu is still open"
+    );
     assert_eq!(
         current_tick(&net, 1),
         paused_at,
