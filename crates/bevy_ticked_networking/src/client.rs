@@ -285,7 +285,12 @@ impl<T: TickedInput> Plugin for TickedClientPlugin<T> {
                 TickedLoop,
                 (
                     handle_server_snapshot::<T>.in_set(ClientSet::ApplySnapshot),
-                    (send_local_input::<T>, watch_for_client_minted_ids)
+                    (
+                        send_local_input::<T>,
+                        // Only a client can mint under the wrong slot; on a host or a solo
+                        // peer every authority id is legitimately its own.
+                        watch_for_client_minted_ids.run_if(resource_exists::<LocalClientPlayer>),
+                    )
                         .in_set(TickedSystems::PostTick),
                 ),
             );
