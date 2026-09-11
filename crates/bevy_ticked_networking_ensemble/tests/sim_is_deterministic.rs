@@ -45,6 +45,19 @@ fn guard() -> SourceGuard {
                 expires: None,
             },
             Exception {
+                path: "src/local_session.rs",
+                needle: "Res<Time<Real>",
+                reason: "`drive_auto_role` runs in Update and refreshes the lobby list once a \
+                         second of wall clock until a lobby is listed; it never runs in the tick",
+                expires: None,
+            },
+            Exception {
+                path: "src/local_session.rs",
+                needle: "Time<Real>",
+                reason: "the same Update system; see the `Res<Time<Real>` entry",
+                expires: None,
+            },
+            Exception {
                 path: "examples/netpeer.rs",
                 needle: "Instant::now",
                 reason: "the process runner paces `update()` to a tick's worth of wall clock, \

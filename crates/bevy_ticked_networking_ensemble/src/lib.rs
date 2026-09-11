@@ -1,4 +1,6 @@
 pub mod handshake;
+#[cfg(feature = "local-session")]
+pub mod local_session;
 #[cfg(feature = "overlay")]
 mod overlay;
 pub mod session;

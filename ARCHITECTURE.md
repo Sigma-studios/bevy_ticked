@@ -53,6 +53,9 @@ registry handshake (names and hashes, refusing a mismatch by naming the first di
 registration), hands each client its spawner slot and the send rate in
 `TickedSessionWelcome`, keeps `SnapshotRecipientList` to verified clients, and forwards
 pause requests. `overlay.rs` publishes the counters to bevy_ensemble's net-debug overlay.
+`local_session` (feature `local-session`) runs a whole local session from one shell:
+`TICKED_LOCAL_SESSION=N cargo run` starts a signalling server in-process, launches `N - 1`
+copies of the executable as clients and hosts.
 
 ## `bevy_ticked_avian`
 
