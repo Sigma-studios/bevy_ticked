@@ -331,9 +331,12 @@ pub fn assert_ids_unique(app: &mut App) {
 // ---- budgets ---------------------------------------------------------------------------------
 
 /// Over `frames` frames, `from` sent `to` no more than `max_bytes_per_tick` bytes per tick the
-/// sender simulated.
+/// sender simulated. Returns the measured bytes per tick, so a test can print the figure it
+/// budgets against.
 ///
 /// Per tick rather than per frame, so the budget survives a peer that runs two ticks in a frame.
+/// Everything on the wire counts — snapshots, pings, roster — because that is what the link
+/// carries.
 ///
 /// # Panics
 ///
@@ -344,7 +347,7 @@ pub fn assert_bandwidth_within(
     to: PeerId,
     frames: usize,
     max_bytes_per_tick: usize,
-) {
+) -> f64 {
     let bytes_before = net.bytes_sent(from, to);
     let tick_before = tick(net.app(from));
     net.run(frames);
@@ -360,6 +363,7 @@ pub fn assert_bandwidth_within(
         "{from:?} -> {to:?} sent {bytes} bytes over {ticks} ticks: {per_tick:.1} bytes per tick, \
          budget {max_bytes_per_tick}"
     );
+    per_tick
 }
 
 /// This client's rollback counters are within budget: no more than `max_rollbacks` corrections

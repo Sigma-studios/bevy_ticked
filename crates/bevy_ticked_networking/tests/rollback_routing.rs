@@ -6,7 +6,6 @@
 //! Both presented as "the client is slightly off for a moment" and neither was reproducible
 //! without a lossy link.
 
-use std::collections::HashMap;
 use std::time::Duration;
 
 use bevy::prelude::*;
@@ -17,7 +16,7 @@ use bevy_ticked::tracked_entity::TickTrackedEntity;
 use bevy_ticked_networking::client::{ClientTickBuffer, LocalClientPlayer};
 use bevy_ticked_networking::messages::ReceivedNetworkSnapshot;
 use bevy_ticked_networking::prelude::*;
-use bevy_ticked_networking::snapshot::{WorldSnapshot, build_snapshot};
+use bevy_ticked_networking::snapshot::{SnapshotPacket, build_full_body};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
@@ -75,7 +74,7 @@ fn client() -> App {
         })
         .add_plugins(TickedClientPlugin::<Input>::new())
         .insert_resource(TimeUpdateStrategy::ManualDuration(TICK))
-        .register_networked_ticked_component::<Pos>()
+        .register_networked_ticked_component::<Pos>("Pos")
         .register_ticked_component::<TicksSeen>()
         .add_ticked_event::<Footstep>()
         .insert_resource(Walking(true))
@@ -91,9 +90,9 @@ fn client() -> App {
 /// under test. From history, not a fresh capture: capturing now would overwrite the tick's
 /// history with the current world, which is the very thing the rollback must not see.
 fn deliver(app: &mut App, tick: u64) {
-    let mut snapshot: WorldSnapshot = build_snapshot(app.world_mut(), tick);
-    snapshot.input_margins = HashMap::from([(LOCAL, 2)]);
-    app.world_mut().trigger(ReceivedNetworkSnapshot(snapshot));
+    let mut packet = SnapshotPacket::full(tick, build_full_body(app.world_mut(), tick));
+    packet.your_margin = 2;
+    app.world_mut().trigger(ReceivedNetworkSnapshot(packet));
 }
 
 fn sync(app: &mut App) {

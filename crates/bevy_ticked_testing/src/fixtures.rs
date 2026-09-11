@@ -123,10 +123,10 @@ pub mod minimal {
     /// Separate from [`install_systems`] so a test can build a peer that registers a different
     /// set — the way a peer built from another commit would — and watch the harness notice.
     pub fn register_components(app: &mut App) {
-        app.register_networked_ticked_component_as::<Pos>("Pos")
-            .register_networked_ticked_component_as::<Vel>("Vel")
-            .register_networked_ticked_component_as::<EntityKind>("EntityKind")
-            .register_networked_ticked_component_as::<Owner>("Owner");
+        app.register_networked_ticked_component::<Pos>("Pos")
+            .register_networked_ticked_component::<Vel>("Vel")
+            .register_networked_ticked_component::<EntityKind>("EntityKind")
+            .register_networked_ticked_component::<Owner>("Owner");
     }
 
     /// The simulation systems and the `Visual` observer, without any registration.

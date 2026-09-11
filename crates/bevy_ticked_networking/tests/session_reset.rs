@@ -36,7 +36,7 @@ fn peer() -> App {
         .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
             1.0 / 64.0,
         )))
-        .register_networked_ticked_component::<Pos>();
+        .register_networked_ticked_component::<Pos>("Pos");
     app
 }
 

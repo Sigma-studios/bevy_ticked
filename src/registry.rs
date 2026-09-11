@@ -1,7 +1,7 @@
 use std::{
     any::{TypeId, type_name},
     collections::HashMap,
-    sync::Arc,
+    sync::{Arc, OnceLock},
 };
 
 use bevy::prelude::*;
@@ -16,8 +16,9 @@ use crate::{
 pub(crate) const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
-/// What an entry with no explicit wire name contributes instead of its `type_name`.
-pub(crate) const UNNAMED_SENTINEL: &[u8] = b"<unnamed>";
+/// The version of the snapshot wire format, folded into every registry hash so that two peers
+/// with the same registrations but a different encoding still refuse each other at the join.
+pub const PROTOCOL_VERSION: u16 = 2;
 
 pub(crate) fn fnv_fold(mut hash: u64, bytes: &[u8]) -> u64 {
     for byte in bytes {
@@ -59,21 +60,32 @@ impl Default for TickedComponentRegistry {
 struct RegistryInner {
     entries: Vec<RegisteredTickedComponent>,
     type_indices: HashMap<TypeId, u16>,
+    /// The wire order, computed the first time anything asks for it. After that registration
+    /// is refused, because an index that has been handed out cannot move.
+    frozen: OnceLock<Frozen>,
+}
+
+/// The wire index space: networked entries ranked by name.
+#[derive(Clone, Debug, Default)]
+struct Frozen {
+    /// Registration index of the entry at each wire index.
+    entries: Vec<u16>,
+    /// Wire index by type.
+    by_type: HashMap<TypeId, u16>,
+    names: Vec<&'static str>,
+    hash: u64,
 }
 
 #[derive(Clone)]
 struct RegisteredTickedComponent {
-    /// The name this type travels under in the registration handshake.
+    /// The name this type travels under: its identity on the wire and in the handshake.
     ///
-    /// Defaults to `type_name::<T>()`, and anything networked should override it.
-    /// `std::any::type_name`'s output is explicitly not guaranteed stable across
-    /// compiler versions, so hashing it makes "our registries disagree" fire on a
-    /// rustc upgrade — a loud error for a non-problem, which is how a check gets
-    /// ignored within a week.
+    /// Required for anything networked, because the wire index is derived from it.
+    /// Rollback-only types may leave it at `type_name::<T>()`, which is only ever shown in a
+    /// log; `std::any::type_name`'s output is explicitly not guaranteed stable across compiler
+    /// versions, so it never enters a hash.
     wire_name: &'static str,
-    /// Whether [`wire_name`](Self::wire_name) was given at registration or defaulted to
-    /// `type_name`. Only an explicit one may enter [`TickedComponentRegistry::wire_hash`].
-    named: bool,
+    type_id: TypeId,
     capture: fn(&mut World, u64),
     restore: fn(&mut World, u64),
     truncate_after: fn(&mut World, u64),
@@ -83,55 +95,84 @@ struct RegisteredTickedComponent {
     oldest_tick: fn(&World) -> Option<u64>,
     /// Which tracked-entity ids this type has saved state for at a tick.
     saved_ids: fn(&World, u64) -> Vec<u64>,
-    /// Optional serialization support, populated by the networking crate.
-    serialize_at: Option<fn(&mut World, u64) -> Option<HashMap<u64, Vec<u8>>>>,
-    deserialize_and_apply: Option<fn(&mut World, u64, &HashMap<u64, Vec<u8>>)>,
-    /// Optional: deserialize and insert a single component onto a specific entity.
-    deserialize_and_insert_one: Option<fn(&mut World, Entity, &[u8])>,
+    /// The wire, populated by the networking crate. `None` for a rollback-only type.
+    wire: Option<WireFns>,
+}
+
+/// How a networked type gets on and off the wire, entity by entity.
+///
+/// A snapshot is entity-major: one record per entity, its components concatenated in wire-index
+/// order with no length prefixes, because postcard is self-delimiting. So the registry does not
+/// serialise "all of type T"; it appends one value and takes one value.
+#[derive(Clone, Copy)]
+pub struct WireFns {
+    /// Append the value saved for `(tick, id)` to `out`. `false` if there is none.
+    pub encode_one: fn(&World, u64, u64, &mut Vec<u8>) -> bool,
+    /// Take one value from the front of `bytes`, insert it on `entity` and into the history at
+    /// `(tick, id)`. Returns how many bytes it consumed, or `None` if they did not decode.
+    pub decode_one: fn(&mut World, u64, Entity, u64, &[u8]) -> Option<usize>,
+    /// Start a new history entry at `tick`, empty; `decode_one` fills it.
+    pub begin_tick: fn(&mut World, u64),
+    /// Absence is authoritative: remove the type from every tracked entity that `decode_one`
+    /// did not fill at `tick`.
+    pub finish_tick: fn(&mut World, u64),
+    /// Whether `(tick, id)` has a saved value.
+    pub has_at: fn(&World, u64, u64) -> bool,
 }
 
 impl TickedComponentRegistry {
     pub fn register<T: TickedComponent>(&mut self) {
-        self.register_inner::<T>(None, None, None, None);
+        self.register_inner::<T>(None, None);
     }
 
     /// Register for rollback with a stable wire name. See
     /// [`TickedAppExt::register_ticked_component_as`].
     pub fn register_as<T: TickedComponent>(&mut self, wire_name: &'static str) {
-        self.register_inner::<T>(Some(wire_name), None, None, None);
+        self.register_inner::<T>(Some(wire_name), None);
     }
 
-    /// Register with serialization support. Called by the networking crate.
-    pub fn register_with_serialization<T: TickedComponent>(
-        &mut self,
-        wire_name: Option<&'static str>,
-        serialize_at: fn(&mut World, u64) -> Option<HashMap<u64, Vec<u8>>>,
-        deserialize_and_apply: fn(&mut World, u64, &HashMap<u64, Vec<u8>>),
-        deserialize_and_insert_one: fn(&mut World, Entity, &[u8]),
-    ) {
-        self.register_inner::<T>(
-            wire_name,
-            Some(serialize_at),
-            Some(deserialize_and_apply),
-            Some(deserialize_and_insert_one),
-        );
+    /// Register a networked type. Called by the networking crate.
+    ///
+    /// The name is required: the wire index is its rank among every networked name, so a type
+    /// without one has no place on the wire.
+    ///
+    /// # Panics
+    ///
+    /// If the type or the name was registered before, or the registry is already frozen.
+    pub fn register_networked<T: TickedComponent>(&mut self, wire_name: &'static str, wire: WireFns) {
+        self.register_inner::<T>(Some(wire_name), Some(wire));
     }
 
     fn register_inner<T: TickedComponent>(
         &mut self,
         wire_name: Option<&'static str>,
-        serialize_at: Option<fn(&mut World, u64) -> Option<HashMap<u64, Vec<u8>>>>,
-        deserialize_and_apply: Option<fn(&mut World, u64, &HashMap<u64, Vec<u8>>)>,
-        deserialize_and_insert_one: Option<fn(&mut World, Entity, &[u8])>,
+        wire: Option<WireFns>,
     ) {
-        let inner = Arc::make_mut(&mut self.inner);
         let type_id = TypeId::of::<T>();
         let tname = type_name::<T>();
-        let named = wire_name.is_some();
+        assert!(
+            self.inner.frozen.get().is_none(),
+            "ticked component `{tname}` was registered after the wire format was frozen: every \
+             networked registration has to happen before the first snapshot, handshake or \
+             `wire_hash` — in a plugin's `build`, not at runtime"
+        );
+        let inner = Arc::make_mut(&mut self.inner);
         let wire_name = wire_name.unwrap_or(tname);
 
         if inner.type_indices.contains_key(&type_id) {
             panic!("Ticked component type `{tname}` was registered more than once");
+        }
+        if wire.is_some()
+            && let Some(other) = inner
+                .entries
+                .iter()
+                .find(|entry| entry.wire.is_some() && entry.wire_name == wire_name)
+        {
+            let _ = other;
+            panic!(
+                "two networked ticked components share the wire name `{wire_name}` (the second \
+                 is `{tname}`); a wire name is a type's identity on the wire and must be unique"
+            );
         }
 
         let next_index = u16::try_from(inner.entries.len()).unwrap_or_else(|_| {
@@ -143,7 +184,7 @@ impl TickedComponentRegistry {
 
         inner.entries.push(RegisteredTickedComponent {
             wire_name,
-            named,
+            type_id,
             capture: capture_component::<T>,
             restore: restore_component::<T>,
             truncate_after: truncate_component::<T>,
@@ -152,68 +193,94 @@ impl TickedComponentRegistry {
             has_tick: has_tick_component::<T>,
             oldest_tick: oldest_tick_component::<T>,
             saved_ids: saved_ids_component::<T>,
-            serialize_at,
-            deserialize_and_apply,
-            deserialize_and_insert_one,
+            wire,
         });
         inner.type_indices.insert(type_id, next_index);
     }
 
-    /// Get the index for a component type.
+    /// The registration index of a component type: its position in registration order.
+    ///
+    /// Not a wire index. It names the type inside this process and nowhere else; see
+    /// [`wire_index_of`](Self::wire_index_of) for the one that travels.
     pub fn index_of<T: TickedComponent>(&self) -> Option<u16> {
         self.inner.type_indices.get(&TypeId::of::<T>()).copied()
     }
 
-    /// Every registered type's wire name, in registration order.
+    /// The wire order, computed once. Freezes the registry.
+    fn frozen(&self) -> &Frozen {
+        self.inner.frozen.get_or_init(|| {
+            let mut networked: Vec<(usize, &RegisteredTickedComponent)> = self
+                .inner
+                .entries
+                .iter()
+                .enumerate()
+                .filter(|(_, entry)| entry.wire.is_some())
+                .collect();
+            networked.sort_by(|a, b| a.1.wire_name.cmp(b.1.wire_name));
+            let names: Vec<&'static str> = networked.iter().map(|(_, e)| e.wire_name).collect();
+            let hash = names.iter().fold(
+                fnv_fold(FNV_OFFSET, &PROTOCOL_VERSION.to_le_bytes()),
+                |hash, name| fnv_fold(fnv_fold(hash, name.as_bytes()), b"\0"),
+            );
+            Frozen {
+                entries: networked.iter().map(|(i, _)| *i as u16).collect(),
+                by_type: networked
+                    .iter()
+                    .enumerate()
+                    .map(|(wire, (_, entry))| (entry.type_id, wire as u16))
+                    .collect(),
+                names,
+                hash,
+            }
+        })
+    }
+
+    /// Whether the wire order has been computed, after which no registration is accepted.
+    pub fn is_frozen(&self) -> bool {
+        self.inner.frozen.get().is_some()
+    }
+
+    /// The wire index of a networked type: its rank among every networked type's name.
     ///
-    /// That order **is** the wire format: indices are assigned by position as
-    /// `u16` and travel in every snapshot, so two peers that registered in
-    /// different orders read each other's `Position` bytes as something else
-    /// entirely, with no error of any kind.
+    /// Derived, not assigned, so two peers that registered the same names in any order agree.
+    /// `None` for a rollback-only type, which never travels. Freezes the registry.
+    pub fn wire_index_of<T: TickedComponent>(&self) -> Option<u16> {
+        self.frozen().by_type.get(&TypeId::of::<T>()).copied()
+    }
+
+    /// How many types are on the wire. Freezes the registry.
+    pub fn wire_len(&self) -> usize {
+        self.frozen().entries.len()
+    }
+
+    fn wire_entry(&self, wire_index: u16) -> Option<(&RegisteredTickedComponent, &WireFns)> {
+        let entry = &self.inner.entries[*self.frozen().entries.get(wire_index as usize)? as usize];
+        entry.wire.as_ref().map(|wire| (entry, wire))
+    }
+
+    /// Every networked type's wire name, in wire order (sorted). Freezes the registry.
+    ///
+    /// The wire format is this list and nothing else: a snapshot names a type by its position
+    /// here, and two peers with the same list agree about every byte. Registration order no
+    /// longer matters; it used to be the format, and a reorder read one type's bytes as
+    /// another's with no error of any kind.
     pub fn wire_names(&self) -> impl ExactSizeIterator<Item = &'static str> + '_ {
+        self.frozen().names.iter().copied()
+    }
+
+    /// The name of every registered type, networked or not, in registration order. For logs.
+    pub fn registered_names(&self) -> impl ExactSizeIterator<Item = &'static str> + '_ {
         self.inner.entries.iter().map(|entry| entry.wire_name)
     }
 
-    /// A hash of `(index, wire_name)` for every registered type.
+    /// A hash of [`PROTOCOL_VERSION`] and the sorted networked names. Freezes the registry.
     ///
-    /// Exchange this with a peer at join time and compare. Equal means the two
-    /// registries agree; unequal means every component index from the first
-    /// difference onward means something different on the other machine, and the
-    /// session should not start.
-    ///
-    /// FNV-1a over the names with their positions folded in, so a reorder changes
-    /// the hash even though the multiset of names has not.
-    ///
-    /// # Why an unnamed type contributes its position but not its name
-    ///
-    /// [`register_ticked_component`] defaults `wire_name` to `std::any::type_name`, whose output
-    /// is explicitly not specified across compiler versions. Folding that in would make two peers
-    /// built on different rustc releases report disagreeing registries when they agree perfectly
-    /// — a loud error for a non-problem, which is how a check gets switched off.
-    ///
-    /// Skipping such entries outright would be worse than useless: an extra unnamed type on one
-    /// peer shifts every index after it, which is exactly the corruption this exists to catch, and
-    /// the hashes would still match. So an unnamed entry folds its index and a fixed sentinel.
-    /// **Position always counts; an unstable string never does.**
-    ///
-    /// Give a rollback-only type a stable name with [`register_ticked_component_as`] and it
-    /// contributes properly.
-    ///
-    /// [`register_ticked_component`]: TickedAppExt::register_ticked_component
-    /// [`register_ticked_component_as`]: TickedAppExt::register_ticked_component_as
+    /// Exchange it with a peer at the join and compare: equal means the two wire formats are
+    /// the same; unequal means the session must not start, and the sorted name lists say which
+    /// registration differs. Rollback-only types do not enter it — they never travel, so a
+    /// peer with an extra local-only type is a peer that agrees about every byte on the wire.
     pub fn wire_hash(&self) -> u64 {
-        self.inner
-            .entries
-            .iter()
-            .enumerate()
-            .fold(FNV_OFFSET, |hash, (index, entry)| {
-                let hash = fnv_fold(hash, &(index as u16).to_le_bytes());
-                if entry.named {
-                    fnv_fold(hash, entry.wire_name.as_bytes())
-                } else {
-                    fnv_fold(hash, UNNAMED_SENTINEL)
-                }
-            })
+        self.frozen().hash
     }
 
     /// Number of registered component types.
@@ -305,7 +372,7 @@ impl TickedComponentRegistry {
     /// despawned what should not exist.
     pub fn restore_local_only(&self, world: &mut World, tick: u64) {
         for entry in &self.inner.entries {
-            if entry.serialize_at.is_none() {
+            if entry.wire.is_none() {
                 (entry.restore)(world, tick);
             }
         }
@@ -381,56 +448,110 @@ impl TickedComponentRegistry {
         }
     }
 
-    /// Serialize all registered components at the given tick.
-    /// Only includes components that were registered with serialization support.
-    pub fn serialize_all(
-        &self,
-        world: &mut World,
-        tick: u64,
-    ) -> HashMap<u16, HashMap<u64, Vec<u8>>> {
-        let mut result = HashMap::new();
-        for (i, entry) in self.inner.entries.iter().enumerate() {
-            if let Some(serialize_fn) = entry.serialize_at {
-                if let Some(data) = serialize_fn(world, tick) {
-                    result.insert(i as u16, data);
-                }
+    // ---- the wire, entity by entity --------------------------------------------------------
+
+    /// Which networked types have a value saved for `(tick, id)`, as a wire-index mask.
+    pub fn present_at(&self, world: &World, tick: u64, id: u64) -> TypeMask {
+        let frozen = self.frozen();
+        let mut mask = TypeMask::with_len(frozen.entries.len());
+        for (wire_index, entry_index) in frozen.entries.iter().enumerate() {
+            let entry = &self.inner.entries[*entry_index as usize];
+            if let Some(wire) = &entry.wire
+                && (wire.has_at)(world, tick, id)
+            {
+                mask.set(wire_index as u16);
             }
         }
-        result
+        mask
     }
 
-    /// Deserialize and apply snapshot data for all component types at the given tick.
-    pub fn deserialize_and_apply_all(
-        &self,
-        world: &mut World,
-        tick: u64,
-        components: &HashMap<u16, HashMap<u64, Vec<u8>>>,
-    ) {
-        for (index, data) in components {
-            if let Some(entry) = self.inner.entries.get(*index as usize) {
-                if let Some(deserialize_fn) = entry.deserialize_and_apply {
-                    deserialize_fn(world, tick, data);
-                }
-            }
+    /// Append the value of wire type `wire_index` saved for `(tick, id)` to `out`.
+    pub fn encode_one(&self, world: &World, wire_index: u16, tick: u64, id: u64, out: &mut Vec<u8>) -> bool {
+        match self.wire_entry(wire_index) {
+            Some((_, wire)) => (wire.encode_one)(world, tick, id, out),
+            None => false,
         }
     }
 
-    /// Deserialize a single component from bytes and insert it onto a specific entity.
-    /// Returns false if the type index has no serialization support.
-    pub fn deserialize_and_insert_one(
+    /// Take one value of wire type `wire_index` from the front of `bytes`, insert it on `entity`
+    /// and record it at `(tick, id)`. Returns the bytes consumed; `None` if the index is not on
+    /// this peer's wire or the bytes did not decode.
+    pub fn decode_one(
         &self,
         world: &mut World,
-        type_index: u16,
+        wire_index: u16,
+        tick: u64,
         entity: Entity,
+        id: u64,
         bytes: &[u8],
-    ) -> bool {
-        if let Some(entry) = self.inner.entries.get(type_index as usize) {
-            if let Some(f) = entry.deserialize_and_insert_one {
-                f(world, entity, bytes);
-                return true;
+    ) -> Option<usize> {
+        let (_, wire) = self.wire_entry(wire_index)?;
+        (wire.decode_one)(world, tick, entity, id, bytes)
+    }
+
+    /// Open a history entry at `tick` for every networked type, before decoding a snapshot's
+    /// records into it.
+    pub fn begin_wire_tick(&self, world: &mut World, tick: u64) {
+        for wire_index in 0..self.wire_len() as u16 {
+            if let Some((_, wire)) = self.wire_entry(wire_index) {
+                (wire.begin_tick)(world, tick);
             }
         }
-        false
+    }
+
+    /// Close the history entry at `tick`: every tracked entity that the snapshot did not give a
+    /// value of a networked type loses that type. Absence is authoritative.
+    pub fn finish_wire_tick(&self, world: &mut World, tick: u64) {
+        for wire_index in 0..self.wire_len() as u16 {
+            if let Some((_, wire)) = self.wire_entry(wire_index) {
+                (wire.finish_tick)(world, tick);
+            }
+        }
+    }
+
+    /// The name of wire type `wire_index`, for an error message.
+    pub fn wire_name_of(&self, wire_index: u16) -> Option<&'static str> {
+        self.frozen().names.get(wire_index as usize).copied()
+    }
+}
+
+/// Which wire types an entity record carries, one bit per wire index.
+///
+/// Sent instead of a list of indices because nearly every record carries the same few types,
+/// and a mask of them is one or two bytes where a list is one per type.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct TypeMask(pub Vec<u64>);
+
+impl TypeMask {
+    /// An empty mask with room for `len` wire indices.
+    pub fn with_len(len: usize) -> Self {
+        Self(vec![0; len.div_ceil(64)])
+    }
+
+    pub fn set(&mut self, wire_index: u16) {
+        let (word, bit) = (wire_index as usize / 64, wire_index as usize % 64);
+        if word >= self.0.len() {
+            self.0.resize(word + 1, 0);
+        }
+        self.0[word] |= 1 << bit;
+    }
+
+    pub fn contains(&self, wire_index: u16) -> bool {
+        let (word, bit) = (wire_index as usize / 64, wire_index as usize % 64);
+        self.0.get(word).is_some_and(|w| w & (1 << bit) != 0)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.iter().all(|w| *w == 0)
+    }
+
+    /// Every set wire index, ascending.
+    pub fn iter(&self) -> impl Iterator<Item = u16> + '_ {
+        self.0.iter().enumerate().flat_map(|(word, bits)| {
+            (0..64u16)
+                .filter(move |bit| bits & (1u64 << bit) != 0)
+                .map(move |bit| word as u16 * 64 + bit)
+        })
     }
 }
 

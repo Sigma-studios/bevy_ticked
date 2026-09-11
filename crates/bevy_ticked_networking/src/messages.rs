@@ -1,15 +1,26 @@
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::snapshot::WorldSnapshot;
-
 use crate::input::TickedInput;
+use crate::snapshot::SnapshotPacket;
 
-/// Incoming event: a world snapshot received from the server.
+/// Incoming event: a snapshot packet received from the server.
 ///
-/// Transport layers trigger this via `commands.trigger()` when a snapshot arrives.
+/// Transport layers trigger this via `commands.trigger()` when a snapshot arrives, after
+/// decoding it with [`decode_packet`](crate::snapshot::decode_packet).
 #[derive(Event, Clone, Debug)]
-pub struct ReceivedNetworkSnapshot(pub WorldSnapshot);
+pub struct ReceivedNetworkSnapshot(pub SnapshotPacket);
+
+/// Incoming event: a client acknowledged the newest snapshot it has applied.
+///
+/// Rides on every input packet as [`NetworkInputPayload::ack`]; transport layers trigger this
+/// once per input packet that carries one. The server keeps the newest per client
+/// ([`LastAck`](crate::server::LastAck)), which is what a delta is built against.
+#[derive(Event, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReceivedSnapshotAck {
+    pub sender: u128,
+    pub seq: u32,
+}
 
 /// Incoming event: a player's input received from the network.
 ///
@@ -33,11 +44,17 @@ pub struct ReceivedNetworkInput<T: TickedInput> {
 #[derive(Event, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PeerLeft(pub u128);
 
-/// Outgoing event: request to send a world snapshot to clients.
+/// Outgoing event: one encoded snapshot packet for one client.
 ///
-/// The multiplayer server triggers this after each tick. Transport layers observe it.
+/// The server triggers one per recipient after each tick. Transport layers observe it and send
+/// `bytes` to `recipient` unreliably. `recipient` is `None` only when no
+/// [`SnapshotRecipientList`](crate::server::SnapshotRecipientList) was installed, which means a
+/// transport that has not said who is listening: send to everyone.
 #[derive(Event, Clone, Debug)]
-pub struct SendNetworkSnapshot(pub WorldSnapshot);
+pub struct SendNetworkSnapshot {
+    pub recipient: Option<u128>,
+    pub bytes: Vec<u8>,
+}
 
 /// Outgoing event: request to send the local player's recent inputs to the server.
 ///
@@ -50,12 +67,8 @@ pub struct SendNetworkSnapshot(pub WorldSnapshot);
 pub struct SendNetworkInput<T: TickedInput> {
     /// `(tick, input)` pairs in ascending tick order, newest last.
     pub inputs: Vec<(u64, T)>,
-}
-
-/// Serializable wrapper for snapshots sent over the network.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct NetworkSnapshotPayload {
-    pub snapshot: WorldSnapshot,
+    /// `seq` of the newest snapshot this client has applied.
+    pub ack: Option<u32>,
 }
 
 /// Serializable wrapper for inputs sent over the network.
@@ -66,4 +79,7 @@ pub struct NetworkSnapshotPayload {
 pub struct NetworkInputPayload<T> {
     /// `(tick, input)` pairs in ascending tick order, newest last.
     pub inputs: Vec<(u64, T)>,
+    /// `seq` of the newest snapshot the sender has applied. See [`ReceivedSnapshotAck`].
+    #[serde(default)]
+    pub ack: Option<u32>,
 }

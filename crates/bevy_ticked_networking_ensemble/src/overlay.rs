@@ -84,8 +84,8 @@ fn publish_ticked_lines(
             extras.set(
                 "ticked.snapshot",
                 format!(
-                    "snapshot: {per_s:.1}/s, {} B last, {} B max",
-                    snapshots.last_bytes, snapshots.max_bytes
+                    "snapshot: {per_s:.1}/s, {} B last, {} B max, {} oversize",
+                    snapshots.last_bytes, snapshots.max_bytes, snapshots.oversize
                 ),
             );
             last.snapshots = snapshots.sent;

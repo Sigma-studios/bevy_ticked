@@ -4,7 +4,6 @@
 //! Three of those are fixed; §3.7 is not, and its test measures the cost that is
 //! still there so the number stops being an estimate.
 
-use std::collections::HashMap;
 use std::time::Duration;
 
 use bevy::prelude::*;
@@ -17,7 +16,7 @@ use bevy_ticked_networking::client::{ClientTickBuffer, LocalClientPlayer, Snapsh
 use bevy_ticked_networking::input::InputQueue;
 use bevy_ticked_networking::messages::ReceivedNetworkSnapshot;
 use bevy_ticked_networking::prelude::*;
-use bevy_ticked_networking::snapshot::{WorldSnapshot, build_snapshot};
+use bevy_ticked_networking::snapshot::{EntityRecord, SnapshotBody, SnapshotPacket, build_full_body};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
@@ -48,7 +47,7 @@ fn client_with_role(role: bool) -> App {
             1.0 / 64.0,
         )))
         .init_resource::<SimRuns>()
-        .register_networked_ticked_component::<Pos>()
+        .register_networked_ticked_component::<Pos>("Pos")
         .add_systems(TickedSimulation, |mut runs: ResMut<SimRuns>| runs.0 += 1);
     app.world_mut().spawn((TickTrackedEntity(1), Pos(0)));
     if role {
@@ -63,12 +62,26 @@ fn client() -> App {
 
 /// A host-shaped snapshot for `tick`, holding exactly the state the client already
 /// predicted -- so a comparison, if there were one, would find nothing to correct.
-fn snapshot_matching(client: &mut App, tick: u64) -> WorldSnapshot {
+fn snapshot_matching(client: &mut App, tick: u64) -> SnapshotPacket {
     let registry = client.world().resource::<TickedComponentRegistry>().clone();
     registry.capture_all(client.world_mut(), tick);
-    let mut snapshot = build_snapshot(client.world_mut(), tick);
-    snapshot.input_margins = HashMap::from([(LOCAL, 2)]);
-    snapshot
+    let mut packet = SnapshotPacket::full(tick, build_full_body(client.world_mut(), tick));
+    packet.your_margin = 2;
+    packet
+}
+
+/// A host-shaped packet for `tick` that puts body 1 at `pos`, whatever the client predicted.
+fn snapshot_placing(app: &mut App, tick: u64, pos: i32) -> SnapshotPacket {
+    let mut packet = snapshot_matching(app, tick);
+    let index = app
+        .world()
+        .resource::<TickedComponentRegistry>()
+        .wire_index_of::<Pos>()
+        .unwrap();
+    if let SnapshotBody::Full(body) = &mut packet.body {
+        body.put(EntityRecord::new(1).with(index, &Pos(pos)));
+    }
+    packet
 }
 
 fn deliver(app: &mut App, tick: u64) {
@@ -112,16 +125,7 @@ fn a_snapshot_arriving_before_the_client_role_is_ignored() {
         q.iter(app.world()).next().copied()
     };
     // A snapshot that would move the body, from a peer we have not agreed to follow.
-    let mut snapshot = snapshot_matching(&mut app, 0);
-    let index = app
-        .world()
-        .resource::<TickedComponentRegistry>()
-        .index_of::<Pos>()
-        .unwrap();
-    snapshot.components.insert(
-        index,
-        HashMap::from([(1u64, postcard::to_allocvec(&Pos(999)).unwrap())]),
-    );
+    let snapshot = snapshot_placing(&mut app, 0, 999);
     app.world_mut().trigger(ReceivedNetworkSnapshot(snapshot));
     app.update();
 
@@ -141,16 +145,7 @@ fn an_ignored_snapshot_is_not_applied_later() {
     let mut app = client_with_role(false);
     app.update();
 
-    let mut snapshot = snapshot_matching(&mut app, 0);
-    let index = app
-        .world()
-        .resource::<TickedComponentRegistry>()
-        .index_of::<Pos>()
-        .unwrap();
-    snapshot.components.insert(
-        index,
-        HashMap::from([(1u64, postcard::to_allocvec(&Pos(999)).unwrap())]),
-    );
+    let snapshot = snapshot_placing(&mut app, 0, 999);
     app.world_mut().trigger(ReceivedNetworkSnapshot(snapshot));
     app.update();
 
@@ -314,21 +309,6 @@ fn the_client_already_holds_what_a_comparison_would_need() {
 // Snapshots travel unordered, so an older one can arrive after a newer one has
 // already been applied -- or in the same frame as it, in either order. Neither
 // used to be noticed.
-
-/// A host-shaped snapshot for `tick` that puts the body at `pos`.
-fn snapshot_placing(app: &mut App, tick: u64, pos: i32) -> WorldSnapshot {
-    let mut snapshot = snapshot_matching(app, tick);
-    let index = app
-        .world()
-        .resource::<TickedComponentRegistry>()
-        .index_of::<Pos>()
-        .unwrap();
-    snapshot.components.insert(
-        index,
-        HashMap::from([(1u64, postcard::to_allocvec(&Pos(pos)).unwrap())]),
-    );
-    snapshot
-}
 
 fn pos(app: &mut App) -> Option<Pos> {
     let mut q = app.world_mut().query::<&Pos>();

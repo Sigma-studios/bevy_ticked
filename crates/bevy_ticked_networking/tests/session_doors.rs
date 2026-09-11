@@ -12,7 +12,7 @@ use bevy_ticked::tracked_entity::TickTrackedEntity;
 use bevy_ticked_networking::client::LocalClientPlayer;
 use bevy_ticked_networking::input::InputQueue;
 use bevy_ticked_networking::prelude::*;
-use bevy_ticked_networking::server::{LocalServerPlayer, SnapshotRecipients};
+use bevy_ticked_networking::server::{LocalServerPlayer, SnapshotRecipientList};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
@@ -35,7 +35,7 @@ fn peer() -> App {
         )))
         .add_plugins(TickedServerPlugin::<Input>::new())
         .add_plugins(TickedClientPlugin::<Input>::new())
-        .register_networked_ticked_component_as::<Pos>("Pos");
+        .register_networked_ticked_component::<Pos>("Pos");
     app
 }
 
@@ -180,7 +180,7 @@ fn a_host_with_no_recipients_builds_no_snapshot() {
 
     app.world_mut().insert_resource(LocalServerPlayer(1));
     app.world_mut().spawn((TickTrackedEntity(1), Pos(0)));
-    app.world_mut().insert_resource(SnapshotRecipients(0));
+    app.world_mut().insert_resource(SnapshotRecipientList(Vec::new()));
     for _ in 0..4 {
         run_tick(&mut app);
     }
@@ -190,7 +190,7 @@ fn a_host_with_no_recipients_builds_no_snapshot() {
         "nobody is listening, so nothing is serialised"
     );
 
-    app.world_mut().insert_resource(SnapshotRecipients(1));
+    app.world_mut().insert_resource(SnapshotRecipientList(vec![2]));
     for _ in 0..4 {
         run_tick(&mut app);
     }
@@ -215,7 +215,7 @@ fn an_absent_recipient_count_means_send_anyway() {
 
     app.world_mut().insert_resource(LocalServerPlayer(1));
     app.world_mut().spawn((TickTrackedEntity(1), Pos(0)));
-    app.world_mut().remove_resource::<SnapshotRecipients>();
+    app.world_mut().remove_resource::<SnapshotRecipientList>();
     for _ in 0..4 {
         run_tick(&mut app);
     }
