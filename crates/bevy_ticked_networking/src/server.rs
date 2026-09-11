@@ -1,4 +1,5 @@
- use std::collections::HashMap;
+
+use std::collections::HashMap;
 use std::marker::PhantomData;
 
 use bevy::prelude::*;
@@ -11,10 +12,11 @@ use bevy_ticked::{
 };
 
 use crate::{
+    delta::{Baseline, Baselines, Compression, DeltaPolicy, SendRates, build_delta, layouts_of},
     diagnostics::{InputStats, SnapshotStats},
     input::{InputQueue, MAX_INPUT_LEAD_TICKS, TickedInput},
     messages::{PeerLeft, ReceivedNetworkInput, ReceivedSnapshotAck, SendNetworkSnapshot},
-    snapshot::{RelayedInput, SnapshotBody, SnapshotPacket, build_full_body, encode_packet},
+    snapshot::{RelayedInput, SnapshotBody, SnapshotPacket, build_full_body, encode_packet_with},
 };
 
 /// Resource identifying the local player on the server (for listen-server setups).
@@ -72,6 +74,17 @@ pub struct TickedServerPlugin<T: TickedInput> {
     /// a bandwidth knob and no longer a smoothness one; a remote body is interpolated across
     /// the gap either way (the bridge sets `InterpolationDelay` to twice this).
     pub send_every: u64,
+    /// Every this many packets to a client, a full body rather than a delta.
+    pub keyframe_every: u32,
+    /// How many sent packets to keep per client as candidate delta baselines. Must cover a
+    /// round trip in packets, or a slow link gets keyframes only.
+    pub max_unacked_baselines: usize,
+    /// How packets are compressed on the wire.
+    pub compression: Compression,
+    /// Per-type delta send rates. Opt-in.
+    pub send_rates: SendRates,
+    /// Build deltas at all. Off is a full body on every packet.
+    pub deltas: bool,
     _phantom: PhantomData<T>,
 }
 
@@ -79,6 +92,11 @@ impl<T: TickedInput> TickedServerPlugin<T> {
     pub fn new() -> Self {
         Self {
             send_every: 1,
+            keyframe_every: 64,
+            max_unacked_baselines: 32,
+            compression: Compression::default(),
+            send_rates: SendRates::default(),
+            deltas: true,
             _phantom: PhantomData,
         }
     }
@@ -87,7 +105,36 @@ impl<T: TickedInput> TickedServerPlugin<T> {
         self.send_every = ticks.max(1);
         self
     }
+
+    pub fn keyframe_every(mut self, packets: u32) -> Self {
+        self.keyframe_every = packets.max(1);
+        self
+    }
+
+    pub fn compression(mut self, compression: Compression) -> Self {
+        self.compression = compression;
+        self
+    }
+
+    pub fn send_rates(mut self, rates: SendRates) -> Self {
+        self.send_rates = rates;
+        self
+    }
+
+    /// Full bodies only, never a delta.
+    pub fn without_deltas(mut self) -> Self {
+        self.deltas = false;
+        self
+    }
 }
+
+/// Runtime copy of [`TickedServerPlugin::compression`].
+#[derive(Resource, Clone, Copy, Debug)]
+pub struct SnapshotCompression(pub Compression);
+
+/// Clients that asked for a full body.
+#[derive(Resource, Default, Debug, Clone)]
+pub struct NackedFull(pub std::collections::HashSet<u128>);
 
 /// Runtime copy of [`TickedServerPlugin::send_every`].
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,6 +152,15 @@ impl<T: TickedInput> Plugin for TickedServerPlugin<T> {
         crate::replication::install_owner(app);
         crate::pause::install(app);
         app.insert_resource(SendEvery(self.send_every.max(1)))
+            .insert_resource(DeltaPolicy {
+                keyframe_every: self.keyframe_every.max(1),
+                max_unacked_baselines: self.max_unacked_baselines.max(1),
+                enabled: self.deltas,
+            })
+            .insert_resource(SnapshotCompression(self.compression))
+            .insert_resource(self.send_rates.clone())
+            .init_resource::<Baselines>()
+            .init_resource::<NackedFull>()
             .init_resource::<InputMargins>()
             .init_resource::<NewestInputTick>()
             .init_resource::<InputStats>()
@@ -153,8 +209,8 @@ fn reset_on_host<T: TickedInput>(world: &mut World) {
         tracked.iter(world).copied().collect()
     };
     let mut allocator = world.resource_mut::<TrackedIdAllocator>();
-    for id in held {
-        allocator.raise_to(id);
+    for id in &held {
+        allocator.raise_to(*id);
     }
     world.insert_resource(LocalSpawnerSlot(SpawnerSlot::AUTHORITY));
     world.insert_resource(CurrentTick(0));
@@ -172,6 +228,16 @@ fn reset_on_host<T: TickedInput>(world: &mut World) {
     world.insert_resource(LastAck::default());
     let registry = world.resource::<TickedComponentRegistry>().clone();
     registry.clear_all(world);
+    // The world a solo player opened to friends is the session's world from its first tick:
+    // with the histories cleared, nothing else says these entities were ever born, and a
+    // restore to tick 0 would tombstone every one of them.
+    if let Some(mut lifetimes) =
+        world.get_resource_mut::<bevy_ticked::lifetimes::TrackedEntityLifetimes>()
+    {
+        for id in &held {
+            lifetimes.note_alive(0, id.0);
+        }
+    }
 }
 
 /// Observer: collect incoming network inputs into the InputQueue.
@@ -260,18 +326,29 @@ fn forget_departed_peer<T: TickedInput>(
     mut queue: ResMut<InputQueue<T>>,
     mut margins: ResMut<InputMargins>,
     mut newest: ResMut<NewestInputTick>,
+    mut baselines: ResMut<Baselines>,
+    mut acks: ResMut<LastAck>,
 ) {
     let uuid = trigger.event().0;
     queue.remove_player(uuid);
     margins.0.remove(&uuid);
     newest.0.remove(&uuid);
+    baselines.forget(uuid);
+    acks.0.remove(&uuid);
 }
 
-fn record_ack(trigger: On<ReceivedSnapshotAck>, mut acks: ResMut<LastAck>) {
+fn record_ack(
+    trigger: On<ReceivedSnapshotAck>,
+    mut acks: ResMut<LastAck>,
+    mut nacked: ResMut<NackedFull>,
+) {
     let ack = *trigger.event();
     let newest = acks.0.entry(ack.sender).or_insert(ack.seq);
     if ack.seq >= *newest {
         *newest = ack.seq;
+    }
+    if ack.nack_full {
+        nacked.0.insert(ack.sender);
     }
 }
 
@@ -335,6 +412,17 @@ impl<T: TickedInput> Command for BroadcastSnapshotCommand<T> {
             Some(list) => list.into_iter().map(Some).collect(),
             None => vec![None],
         };
+        let registry = world.resource::<TickedComponentRegistry>().clone();
+        let policy = *world.resource::<DeltaPolicy>();
+        let compression = world.resource::<SnapshotCompression>().0;
+        world.resource_mut::<SendRates>().resolve(&registry);
+        let rates = world.resource::<SendRates>().clone();
+        // Split once; every recipient's delta reads the same layout.
+        let layouts = if policy.enabled {
+            layouts_of(&registry, &body)
+        } else {
+            Vec::new()
+        };
         for recipient in targets {
             let seq = match recipient {
                 Some(uuid) => {
@@ -347,19 +435,62 @@ impl<T: TickedInput> Command for BroadcastSnapshotCommand<T> {
             };
             let your_margin = recipient
                 .and_then(|uuid| world.resource::<InputMargins>().0.get(&uuid).copied())
-                .map_or(0, |margin| margin.clamp(i16::MIN as i64, i16::MAX as i64) as i16);
+                .map_or(0, |margin| {
+                    margin.clamp(i16::MIN as i64, i16::MAX as i64) as i16
+                });
+
+            // Delta or keyframe. A delta only against a baseline the client acknowledged and
+            // the ring still holds; a full body on a keyframe, after a nack, and to anyone
+            // without a usable ack (a joiner, a client whose ack fell off the ring).
+            let mut delta = None;
+            if let Some(uuid) = recipient
+                && policy.enabled
+                && !seq.is_multiple_of(policy.keyframe_every)
+                && !world.resource_mut::<NackedFull>().0.remove(&uuid)
+                && let Some(acked) = world.resource::<LastAck>().0.get(&uuid).copied()
+                && let Some(baseline) = world.resource::<Baselines>().get(uuid, acked)
+            {
+                delta = Some(build_delta(
+                    &registry, &body, &layouts, baseline, &rates, seq,
+                ));
+            }
+            let is_delta = delta.is_some();
             let packet = SnapshotPacket {
                 seq,
                 tick,
                 your_margin,
-                body: SnapshotBody::Full(body.clone()),
+                body: match delta {
+                    Some(delta) => SnapshotBody::Delta(delta),
+                    None => SnapshotBody::Full(body.clone()),
+                },
             };
-            let bytes = encode_packet(&packet);
+            let bytes = encode_packet_with(&packet, compression);
             if let Some(mut stats) = world.get_resource_mut::<SnapshotStats>() {
                 stats.sent += 1;
                 stats.record_bytes(bytes.len());
+                if is_delta {
+                    stats.deltas += 1;
+                } else {
+                    stats.keyframes += 1;
+                }
             }
-            world.commands().trigger(SendNetworkSnapshot { recipient, bytes });
+            if let Some(uuid) = recipient
+                && policy.enabled
+            {
+                world.resource_mut::<Baselines>().push(
+                    uuid,
+                    Baseline {
+                        seq,
+                        tick,
+                        body: body.clone(),
+                        layouts: layouts.clone(),
+                    },
+                    policy.max_unacked_baselines,
+                );
+            }
+            world
+                .commands()
+                .trigger(SendNetworkSnapshot { recipient, bytes });
         }
     }
 }

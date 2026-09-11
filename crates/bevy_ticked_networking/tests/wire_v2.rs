@@ -11,7 +11,9 @@ use bevy_ticked::tracked_entity::TickTrackedEntity;
 use bevy_ticked_networking::client::{LastAppliedSeq, LocalClientPlayer};
 use bevy_ticked_networking::diagnostics::SNAPSHOT_ADVISORY_BYTES;
 use bevy_ticked_networking::input::InputQueue;
-use bevy_ticked_networking::messages::{ReceivedNetworkSnapshot, SendNetworkInput, SendNetworkSnapshot};
+use bevy_ticked_networking::messages::{
+    ReceivedNetworkSnapshot, SendNetworkInput, SendNetworkSnapshot,
+};
 use bevy_ticked_networking::prelude::*;
 use bevy_ticked_networking::server::{InputMargins, LocalServerPlayer, SnapshotRecipientList};
 use bevy_ticked_networking::snapshot::{
@@ -97,7 +99,9 @@ fn world_with_bodies(n: u64) -> App {
 }
 
 fn components(app: &mut App) -> Vec<(u64, Pos, Vel, Kind)> {
-    let mut q = app.world_mut().query::<(&TickTrackedEntity, &Pos, &Vel, &Kind)>();
+    let mut q = app
+        .world_mut()
+        .query::<(&TickTrackedEntity, &Pos, &Vel, &Kind)>();
     let mut all: Vec<_> = q
         .iter(app.world())
         .map(|(t, p, v, k)| (t.0, *p, *v, *k))
@@ -111,9 +115,18 @@ fn components(app: &mut App) -> Vec<(u64, Pos, Vel, Kind)> {
 #[test]
 fn the_same_world_encodes_to_the_same_bytes_twice() {
     let mut app = world_with_bodies(5);
-    let a = encode_packet(&SnapshotPacket::full(1, build_full_body(app.world_mut(), 1)));
-    let b = encode_packet(&SnapshotPacket::full(1, build_full_body(app.world_mut(), 1)));
-    assert_eq!(a, b, "a delta needs a baseline it can reproduce byte for byte");
+    let a = encode_packet(&SnapshotPacket::full(
+        1,
+        build_full_body(app.world_mut(), 1),
+    ));
+    let b = encode_packet(&SnapshotPacket::full(
+        1,
+        build_full_body(app.world_mut(), 1),
+    ));
+    assert_eq!(
+        a, b,
+        "a delta needs a baseline it can reproduce byte for byte"
+    );
 }
 
 #[test]
@@ -147,7 +160,11 @@ fn records_are_sorted_and_indices_follow_the_names() {
     assert_eq!(registry.wire_index_of::<Vel>(), Some(3));
     let record = body.record(2).unwrap();
     assert_eq!(record.present.iter().collect::<Vec<_>>(), vec![0, 1, 2, 3]);
-    assert_eq!(record.first::<Counted>(), Some(Counted(2)), "the first type is Counted");
+    assert_eq!(
+        record.first::<Counted>(),
+        Some(Counted(2)),
+        "the first type is Counted"
+    );
 }
 
 #[test]
@@ -191,7 +208,10 @@ fn a_duplicate_id_in_a_body_is_applied_once_and_reported() {
     let applied = apply_full_body(client.world_mut(), 1, &body);
     assert_eq!(applied.duplicate_ids, vec![1]);
     let mut q = client.world_mut().query::<&Pos>();
-    assert_eq!(q.iter(client.world()).copied().collect::<Vec<_>>(), vec![Pos(1)]);
+    assert_eq!(
+        q.iter(client.world()).copied().collect::<Vec<_>>(),
+        vec![Pos(1)]
+    );
 }
 
 #[test]
@@ -220,27 +240,39 @@ fn client_app() -> App {
 }
 
 #[test]
-fn a_delta_body_is_rejected_until_the_delta_phase() {
+fn a_delta_against_an_unknown_baseline_is_dropped_and_a_full_body_asked_for() {
     let mut app = client_app();
     let packet = SnapshotPacket {
         seq: 1,
         tick: 3,
         your_margin: 2,
-        body: SnapshotBody::Delta(DeltaBody::default()),
+        body: SnapshotBody::Delta(DeltaBody {
+            baseline_seq: 0,
+            ..Default::default()
+        }),
     };
     app.world_mut().trigger(ReceivedNetworkSnapshot(packet));
     app.update();
     let stats = replays_of(&app);
-    assert_eq!(stats.dropped_delta_body, 1);
+    assert_eq!(stats.dropped_unknown_baseline, 1);
     assert_eq!(stats.snapshots_applied, 0);
     assert!(
-        app.world().resource::<TickHolds>().holds(TickHoldReason::AwaitingSync),
+        app.world()
+            .resource::<TickHolds>()
+            .holds(TickHoldReason::AwaitingSync),
         "still waiting for a world it can apply"
+    );
+    assert!(
+        app.world()
+            .resource::<bevy_ticked_networking::client::NackFull>()
+            .0,
+        "the next input packet asks the host for a full body"
     );
 }
 
 fn replays_of(app: &App) -> bevy_ticked_networking::diagnostics::ReplayStats {
-    *app.world().resource::<bevy_ticked_networking::diagnostics::ReplayStats>()
+    *app.world()
+        .resource::<bevy_ticked_networking::diagnostics::ReplayStats>()
 }
 
 #[test]
@@ -267,8 +299,16 @@ fn relayed_inputs_reach_the_clients_queue_and_its_own_are_ignored() {
     app.update();
 
     let queue = app.world().resource::<InputQueue<Input>>();
-    assert_eq!(queue.get(5, 9), Some(&Input { dx: 1 }), "another player's input arrived");
-    assert_eq!(queue.get(5, 7), None, "the local player's own is not overwritten by a relay");
+    assert_eq!(
+        queue.get(5, 9),
+        Some(&Input { dx: 1 }),
+        "another player's input arrived"
+    );
+    assert_eq!(
+        queue.get(5, 7),
+        None,
+        "the local player's own is not overwritten by a relay"
+    );
 }
 
 #[test]
@@ -300,7 +340,10 @@ fn a_client_acks_the_newest_seq_on_its_input() {
     }
     let acks = &app.world().resource::<Acks>().0;
     assert!(!acks.is_empty(), "input was sent");
-    assert!(acks.iter().all(|ack| *ack == Some(41)), "every packet carries the ack: {acks:?}");
+    assert!(
+        acks.iter().all(|ack| *ack == Some(41)),
+        "every packet carries the ack: {acks:?}"
+    );
 }
 
 // ── the server and its recipients ────────────────────────────────────────────
@@ -313,8 +356,10 @@ fn host_app() -> App {
     app.init_resource::<Sent>().add_observer(
         |trigger: On<SendNetworkSnapshot>, mut sent: ResMut<Sent>| {
             let event = trigger.event();
-            sent.0
-                .push((event.recipient, decode_packet(&event.bytes).expect("decodes")));
+            sent.0.push((
+                event.recipient,
+                decode_packet(&event.bytes).expect("decodes"),
+            ));
         },
     );
     app.insert_resource(LocalServerPlayer(1));
@@ -341,7 +386,10 @@ fn each_packet_carries_the_recipients_seq_and_margin() {
             .collect()
     };
     let (two, three) = (to(2), to(3));
-    assert!(two.len() >= 3 && three.len() >= 3, "one packet per recipient per tick");
+    assert!(
+        two.len() >= 3 && three.len() >= 3,
+        "one packet per recipient per tick"
+    );
     assert!(two.iter().all(|p| p.your_margin == 5));
     assert!(three.iter().all(|p| p.your_margin == -3));
     let seqs: Vec<u32> = two.iter().map(|p| p.seq).collect();
@@ -370,8 +418,13 @@ fn an_oversize_snapshot_is_counted_and_warned_once() {
     let mut app = peer();
     // Enough bodies to pass the advisory size several times over.
     for id in 1..=400u64 {
-        app.world_mut()
-            .spawn((TickTrackedEntity(id), Pos(id as i32), Vel(1), Kind(2), Counted(3)));
+        app.world_mut().spawn((
+            TickTrackedEntity(id),
+            Pos(id as i32),
+            Vel(1),
+            Kind(2),
+            Counted(3),
+        ));
     }
     app.insert_resource(LocalServerPlayer(1));
     app.update();
@@ -382,5 +435,8 @@ fn an_oversize_snapshot_is_counted_and_warned_once() {
         .world()
         .resource::<bevy_ticked_networking::diagnostics::SnapshotStats>();
     assert!(stats.last_bytes > SNAPSHOT_ADVISORY_BYTES);
-    assert!(stats.oversize >= 4, "every oversize packet is counted: {stats:?}");
+    assert!(
+        stats.oversize >= 4,
+        "every oversize packet is counted: {stats:?}"
+    );
 }

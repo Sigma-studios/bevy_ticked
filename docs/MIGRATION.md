@@ -6,6 +6,65 @@ what to change in a game, and why. Both peers of a session must be built from th
 Phases that changed `bevy_ensemble` too say which of its commits they pin; that crate's own
 `docs/MIGRATION.md` covers what changed there.
 
+## T13 — delta replication, replicate-once, send rates, compression
+
+The wire is unchanged in shape (`PROTOCOL_VERSION` stays 2: the `Delta` body was reserved in
+T7) but every packet now starts with a one-byte compression tag, and the input packet gained
+`nack_full`. Rebuild every peer.
+
+### What the host sends
+
+**Before** every snapshot was the whole world, to every client, every tick. **After** the
+host keeps the last few packets it sent each client (`max_unacked_baselines`, 32) and, once
+the client has acknowledged one, sends a `Delta` against it: the records whose bytes
+changed, component by component, the components that went (`removed`), the ids that died
+(`despawned`), the resources that changed, and the relayed inputs. A full body still goes
+to a joiner, after a nack, on every `keyframe_every`th packet (64), and whenever the
+acknowledged baseline has fallen off the ring. `TickedServerPlugin::new()` takes
+`keyframe_every(n)`, `compression(Compression)`, `send_rates(SendRates)` and
+`without_deltas()`.
+
+A client rebuilds the whole body from the baseline the moment a delta arrives
+(`AuthoritativeHistory::body_at_seq`); the fast path, the rollback and the drawn history
+never see a delta. A delta against a baseline the client no longer holds is dropped,
+counted (`ReplayStats::dropped_unknown_baseline`), and answered with `nack_full: true` on
+the next input packet, which makes the host's next packet a keyframe.
+
+The acknowledgement rides the input packet, and a client at rest with nothing to send
+still sends one when its acknowledgement changes: without it the host would fall back to
+keyframes the moment a player stopped moving. Measured with the harness: 21.6 bytes a tick
+from host to a client at rest, 47.5 with two walking players (the audit measured 1340).
+Keyframes over 256 bytes are LZ4-compressed (`Compression::Lz4`, feature `lz4`, on by
+default); a compressed packet that would not shrink is sent raw.
+
+### Replicate once
+
+`register_networked_ticked_component_once::<T>("name")` (or `_as(name, ReplicationClass)`)
+marks a component that never changes after spawn: it travels in the record that
+introduces the entity and in keyframes, never in a delta after that. `bevy_ticked::Owner`
+is registered this way; **do** the same for your kind markers, spawn points and colours.
+`ReplicationClass::Always` carries a component on every delta, changed or not, and is what
+`SendRates::every::<T>(n)` divides.
+
+### A drawn body drops what its authority dropped
+
+An `Interpolated` entity's components are written from the authoritative record; they are
+now also removed when the record stops carrying them. Under the fast path nothing else
+would have removed them.
+
+### A host keeps its world
+
+The bridge used to despawn every tracked entity when a peer adopted either role. A joining
+client still loses its solo world (the host's replaces it); a host keeps its own, and
+`reset_on_host` raises the id counter over it and marks it alive from tick 0. A game that
+relied on the host's menu-time world being cleared on hosting must clear it itself.
+
+### Harness
+
+`TickedNetwork::decode_messages::<M>` and `decode_messages_traced::<M>` decode any
+ensemble message type out of the trace, with the frames it was sent and arrived. A test
+that traces acknowledgements must switch tracing on before the session settles.
+
 ## T12 — lockstep part 2: the session on the tick, the stall, catching up
 
 `AuthoritativeTick` gained two fields (`system`, `margins`), covered by the ensemble
