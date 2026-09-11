@@ -277,10 +277,7 @@ fn compare_arrived_checksums<H>(
     }
 
     let is_host = host_lobby.is_some();
-    let lobby = host_lobby
-        .as_deref()
-        .or(client_lobby.as_deref())
-        .copied();
+    let lobby = host_lobby.as_deref().or(client_lobby.as_deref()).copied();
     for arrival in arrivals.read() {
         let Some(sender) = arrival.sender else {
             continue;

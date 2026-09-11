@@ -7,7 +7,9 @@ use bevy_ensemble::{
 use bevy_ensemble_webrtc::{BevyEnsembleWebrtcPlugin, JoinWebrtcLobby, RefreshLobbyList};
 use bevy_ticked::prelude::*;
 use bevy_ticked_networking::prelude::*;
-use bevy_ticked_networking_ensemble::{SpawnerSlots, TickedEnsembleSessionPlugin, TickedNetworkingEnsemblePlugin};
+use bevy_ticked_networking_ensemble::{
+    SpawnerSlots, TickedEnsembleSessionPlugin, TickedNetworkingEnsemblePlugin,
+};
 use serde::{Deserialize, Serialize};
 
 // --- Constants ---
@@ -270,7 +272,6 @@ fn cleanup_on_lobby_gone(
     commands.remove_resource::<LocalClientPlayer>();
 }
 
-
 // --- Server: spawn player entities when participants join ---
 
 fn server_spawn_players(
@@ -297,10 +298,16 @@ fn server_spawn_players(
         }
         // A body carries its player's spawner slot, so it waits for the slot: the host's own
         // is 0, a client's arrives with the registry handshake.
-        let slot = if local_player.as_ref().is_some_and(|me| me.0 == participant.player_uuid) {
+        let slot = if local_player
+            .as_ref()
+            .is_some_and(|me| me.0 == participant.player_uuid)
+        {
             0
         } else {
-            match slots.as_ref().and_then(|slots| slots.slot_of(participant.player_uuid)) {
+            match slots
+                .as_ref()
+                .and_then(|slots| slots.slot_of(participant.player_uuid))
+            {
                 Some(slot) => slot,
                 None => continue,
             }

@@ -1,4 +1,5 @@
 pub mod client;
+pub mod delta;
 pub mod diagnostics;
 pub mod input;
 pub mod messages;
@@ -105,5 +106,11 @@ pub fn reset_on_leave<T: TickedInput>(world: &mut World) {
     }
     if let Some(mut acks) = world.get_resource_mut::<server::LastAck>() {
         acks.0.clear();
+    }
+    if let Some(mut baselines) = world.get_resource_mut::<delta::Baselines>() {
+        baselines.0.clear();
+    }
+    if let Some(mut nack) = world.get_resource_mut::<client::NackFull>() {
+        nack.0 = false;
     }
 }

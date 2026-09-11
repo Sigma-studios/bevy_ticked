@@ -14,7 +14,9 @@ use bevy_ticked_networking::messages::ReceivedNetworkSnapshot;
 use bevy_ticked_networking::prelude::*;
 use bevy_ticked_networking::replication::ReplicationMode;
 use bevy_ticked_networking::server::LocalServerPlayer;
-use bevy_ticked_networking::snapshot::{EntityRecord, SnapshotBody, SnapshotPacket, build_full_body};
+use bevy_ticked_networking::snapshot::{
+    EntityRecord, SnapshotBody, SnapshotPacket, build_full_body,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
@@ -109,12 +111,16 @@ fn synced() -> App {
     deliver(&mut app, SnapshotPacket::full(0, body));
     app.update();
     let entity = {
-        let mut q = app.world_mut().query_filtered::<Entity, With<TickTrackedEntity>>();
+        let mut q = app
+            .world_mut()
+            .query_filtered::<Entity, With<TickTrackedEntity>>();
         q.single(app.world()).unwrap()
     };
-    app.world_mut()
-        .entity_mut(entity)
-        .insert((ReplicationMode::Predicted, Beat(0), Unregistered(0)));
+    app.world_mut().entity_mut(entity).insert((
+        ReplicationMode::Predicted,
+        Beat(0),
+        Unregistered(0),
+    ));
     for _ in 0..12 {
         app.update();
     }
@@ -122,7 +128,9 @@ fn synced() -> App {
 }
 
 fn lead(app: &App) -> u64 {
-    app.world().resource::<ClientTickBuffer>().target_replay_distance
+    app.world()
+        .resource::<ClientTickBuffer>()
+        .target_replay_distance
 }
 
 fn stats(app: &App) -> ReplayStats {
@@ -160,7 +168,11 @@ fn a_flipped_bit_in_a_snapshot_forces_a_replay() {
     deliver(&mut app, packet);
     app.update();
     let after = stats(&app);
-    assert_eq!(after.rollbacks, before.rollbacks + 1, "one bit, one correction");
+    assert_eq!(
+        after.rollbacks,
+        before.rollbacks + 1,
+        "one bit, one correction"
+    );
     assert_eq!(after.skipped_identical, before.skipped_identical);
 }
 
@@ -270,12 +282,16 @@ fn a_burst_of_stale_snapshots_replays_at_most_max_ticks_per_frame() {
     deliver(&mut app, SnapshotPacket::full(0, body));
     app.update();
     let entity = {
-        let mut q = app.world_mut().query_filtered::<Entity, With<TickTrackedEntity>>();
+        let mut q = app
+            .world_mut()
+            .query_filtered::<Entity, With<TickTrackedEntity>>();
         q.single(app.world()).unwrap()
     };
-    app.world_mut()
-        .entity_mut(entity)
-        .insert((ReplicationMode::Predicted, Beat(0), Unregistered(0)));
+    app.world_mut().entity_mut(entity).insert((
+        ReplicationMode::Predicted,
+        Beat(0),
+        Unregistered(0),
+    ));
     for _ in 0..40 {
         app.update();
     }
@@ -293,12 +309,17 @@ fn a_burst_of_stale_snapshots_replays_at_most_max_ticks_per_frame() {
         if app.world().contains_resource::<AwaitingReplay>() {
             awaited = true;
             assert!(
-                app.world().resource::<TickHolds>().holds(TickHoldReason::Replaying),
+                app.world()
+                    .resource::<TickHolds>()
+                    .holds(TickHoldReason::Replaying),
                 "the clock waits for the replay to finish"
             );
         }
     }
-    assert!(awaited, "the replay spanned more than one frame: {per_frame:?}");
+    assert!(
+        awaited,
+        "the replay spanned more than one frame: {per_frame:?}"
+    );
     assert!(
         per_frame.iter().all(|runs| *runs <= 4),
         "no frame ran more than MaxTicksPerFrame ticks: {per_frame:?}"
@@ -307,7 +328,11 @@ fn a_burst_of_stale_snapshots_replays_at_most_max_ticks_per_frame() {
         !app.world().contains_resource::<AwaitingReplay>(),
         "and it finished: {per_frame:?}"
     );
-    assert!(!app.world().resource::<TickHolds>().holds(TickHoldReason::Replaying));
+    assert!(
+        !app.world()
+            .resource::<TickHolds>()
+            .holds(TickHoldReason::Replaying)
+    );
     assert!(
         stats(&app).ticks_replayed >= 30,
         "replayed ticks are counted across the frames: {:?}",

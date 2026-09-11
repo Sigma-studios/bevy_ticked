@@ -1,8 +1,8 @@
 use crate::{
-    ApplyJoinSnapshot, CaptureJoinSnapshot, ClientLoaded, ClientSnapshotState, JoinSnapshot,
-    JoinSnapshotApplied, JoinSnapshotReceived, JoinSnapshotRequest, JoinSnapshotResponse,
-    LastJoinSnapshotRequests, LockstepConfig, LockstepLobbyParticipant, PendingClientJoins,
-    PendingJoinSnapshotFlushes, ProvideJoinSnapshot, JOIN_SNAPSHOT_REQUEST_INTERVAL,
+    ApplyJoinSnapshot, CaptureJoinSnapshot, ClientLoaded, ClientSnapshotState,
+    JOIN_SNAPSHOT_REQUEST_INTERVAL, JoinSnapshot, JoinSnapshotApplied, JoinSnapshotReceived,
+    JoinSnapshotRequest, JoinSnapshotResponse, LastJoinSnapshotRequests, LockstepConfig,
+    LockstepLobbyParticipant, PendingClientJoins, PendingJoinSnapshotFlushes, ProvideJoinSnapshot,
 };
 use bevy::prelude::*;
 use bevy_ensemble::{
@@ -76,7 +76,10 @@ pub fn receive_join_snapshot_requests<S: JoinSnapshot>(
         last_requests.0.insert(sender, now);
 
         let snapshot_tick = current_tick.0;
-        pending_client_joins.0.entry(sender).or_insert(snapshot_tick);
+        pending_client_joins
+            .0
+            .entry(sender)
+            .or_insert(snapshot_tick);
 
         capture_messages.write(CaptureJoinSnapshot {
             requester: sender,

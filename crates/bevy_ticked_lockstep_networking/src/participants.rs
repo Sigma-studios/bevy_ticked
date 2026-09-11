@@ -47,7 +47,11 @@ pub fn add_host_participant(
 pub fn broadcast_participants_to_loaded_clients(
     mut commands: Commands,
     host_lobby: Option<Single<Entity, (With<Lobby>, With<Host>)>>,
-    all_participants: Query<(&LobbyParticipant, &LockstepLobbyParticipant, &LobbyParticipantOf)>,
+    all_participants: Query<(
+        &LobbyParticipant,
+        &LockstepLobbyParticipant,
+        &LobbyParticipantOf,
+    )>,
     lobby_clients: Query<(Entity, &LobbyClientPlayerUuid), With<LobbyClient>>,
     mut accepted: MessageReader<ClientAccepted>,
 ) {
@@ -154,7 +158,11 @@ pub fn broadcast_new_participants_to_existing_clients(
     mut commands: Commands,
     host_lobby: Option<Single<Entity, (With<Lobby>, With<Host>)>>,
     added_participants: Query<
-        (&LobbyParticipant, &LockstepLobbyParticipant, &LobbyParticipantOf),
+        (
+            &LobbyParticipant,
+            &LockstepLobbyParticipant,
+            &LobbyParticipantOf,
+        ),
         Added<LockstepLobbyParticipant>,
     >,
 ) {
@@ -209,7 +217,10 @@ pub fn apply_received_participants(
         if message.message.joined_at_tick <= current_tick.0
             && roster.0.insert(message.message.player_uuid)
         {
-            changes.write(current_tick.0, crate::RosterChange::Joined(message.message.player_uuid));
+            changes.write(
+                current_tick.0,
+                crate::RosterChange::Joined(message.message.player_uuid),
+            );
         }
         if let Some((participant_entity, _, _, _)) =
             participants

@@ -230,7 +230,13 @@ fn a_spawn_survives_a_dropped_snapshot() {
         a,
         b,
         ..
-    } = session(Link::cable().with_loss(0.3));
+    } = session(Link::cable());
+    // The snapshots are what get dropped. A press is sent three times and a link that loses
+    // all three has lost the press itself, which is a different test.
+    for client in [a, b] {
+        net.net
+            .set_link_between(host, client, Link::cable().with_loss(0.3));
+    }
     press(&mut net, a, Input::FIRE);
     let fired = pellets(net.app_mut(a));
     assert_eq!(fired.len(), 1);

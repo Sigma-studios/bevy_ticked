@@ -4,13 +4,16 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = ["window"]
+default = ["window", "lz4"]
 # The host pauses the session when its window loses focus.
 window = ["bevy/bevy_window"]
+# Snapshot packets over 256 bytes are LZ4-compressed on the wire.
+lz4 = ["dep:lz4_flex"]
 
 [dependencies]
 bevy = { version = "0.19", default-features = false, features = ["std", "bevy_log"] }
 bevy_ticked = { path = "../.." }
+lz4_flex = { version = "0.11", optional = true, default-features = false, features = ["safe-encode", "safe-decode"] }
 postcard = { version = "1", features = ["alloc"] }
 serde = { version = "1", features = ["derive"] }
 

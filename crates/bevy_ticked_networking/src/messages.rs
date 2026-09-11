@@ -20,6 +20,8 @@ pub struct ReceivedNetworkSnapshot(pub SnapshotPacket);
 pub struct ReceivedSnapshotAck {
     pub sender: u128,
     pub seq: u32,
+    /// The client could not rebuild a delta (its baseline was gone) and wants a full body.
+    pub nack_full: bool,
 }
 
 /// Incoming event: a player's input received from the network.
@@ -69,6 +71,8 @@ pub struct SendNetworkInput<T: TickedInput> {
     pub inputs: Vec<(u64, T)>,
     /// `seq` of the newest snapshot this client has applied.
     pub ack: Option<u32>,
+    /// Ask for a full body next: a delta arrived against a baseline this client no longer has.
+    pub nack_full: bool,
 }
 
 /// Serializable wrapper for inputs sent over the network.
@@ -82,4 +86,7 @@ pub struct NetworkInputPayload<T> {
     /// `seq` of the newest snapshot the sender has applied. See [`ReceivedSnapshotAck`].
     #[serde(default)]
     pub ack: Option<u32>,
+    /// See [`SendNetworkInput::nack_full`].
+    #[serde(default)]
+    pub nack_full: bool,
 }

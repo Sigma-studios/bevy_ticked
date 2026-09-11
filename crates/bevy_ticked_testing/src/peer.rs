@@ -30,7 +30,9 @@ use bevy_ticked::{TickSource, TickedPlugin};
 use bevy_ticked_networking::client::TickedClientPlugin;
 use bevy_ticked_networking::input::TickedInput;
 use bevy_ticked_networking::server::TickedServerPlugin;
-use bevy_ticked_networking_ensemble::{TickedEnsembleSessionPlugin, TickedNetworkingEnsemblePlugin};
+use bevy_ticked_networking_ensemble::{
+    TickedEnsembleSessionPlugin, TickedNetworkingEnsemblePlugin,
+};
 
 /// One tick at 64 Hz, exactly: 15.625 ms is representable, so a frame of this length is one
 /// tick with no accumulator remainder and no drift.

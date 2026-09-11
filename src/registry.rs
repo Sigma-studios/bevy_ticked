@@ -86,6 +86,8 @@ struct RegisteredTickedComponent {
     /// versions, so it never enters a hash.
     wire_name: &'static str,
     type_id: TypeId,
+    /// How a delta carries it. Meaningless for a rollback-only type.
+    class: ReplicationClass,
     capture: fn(&mut World, u64),
     restore: fn(&mut World, u64),
     restore_one: fn(&mut World, u64, u64, Entity),
@@ -113,6 +115,9 @@ pub struct WireFns {
     /// As `decode_one`, onto the entity only: no history entry. For putting an authoritative
     /// value on display without pretending the simulation produced it.
     pub insert_one: fn(&mut World, Entity, &[u8]) -> Option<usize>,
+    /// Remove the component from `entity`, history untouched: a record that no longer carries
+    /// the type says the authority removed it.
+    pub remove_one: fn(&mut World, Entity),
     /// Start a new history entry at `tick`, empty; `decode_one` fills it.
     pub begin_tick: fn(&mut World, u64),
     /// Absence is authoritative: remove the type from every tracked entity that `decode_one`
@@ -124,17 +129,34 @@ pub struct WireFns {
     /// encoding. Returns `(equal, consumed)`; `consumed` is meaningful only when equal; `None`
     /// if nothing is saved there or it did not encode.
     pub matches_at: fn(&World, u64, u64, &[u8]) -> Option<(bool, usize)>,
+    /// How many bytes the value at the front of `bytes` occupies, without a world. What lets
+    /// a record be split into its components by anyone holding the registry.
+    pub decode_len: fn(&[u8]) -> Option<usize>,
+}
+
+/// How often a networked type is carried in a delta. Full bodies always carry everything.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ReplicationClass {
+    /// Whenever its encoded bytes differ from the baseline the recipient acknowledged.
+    #[default]
+    Changed,
+    /// On every delta, differing or not: for a type whose encoding is not canonical, so that
+    /// equal values may encode differently and "unchanged" cannot be told from the bytes.
+    Always,
+    /// Once per entity: with the entity's first record, never again. For what never changes
+    /// after the spawn — a kind, a spawn point, an owner.
+    Once,
 }
 
 impl TickedComponentRegistry {
     pub fn register<T: TickedComponent>(&mut self) {
-        self.register_inner::<T>(None, None);
+        self.register_inner::<T>(None, None, ReplicationClass::Changed);
     }
 
     /// Register for rollback with a stable wire name. See
     /// [`TickedAppExt::register_ticked_component_as`].
     pub fn register_as<T: TickedComponent>(&mut self, wire_name: &'static str) {
-        self.register_inner::<T>(Some(wire_name), None);
+        self.register_inner::<T>(Some(wire_name), None, ReplicationClass::Changed);
     }
 
     /// Register a networked type. Called by the networking crate.
@@ -145,14 +167,29 @@ impl TickedComponentRegistry {
     /// # Panics
     ///
     /// If the type or the name was registered before, or the registry is already frozen.
-    pub fn register_networked<T: TickedComponent>(&mut self, wire_name: &'static str, wire: WireFns) {
-        self.register_inner::<T>(Some(wire_name), Some(wire));
+    pub fn register_networked<T: TickedComponent>(
+        &mut self,
+        wire_name: &'static str,
+        wire: WireFns,
+    ) {
+        self.register_inner::<T>(Some(wire_name), Some(wire), ReplicationClass::Changed);
+    }
+
+    /// As [`register_networked`](Self::register_networked), with a [`ReplicationClass`].
+    pub fn register_networked_as<T: TickedComponent>(
+        &mut self,
+        wire_name: &'static str,
+        wire: WireFns,
+        class: ReplicationClass,
+    ) {
+        self.register_inner::<T>(Some(wire_name), Some(wire), class);
     }
 
     fn register_inner<T: TickedComponent>(
         &mut self,
         wire_name: Option<&'static str>,
         wire: Option<WireFns>,
+        class: ReplicationClass,
     ) {
         let type_id = TypeId::of::<T>();
         let tname = type_name::<T>();
@@ -191,6 +228,7 @@ impl TickedComponentRegistry {
         inner.entries.push(RegisteredTickedComponent {
             wire_name,
             type_id,
+            class,
             capture: capture_component::<T>,
             restore: restore_component::<T>,
             restore_one: restore_one_component::<T>,
@@ -360,7 +398,13 @@ impl TickedComponentRegistry {
     }
 
     /// Put every registered component saved for `(tick, id)` onto `entity`, for a rebuild.
-    pub(crate) fn restore_one_from_history(&self, world: &mut World, tick: u64, id: u64, entity: Entity) {
+    pub(crate) fn restore_one_from_history(
+        &self,
+        world: &mut World,
+        tick: u64,
+        id: u64,
+        entity: Entity,
+    ) {
         for entry in &self.inner.entries {
             (entry.restore_one)(world, tick, id, entity);
         }
@@ -395,7 +439,9 @@ impl TickedComponentRegistry {
         if let Some(resources) = world.get_resource::<TickedResourceRegistry>().cloned() {
             resources.truncate_all_after(world, tick);
         }
-        if let Some(mut lifetimes) = world.get_resource_mut::<crate::lifetimes::TrackedEntityLifetimes>() {
+        if let Some(mut lifetimes) =
+            world.get_resource_mut::<crate::lifetimes::TrackedEntityLifetimes>()
+        {
             lifetimes.truncate_after(tick);
         }
     }
@@ -409,7 +455,9 @@ impl TickedComponentRegistry {
         if let Some(resources) = world.get_resource::<TickedResourceRegistry>().cloned() {
             resources.prune_all_before(world, tick);
         }
-        if let Some(mut lifetimes) = world.get_resource_mut::<crate::lifetimes::TrackedEntityLifetimes>() {
+        if let Some(mut lifetimes) =
+            world.get_resource_mut::<crate::lifetimes::TrackedEntityLifetimes>()
+        {
             lifetimes.prune_before(tick);
         }
         crate::lifetimes::reap_before(world, tick);
@@ -424,7 +472,9 @@ impl TickedComponentRegistry {
         if let Some(resources) = world.get_resource::<TickedResourceRegistry>().cloned() {
             resources.clear_all(world);
         }
-        if let Some(mut lifetimes) = world.get_resource_mut::<crate::lifetimes::TrackedEntityLifetimes>() {
+        if let Some(mut lifetimes) =
+            world.get_resource_mut::<crate::lifetimes::TrackedEntityLifetimes>()
+        {
             lifetimes.clear();
         }
         crate::lifetimes::reap_all(world);
@@ -448,7 +498,14 @@ impl TickedComponentRegistry {
     }
 
     /// Append the value of wire type `wire_index` saved for `(tick, id)` to `out`.
-    pub fn encode_one(&self, world: &World, wire_index: u16, tick: u64, id: u64, out: &mut Vec<u8>) -> bool {
+    pub fn encode_one(
+        &self,
+        world: &World,
+        wire_index: u16,
+        tick: u64,
+        id: u64,
+        out: &mut Vec<u8>,
+    ) -> bool {
         match self.wire_entry(wire_index) {
             Some((_, wire)) => (wire.encode_one)(world, tick, id, out),
             None => false,
@@ -504,6 +561,21 @@ impl TickedComponentRegistry {
         (wire.insert_one)(world, entity, bytes)
     }
 
+    /// Remove from `entity` every networked component a record does not carry. The complement
+    /// of [`insert_one`](Self::insert_one) over a whole record: a drawn body whose authority
+    /// dropped a component drops it too.
+    pub fn remove_absent(&self, world: &mut World, entity: Entity, present: &TypeMask) {
+        let frozen = self.frozen();
+        for (wire_index, entry_index) in frozen.entries.iter().enumerate() {
+            if present.contains(wire_index as u16) {
+                continue;
+            }
+            if let Some(wire) = &self.inner.entries[*entry_index as usize].wire {
+                (wire.remove_one)(world, entity);
+            }
+        }
+    }
+
     /// Open a history entry at `tick` for every networked type, before decoding a snapshot's
     /// records into it.
     pub fn begin_wire_tick(&self, world: &mut World, tick: u64) {
@@ -527,6 +599,29 @@ impl TickedComponentRegistry {
     /// The name of wire type `wire_index`, for an error message.
     pub fn wire_name_of(&self, wire_index: u16) -> Option<&'static str> {
         self.frozen().names.get(wire_index as usize).copied()
+    }
+
+    /// The replication class of wire type `wire_index`.
+    pub fn class_of(&self, wire_index: u16) -> Option<ReplicationClass> {
+        self.wire_entry(wire_index).map(|(entry, _)| entry.class)
+    }
+
+    /// Split a record's bytes into its components: `(wire index, byte range)` in wire order.
+    /// `None` if any component fails to decode.
+    pub fn split_record(
+        &self,
+        present: &TypeMask,
+        bytes: &[u8],
+    ) -> Option<Vec<(u16, std::ops::Range<usize>)>> {
+        let mut at = 0;
+        let mut parts = Vec::new();
+        for wire_index in present.iter() {
+            let (_, wire) = self.wire_entry(wire_index)?;
+            let len = (wire.decode_len)(&bytes[at..])?;
+            parts.push((wire_index, at..at + len));
+            at += len;
+        }
+        Some(parts)
     }
 }
 
@@ -663,7 +758,12 @@ fn restore_component<T: TickedComponent>(world: &mut World, tick: u64) {
     }
 }
 
-fn restore_one_component<T: TickedComponent>(world: &mut World, tick: u64, id: u64, entity: Entity) {
+fn restore_one_component<T: TickedComponent>(
+    world: &mut World,
+    tick: u64,
+    id: u64,
+    entity: Entity,
+) {
     let saved = world
         .resource::<WorldActions<T>>()
         .at_tick(tick)
@@ -675,15 +775,11 @@ fn restore_one_component<T: TickedComponent>(world: &mut World, tick: u64, id: u
 }
 
 fn truncate_component<T: TickedComponent>(world: &mut World, tick: u64) {
-    world
-        .resource_mut::<WorldActions<T>>()
-        .truncate_after(tick);
+    world.resource_mut::<WorldActions<T>>().truncate_after(tick);
 }
 
 fn prune_component<T: TickedComponent>(world: &mut World, tick: u64) {
-    world
-        .resource_mut::<WorldActions<T>>()
-        .prune_before(tick);
+    world.resource_mut::<WorldActions<T>>().prune_before(tick);
 }
 
 fn clear_component<T: TickedComponent>(world: &mut World) {
@@ -695,8 +791,5 @@ fn oldest_tick_component<T: TickedComponent>(world: &World) -> Option<u64> {
 }
 
 fn has_tick_component<T: TickedComponent>(world: &World, tick: u64) -> bool {
-    world
-        .resource::<WorldActions<T>>()
-        .at_tick(tick)
-        .is_some()
+    world.resource::<WorldActions<T>>().at_tick(tick).is_some()
 }

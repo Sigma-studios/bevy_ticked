@@ -8,7 +8,7 @@ use bevy_ticked::{
     registry::TickedComponentRegistry,
     resource_registry::TickedResourceRegistry,
     tick::{CurrentTick, HistoryBufferTicks, TickHoldReason, TickHolds},
-    time::{run_tick_schedule, TickRateDilation},
+    time::{TickRateDilation, run_tick_schedule},
     tracked_entity::{SpawnerSlot, TickTrackedEntity, TrackedIdAllocator},
 };
 
@@ -64,6 +64,11 @@ pub struct AppliedSnapshotTick(pub Option<u64>);
 /// that want to sample the prediction for that tick before it is overwritten.
 #[derive(Resource, Default, Debug, Clone, Copy)]
 pub struct PendingSnapshotTick(pub Option<u64>);
+
+/// Set when a delta arrived against a baseline this client no longer holds; the next input
+/// packet asks the host for a full body and clears it.
+#[derive(Resource, Default, Debug, Clone, Copy)]
+pub struct NackFull(pub bool);
 
 /// `seq` of the newest snapshot this client applied, acknowledged on every input packet.
 #[derive(Resource, Default, Debug, Clone, Copy)]
@@ -240,7 +245,10 @@ impl<T: TickedInput> Plugin for TickedClientPlugin<T> {
         // The core default is a hundred seconds, sized for scrubbing, and on a client that was
         // a hundred seconds of every registered component kept for a rewind that cannot
         // happen — and walked on every capture.
-        if !app.world().contains_resource::<bevy_ticked::HistoryWindowChosen>() {
+        if !app
+            .world()
+            .contains_resource::<bevy_ticked::HistoryWindowChosen>()
+        {
             app.insert_resource(HistoryBufferTicks(2 * ClientTickBuffer::MAX_TICKS));
         }
         app.init_resource::<ClientTickBuffer>()
@@ -248,6 +256,7 @@ impl<T: TickedInput> Plugin for TickedClientPlugin<T> {
             .init_resource::<AppliedSnapshotTick>()
             .init_resource::<PendingSnapshotTick>()
             .init_resource::<LastAppliedSeq>()
+            .init_resource::<NackFull>()
             .init_resource::<ReplayStats>()
             .init_resource::<HealthWarnings>()
             .add_message::<SnapshotApplied>()
@@ -296,12 +305,36 @@ impl<T: TickedInput> Plugin for TickedClientPlugin<T> {
 fn receive_snapshot(
     trigger: On<ReceivedNetworkSnapshot>,
     applied: Res<AppliedSnapshotTick>,
+    registry: Res<TickedComponentRegistry>,
     mut pending: ResMut<PendingSnapshot>,
     mut pending_tick: ResMut<PendingSnapshotTick>,
     mut stats: ResMut<ReplayStats>,
     mut history: ResMut<crate::replication::AuthoritativeHistory>,
+    mut nack: ResMut<NackFull>,
 ) {
     let tick = trigger.event().0.tick;
+    // A delta is rebuilt into the full body it describes the moment it arrives, against the
+    // baseline the host built it on. Everything downstream sees full bodies only.
+    let mut packet = trigger.event().0.clone();
+    if let SnapshotBody::Delta(delta) = &packet.body {
+        let rebuilt = history
+            .body_at_seq(delta.baseline_seq)
+            .and_then(|baseline| crate::delta::apply_delta(&registry, baseline, delta));
+        match rebuilt {
+            Some(body) => {
+                stats.deltas_applied += 1;
+                packet.body = SnapshotBody::Full(body);
+            }
+            None => {
+                stats.dropped_unknown_baseline += 1;
+                nack.0 = true;
+                return;
+            }
+        }
+    }
+    if let SnapshotBody::Full(body) = &packet.body {
+        history.record_body(packet.seq, tick, body);
+    }
     let newest_seen = applied
         .0
         .into_iter()
@@ -312,7 +345,7 @@ fn receive_snapshot(
         // Stale for the rollback, still the authority's word about that tick: an interpolated
         // entity drawn from the history would otherwise see a hole where the late packet was
         // and jump across it.
-        if let SnapshotBody::Full(body) = &trigger.event().0.body
+        if let SnapshotBody::Full(body) = &packet.body
             && history.oldest_tick().is_none_or(|oldest| tick >= oldest)
             && !history.has_tick(tick)
         {
@@ -323,7 +356,7 @@ fn receive_snapshot(
     // A packet still waiting when a newer one lands is superseded for the rollback, and kept
     // for the drawn path like a stale one: three snapshots in one frame used to leave two
     // holes in the history, and an interpolated body jumped across them.
-    if let Some(superseded) = pending.0.replace(trigger.event().0.clone())
+    if let Some(superseded) = pending.0.replace(packet)
         && let SnapshotBody::Full(body) = &superseded.body
         && !history.has_tick(superseded.tick)
     {
@@ -365,7 +398,8 @@ fn reset_on_join<T: TickedInput>(world: &mut World) {
     world.insert_resource(AppliedSnapshotTick::default());
     world.insert_resource(LastAppliedSeq::default());
     world.resource_mut::<InputQueue<T>>().inputs.clear();
-    if let Some(mut history) = world.get_resource_mut::<crate::replication::AuthoritativeHistory>() {
+    if let Some(mut history) = world.get_resource_mut::<crate::replication::AuthoritativeHistory>()
+    {
         history.clear();
     }
     world.insert_resource(crate::replication::DisplayTick::default());
@@ -463,12 +497,8 @@ fn handle_server_snapshot<T: TickedInput>(world: &mut World) {
         .release(TickHoldReason::Replaying);
     let body = match &packet.body {
         SnapshotBody::Full(body) => body,
-        SnapshotBody::Delta(_) => {
-            // Reserved for the delta phase. A host from after it talking to a client from
-            // before would be refused at the handshake, so this is a defence, not a path.
-            world.resource_mut::<ReplayStats>().dropped_delta_body += 1;
-            return;
-        }
+        // Rebuilt into a full body on receipt; a delta cannot reach here.
+        SnapshotBody::Delta(_) => return,
     };
 
     // Not a client (yet). Applying the host's world at a peer that still thinks it
@@ -686,7 +716,10 @@ fn prediction_matches(
     tick: u64,
 ) -> bool {
     let local: std::collections::HashMap<u64, bool> = {
-        let mut query = world.query::<(&TickTrackedEntity, Option<&crate::replication::ReplicationMode>)>();
+        let mut query = world.query::<(
+            &TickTrackedEntity,
+            Option<&crate::replication::ReplicationMode>,
+        )>();
         query
             .iter(world)
             .map(|(tracked, mode)| {
@@ -920,6 +953,8 @@ fn send_local_input<T: TickedInput>(
     local_player: Option<Res<LocalClientPlayer>>,
     queue: Res<InputQueue<T>>,
     ack: Res<LastAppliedSeq>,
+    mut nack: ResMut<NackFull>,
+    mut last_sent_ack: Local<Option<u32>>,
     mut commands: Commands,
 ) {
     if holds.is_held() {
@@ -931,12 +966,19 @@ fn send_local_input<T: TickedInput>(
     let inputs: Vec<(u64, T)> = (tick.0.saturating_sub(INPUT_REDUNDANCY - 1)..=tick.0)
         .filter_map(|t| queue.get(t, local_player.0).map(|input| (t, input.clone())))
         .collect();
-    if inputs.is_empty() {
+    // A client at rest has no input to send, but it still acknowledges what it applied: the
+    // host builds deltas against the newest acknowledged packet, and a client that went quiet
+    // would otherwise be sent keyframes until it moved.
+    let ack_is_news = ack.0.is_some() && ack.0 != *last_sent_ack;
+    if inputs.is_empty() && !ack_is_news && !nack.0 {
         return;
     }
+    let nack_full = std::mem::take(&mut nack.0);
+    *last_sent_ack = ack.0;
     commands.trigger(SendNetworkInput {
         inputs,
         ack: ack.0,
+        nack_full,
     });
 }
 
@@ -977,7 +1019,10 @@ mod tests {
 
     #[test]
     fn a_huge_error_never_stops_or_reverses_the_clock() {
-        assert!(dilation_for(1e9) > 0.0, "the clock must keep moving forward");
+        assert!(
+            dilation_for(1e9) > 0.0,
+            "the clock must keep moving forward"
+        );
     }
 
     #[test]

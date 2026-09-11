@@ -3,9 +3,9 @@ use crate::{
     LastBroadcastTick, LastJoinSnapshotRequests, LastScheduledTick, LocalPendingActions,
     LockstepAction, PendingClientJoins, PendingJoinSnapshotFlushes,
     PendingLockstepParticipantJoins, StashedAuthoritativeTicks,
-    activate_loaded_client_participants, add_host_participant,
-    apply_pending_lockstep_participants, apply_received_participants,
-    broadcast_authoritative_actions, broadcast_buffered_authoritative_actions_to_loaded_clients,
+    activate_loaded_client_participants, add_host_participant, apply_pending_lockstep_participants,
+    apply_received_participants, broadcast_authoritative_actions,
+    broadcast_buffered_authoritative_actions_to_loaded_clients,
     broadcast_new_participants_to_existing_clients, broadcast_participants_to_loaded_clients,
     cleanup_old_tracker_entries, flush_pending_actions, flush_provided_join_snapshots,
     forget_departed_client_joins, receive_authoritative_actions, receive_client_actions,
@@ -216,20 +216,15 @@ where
                     flush_provided_join_snapshots::<S>
                         .after(LockstepJoinSet::CaptureJoinSnapshot)
                         .before(LockstepJoinSet::ApplyJoinSnapshot),
-                    receive_join_snapshot_responses::<S>
-                        .before(LockstepJoinSet::ApplyJoinSnapshot),
+                    receive_join_snapshot_responses::<S>.before(LockstepJoinSet::ApplyJoinSnapshot),
                     send_client_loaded_after_snapshot_applied::<S>
                         .in_set(LockstepJoinSet::FinalizeJoinSnapshot),
                     activate_loaded_client_participants
                         .before(broadcast_participants_to_loaded_clients)
                         .before(broadcast_new_participants_to_existing_clients)
-                        .before(
-                            broadcast_buffered_authoritative_actions_to_loaded_clients::<A>,
-                        ),
+                        .before(broadcast_buffered_authoritative_actions_to_loaded_clients::<A>),
                     broadcast_participants_to_loaded_clients
-                        .before(
-                            broadcast_buffered_authoritative_actions_to_loaded_clients::<A>,
-                        ),
+                        .before(broadcast_buffered_authoritative_actions_to_loaded_clients::<A>),
                     broadcast_new_participants_to_existing_clients,
                     broadcast_buffered_authoritative_actions_to_loaded_clients::<A>,
                     reset_lockstep_state_on_lobby_removed::<A, S>,
