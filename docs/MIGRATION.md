@@ -1,10 +1,58 @@
 # Migration
 
-One section per phase of the netcode overhaul, in the order they landed. Each names what broke,
-what to change in a game, and why. Both peers of a session must be built from the same commit.
+One section per phase of the netcode overhaul, newest first. Each names what broke, what to
+change in a game, and why. Both peers of a session must be built from the same commit.
 
 Phases that changed `bevy_ensemble` too say which of its commits they pin; that crate's own
 `docs/MIGRATION.md` covers what changed there.
+
+**Migrating a game:** `docs/migration/README.md` has the order to apply the changes in, and
+`docs/migration/<game>.md` what each of the six games deletes at each step. `ARCHITECTURE.md`
+is the map of the crates as they stand; `docs/ROLLBACK_RULES.md` the rules a simulation
+obeys; `docs/avian.md` the physics bundle.
+
+## Renames, at a glance
+
+| Before | After | Phase |
+|---|---|---|
+| `register_networked_ticked_component::<T>()` (unnamed) | `register_networked_ticked_component::<T>("Name")`, `_once`, `_as(name, class)` | T7, T13 |
+| `TicksPaused` | `TickHolds` + `TickHoldReason` | T5 |
+| `TickTrackedEntityCounter` | `TrackedIdAllocator`, `TrackedSpawner::{spawn, spawn_by}`, `LocalSpawnerSlot` | T10 |
+| `EntityCommands::despawn` on a tracked entity | `despawn_ticked` | T10 |
+| `WorldSnapshot`, `SnapshotRecipients(usize)` | `SnapshotPacket { seq, tick, your_margin, body }`, `SnapshotRecipientList(Vec<u128>)` | T7 |
+| `SendNetworkSnapshot(bytes)` | `SendNetworkSnapshot { recipient, bytes }` | T7 |
+| `NetworkInputPayload { inputs }` | `NetworkInputPayload { inputs, ack, nack_full }` | T7, T13 |
+| `TickedServerPlugin::new()` alone | `.send_every(n)`, `.keyframe_every(n)`, `.compression(..)`, `.send_rates(..)` | T9, T13 |
+| a game's `OwnerPlayer`/`PlayerUuid` | `bevy_ticked_networking::Owner` | T8 |
+| a game's `capture_local_input` in `Update` | `TickedInputPlugin::<I>::new(sampler)`, `LocalPlayer` | T14 |
+| a game's `avian::*` registrations and solver tweaks | `bevy_ticked_avian::{avian3d, avian2d}::TickedAvianPlugin` | T14 |
+| `bevy_ticked_lockstep_networking::checksum` | `bevy_ticked::checksum` (re-exported) | T3 |
+| `LOCAL_PLAYER_UUID` | gone; `Option<Res<LocalMultiplayerPlayerId>>` | T3, E1 |
+| `Single<Lobby>` in a game's session code | `TickedSessionLobby(Entity)`, `TickedEnsembleSessionPlugin` | T7 |
+| `AuthoritativeTick { tick, players_actions }` | `+ system: Vec<SystemAction>, margins` | T12 |
+| `LockstepConfig::host_tick_buffer` default 4 | 1 | T12 |
+| `TickedPlugin::default()` for a networked game | `TickedPlugin { source: TickSource::Hz(64.0), .. }` | T4 |
+
+## T15 — documentation, `netpeer`, multi-process tests, CI
+
+No API change in this repository. `bevy_ensemble` is pinned at `9f7f245` (E4): the first
+real join over WebRTC found two ordering bugs in E2's join handshake, both fixed there.
+
+- `examples/netpeer.rs` (`bevy_ticked_networking_ensemble`): one peer of a real session in
+  its own process, headless, driven by arguments; writes a checksum line per confirmed tick.
+- `tests/webrtc_multiprocess.rs`: a signalling server on a throwaway port and two or three
+  `netpeer` processes; ignored by default, run with `--ignored --test-threads=1` (the
+  `multiprocess` CI job does). Two and three processes agree on 400+ shared ticks; a client
+  sees the host's world 2.5 s after starting; nobody logs a warning after the session starts.
+- `scripts/netpeers.sh {session,join,soak}` against any signalling server, with una_zombies'
+  rules: assert on the peer under test, cut logs at `LOG_SESSION_START`, exit 3 when the
+  transport never connected.
+- `ARCHITECTURE.md`, `CHANGELOG.md`, `docs/migration/`, `.github/workflows/ci.yml`.
+
+**Do** keep the client role adoption on a *promoted* lobby (the bridge does now:
+`adopt_role` ignores `PendingLobby` for clients). **Watch** a game's own per-entity sends:
+`EntityCommands::trigger` on a client that left in the same frame panics under the default
+error handler; the bridge's sends go through `trigger_if_alive`.
 
 ## T14 — the avian bundle and the input plugin
 

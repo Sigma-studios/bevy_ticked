@@ -1,0 +1,75 @@
+name: ci
+
+on:
+  push:
+    branches: [main, "phase/**"]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  # Test binaries without debug info: a third of the disk, and the assertions are the same.
+  CARGO_PROFILE_DEV_DEBUG: 0
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Linux build dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev pkg-config
+      - run: cargo test --workspace
+
+  guards:
+    name: guards (source guard, clippy, fmt)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev pkg-config
+      - run: cargo fmt --all -- --check
+      - name: the tick does not read the frame
+        run: cargo test --workspace --test sim_is_deterministic
+      - run: cargo clippy --workspace --all-targets -- -D warnings -A clippy::collapsible_if -A clippy::manual_is_multiple_of -A clippy::explicit_counter_loop
+
+  wasm:
+    name: wasm (non-blocking)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --target wasm32-unknown-unknown -p bevy_ticked -p bevy_ticked_networking -p bevy_ticked_lockstep_networking
+
+  multiprocess:
+    name: multiprocess (real WebRTC)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev pkg-config
+      - name: build the netpeer examples
+        run: cargo build -p bevy_ticked_networking_ensemble --example netpeer
+      - name: two and three processes agree about the session they played
+        run: cargo test -p bevy_ticked_networking_ensemble --test webrtc_multiprocess -- --test-threads=1
+      - name: peer logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: netpeer-logs
+          path: target/webrtc-multiprocess/
