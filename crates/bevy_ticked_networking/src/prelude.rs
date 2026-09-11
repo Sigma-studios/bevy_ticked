@@ -1,6 +1,7 @@
 pub use crate::{
     client::{ClientSet, ClientTickBuffer, LocalClientPlayer, TickedClientPlugin},
     input::{InputQueue, MAX_INPUT_LEAD_TICKS, TickedInput},
+    input_plugin::{LocalPlayer, TickedInputPlugin},
     messages::{
         NetworkInputPayload, PeerLeft, ReceivedNetworkInput, ReceivedNetworkSnapshot,
         ReceivedSnapshotAck, SendNetworkInput, SendNetworkSnapshot,

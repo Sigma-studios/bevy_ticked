@@ -10,7 +10,7 @@ default = []
 # The lockstep vocabulary: `TickedNetwork::lockstep`, `ActionScript` runners, checksum agreement.
 lockstep = ["dep:bevy_ticked_lockstep_networking"]
 # avian3d fixtures for rollback-purity and determinism tests.
-avian = ["dep:avian3d"]
+avian = ["dep:avian3d", "dep:bevy_ticked_avian"]
 
 [dependencies]
 bevy = { version = "0.19", default-features = false, features = ["std", "serialize", "bevy_log"] }
@@ -21,6 +21,7 @@ bevy_ticked_lockstep_networking = { path = "../bevy_ticked_lockstep_networking",
 bevy_ensemble = { workspace = true }
 bevy_ensemble_loopback = { workspace = true }
 avian3d = { version = "0.7", features = ["serialize"], optional = true }
+bevy_ticked_avian = { path = "../bevy_ticked_avian", features = ["3d"], optional = true }
 serde = { version = "1", features = ["derive"] }
 postcard = { version = "1", features = ["alloc"] }
 tracing = "0.1"

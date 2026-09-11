@@ -23,6 +23,7 @@ bevy = "0.19"
 avian2d = { version = "0.7", features = ["serialize"] }
 avian3d = { version = "0.7", features = ["serialize"] }
 bevy_ensemble_webrtc = { workspace = true }
+bevy_ticked_avian = { path = "../bevy_ticked_avian", features = ["2d", "3d"] }
 bevy_elan = { git = "https://github.com/Sigma-dev/bevy_elan", rev = "fb453b3", features = ["serialize"] }
 # The source guard and golden helpers; tests only.
 bevy_ticked_testing = { path = "../bevy_ticked_testing" }
