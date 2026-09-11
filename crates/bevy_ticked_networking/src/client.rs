@@ -397,6 +397,9 @@ fn reset_on_join<T: TickedInput>(world: &mut World) {
     world.insert_resource(TrackedIdAllocator::default());
     world.insert_resource(AppliedSnapshotTick::default());
     world.insert_resource(LastAppliedSeq::default());
+    if let Some(uuid) = world.get_resource::<LocalClientPlayer>().map(|p| p.0) {
+        world.insert_resource(crate::input_plugin::LocalPlayer(uuid));
+    }
     world.resource_mut::<InputQueue<T>>().inputs.clear();
     if let Some(mut history) = world.get_resource_mut::<crate::replication::AuthoritativeHistory>()
     {

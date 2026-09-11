@@ -20,6 +20,7 @@ use bevy_ensemble::{
 };
 use bevy_ensemble_webrtc::{BevyEnsembleWebrtcPlugin, JoinWebrtcLobby, RefreshLobbyList};
 use bevy_ticked::prelude::*;
+use bevy_ticked_avian::avian3d::TickedAvianPlugin;
 use bevy_ticked_networking::prelude::*;
 use bevy_ticked_networking_ensemble::{
     SpawnerSlots, TickedEnsembleSessionPlugin, TickedNetworkingEnsemblePlugin,
@@ -143,7 +144,11 @@ fn main() {
             source: TickSource::Hz(64.0),
             ..default()
         })
+        // avian on the tick, replay-safe: the four body components registered under
+        // `avian::*`, warm starting off, sleeping off, the contact graph rolled back, bodies
+        // placed by `Position` (the plugin places a body spawned with a `Transform` once).
         .add_plugins(PhysicsPlugins::new(TickedSimulation))
+        .add_plugins(TickedAvianPlugin::default())
         .insert_resource(Gravity(Vec3::NEG_Y * 9.81))
         // bevy_elan in driven mode: every controller system runs chained inside
         // TickedSimulation; it reads ControllerInput / ControllerTime, not devices.
@@ -161,14 +166,14 @@ fn main() {
         // to a predicted body slides into place instead of blinking there. Neither touches
         // what the simulation reads.
         .add_plugins((TickedInterpolationPlugin, TickedSmoothingPlugin))
+        // The local player's input, sampled once per tick inside the loop and filed for the
+        // tick about to run: a keypress costs no extra frame, and a frame that runs two
+        // ticks samples twice. It used to be an `Update` system stamping `tick + 1`.
+        .add_plugins(TickedInputPlugin::<PlayerInput>::new(capture_local_input))
         .init_resource::<LocalLook>()
         // Register networked components. The wire name is the type's identity on the
         // wire and must be the same on every peer; registration order does not matter.
         // `Owner` — whose body this is — is the stack's own and is registered by it.
-        .register_networked_ticked_component::<Position>("avian::Position")
-        .register_networked_ticked_component::<Rotation>("avian::Rotation")
-        .register_networked_ticked_component::<LinearVelocity>("avian::LinearVelocity")
-        .register_networked_ticked_component::<AngularVelocity>("avian::AngularVelocity")
         .register_networked_ticked_component::<Aim>("Aim")
         .register_networked_ticked_component::<EntityKind>("EntityKind")
         .register_networked_ticked_component::<SpawnPoint>("SpawnPoint")
@@ -190,7 +195,6 @@ fn main() {
                 lobby_escape_key,
                 cleanup_on_lobby_gone,
                 server_spawn_players,
-                capture_local_input,
                 attach_local_camera,
                 manage_cameras,
                 sync_camera_pitch,
@@ -453,26 +457,20 @@ fn server_spawn_players(
     }
 }
 
-// --- Client: capture local input each frame and write to InputQueue ---
+// --- The local player's input, sampled by `TickedInputPlugin` once per tick ---
 
 fn capture_local_input(
     keys: Res<ButtonInput<KeyCode>>,
     mouse_buttons: Res<ButtonInput<MouseButton>>,
     mut motion: MessageReader<MouseMotion>,
-    tick: Res<CurrentTick>,
-    local_client: Option<Res<LocalClientPlayer>>,
-    local_server: Option<Res<LocalServerPlayer>>,
+    local: Res<LocalPlayer>,
     mut local_look: ResMut<LocalLook>,
-    mut input_queue: ResMut<InputQueue<PlayerInput>>,
-) {
-    let my_uuid = local_client
-        .as_ref()
-        .map(|p| p.0)
-        .or_else(|| local_server.as_ref().map(|p| p.0));
-    let Some(my_uuid) = my_uuid else {
+) -> Option<PlayerInput> {
+    // No session, no body to drive.
+    if local.0 == 0 {
         motion.clear();
-        return;
-    };
+        return None;
+    }
 
     // Integrate raw mouse motion into an absolute look. Sent as an absolute value
     // so replaying the same input is deterministic.
@@ -496,14 +494,12 @@ fn capture_local_input(
         move_dir.x -= 1.0;
     }
 
-    let input = PlayerInput {
+    Some(PlayerInput {
         move_dir: [move_dir.x, move_dir.y],
         look: [local_look.yaw, local_look.pitch],
         jump: keys.pressed(KeyCode::Space),
         shooting: mouse_buttons.pressed(MouseButton::Left),
-    };
-
-    input_queue.insert(tick.0 + 1, my_uuid, input);
+    })
 }
 
 // --- Simulation systems (run in TickedSimulation) ---

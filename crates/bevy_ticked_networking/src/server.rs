@@ -1,4 +1,3 @@
-
 use std::collections::HashMap;
 use std::marker::PhantomData;
 
@@ -213,6 +212,9 @@ fn reset_on_host<T: TickedInput>(world: &mut World) {
         allocator.raise_to(*id);
     }
     world.insert_resource(LocalSpawnerSlot(SpawnerSlot::AUTHORITY));
+    if let Some(uuid) = world.get_resource::<LocalServerPlayer>().map(|p| p.0) {
+        world.insert_resource(crate::input_plugin::LocalPlayer(uuid));
+    }
     world.insert_resource(CurrentTick(0));
     // A host's clock is the session's clock: nothing to wait for. Its own reasons only; a game
     // that opened the lobby from a pause menu keeps its pause.

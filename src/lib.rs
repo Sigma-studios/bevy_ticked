@@ -61,6 +61,13 @@ pub enum TickedSystems {
     Restore,
     /// Runs before tick advancement (e.g. client rollback on snapshot).
     PreTick,
+    /// Sample the local player's input for the tick about to run, once per tick.
+    ///
+    /// After the rollback, before the tick: an input sampled here is stamped for the tick
+    /// that runs next in this same pass, so a keypress costs no extra frame, and a frame that
+    /// runs two ticks samples twice. `bevy_ticked_networking::TickedInputPlugin` puts its
+    /// sampler here.
+    SampleInput,
     /// The core tick advancement: increment, run TickedSimulation, capture.
     Tick,
     /// Runs after tick advancement (e.g. server snapshot broadcast, client input send).
@@ -253,6 +260,7 @@ impl Plugin for TickedPlugin {
             (
                 TickedSystems::Restore,
                 TickedSystems::PreTick,
+                TickedSystems::SampleInput,
                 TickedSystems::Tick,
                 TickedSystems::PostTick,
             )
