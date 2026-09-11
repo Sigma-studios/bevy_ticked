@@ -14,7 +14,7 @@ use bevy_ticked::resource_registry::ResourceActions;
 use bevy_ticked::tracked_entity::TickTrackedEntity;
 
 /// The shape this exists for: a fact about the world with no entity to belong to.
-#[derive(Resource, Clone, Copy, Debug, PartialEq)]
+#[derive(Resource, Clone, Copy, Debug, Default, PartialEq)]
 struct Round(u32);
 
 #[derive(Component, Clone, Copy, Debug, PartialEq)]
@@ -124,5 +124,50 @@ fn restoring_a_tick_with_no_saved_resource_leaves_it_alone() {
         app.world().resource::<Round>(),
         &Round(7),
         "an unknown tick is a no-op, not a reset to Default"
+    );
+}
+
+/// What a session's end does to a registered resource. A `Round(7)` that survived into the
+/// next lobby was the entry every consumer with a round counter wrote a leave system for.
+#[test]
+fn reset_all_returns_every_registered_resource_to_default() {
+    #[derive(Resource, Clone, Copy, Debug, Default, PartialEq)]
+    struct Score(u32);
+
+    let mut app = app();
+    app.register_ticked_resource::<Score>();
+    app.world_mut().spawn((TickTrackedEntity(1), Height(0)));
+    app.world_mut().insert_resource(Round(7));
+    step(&mut app);
+    step(&mut app);
+    assert!(
+        app.world()
+            .resource::<ResourceActions<Round>>()
+            .newest_recorded_tick()
+            .is_some(),
+        "there is history to forget"
+    );
+
+    let resources = app
+        .world()
+        .resource::<bevy_ticked::resource_registry::TickedResourceRegistry>()
+        .clone();
+    resources.reset_all(app.world_mut());
+
+    assert_eq!(
+        *app.world().resource::<Round>(),
+        Round::default(),
+        "the previous session's round must not be the next lobby's"
+    );
+    assert!(
+        app.world()
+            .resource::<ResourceActions<Round>>()
+            .newest_recorded_tick()
+            .is_none(),
+        "and its history went with it"
+    );
+    assert!(
+        app.world().get_resource::<Score>().is_none(),
+        "a registered resource the game never inserted is not inserted behind its back"
     );
 }

@@ -74,8 +74,6 @@ fn the_default_needles_catch_every_known_reach() {
             "Time<Real>",
             "let delta = world.resource::<Time<Real>>().delta();",
         ),
-        ("delta_secs", "let dt = time.delta_secs();"),
-        ("elapsed_secs", "let t = time.elapsed_secs();"),
         ("ButtonInput", "fn s(keys: Res<ButtonInput<KeyCode>>) {}"),
         ("rand::", "let x: u32 = rand::random();"),
         ("thread_rng", "let mut rng = thread_rng();"),

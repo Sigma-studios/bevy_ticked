@@ -90,8 +90,9 @@ pub struct InputStats {
     pub received: u64,
     /// Inputs that arrived for a tick the host had already run.
     pub late: u64,
-    /// Inputs refused because their tick was outside the window the host keeps. Zero until the
-    /// input-tick bounds land.
+    /// Inputs refused because their tick was outside the window the host keeps: older than
+    /// `HistoryBufferTicks` behind the host, or further ahead than `MAX_INPUT_LEAD_TICKS`. Not
+    /// counted in `received`, and never seen by the queue or the margins.
     pub dropped_out_of_window: u64,
 }
 

@@ -19,10 +19,10 @@ struct Vel(i32);
 #[derive(Component, Clone, Copy)]
 struct Tag;
 
-#[derive(Resource, Clone, Copy)]
+#[derive(Resource, Clone, Copy, Default)]
 struct Round(u32);
 
-#[derive(Resource, Clone, Copy)]
+#[derive(Resource, Clone, Copy, Default)]
 struct Score(u32);
 
 fn registry(build: impl FnOnce(&mut App)) -> TickedComponentRegistry {

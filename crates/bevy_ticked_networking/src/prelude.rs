@@ -1,8 +1,8 @@
 pub use crate::{
     client::{ClientTickBuffer, LocalClientPlayer, TickedClientPlugin},
-    input::{InputQueue, TickedInput},
+    input::{InputQueue, MAX_INPUT_LEAD_TICKS, TickedInput},
     messages::{
-        NetworkInputPayload, NetworkSnapshotPayload, ReceivedNetworkInput,
+        NetworkInputPayload, NetworkSnapshotPayload, PeerLeft, ReceivedNetworkInput,
         ReceivedNetworkSnapshot, SendNetworkInput, SendNetworkSnapshot,
     },
     networked_registry::{
