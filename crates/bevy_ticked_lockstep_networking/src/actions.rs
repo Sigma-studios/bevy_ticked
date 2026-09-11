@@ -4,7 +4,7 @@ use crate::{
 };
 use bevy::prelude::*;
 use bevy_ensemble::{Host, Lobby, LobbyMessage, LocalMultiplayerPlayerId, ReceivedEnsembleMessage};
-use bevy_ticked::tick::{CurrentTick, TicksPaused};
+use bevy_ticked::tick::{CurrentTick, TickHolds};
 
 /// Record a player's actions for a tick, joining them to anything already recorded.
 ///
@@ -66,7 +66,7 @@ pub struct LastScheduledTick(pub Option<u64>);
 /// ticks were never going to carry input, and what the host is waiting for is not the content but
 /// the statement that this participant has nothing more to say about that tick.
 pub fn flush_pending_actions<A: LockstepAction, S: JoinSnapshot>(
-    ticks_paused: Option<Res<TicksPaused>>,
+    holds: Res<TickHolds>,
     pending_actions: Option<ResMut<LocalPendingActions<A>>>,
     snapshot_state: Option<Res<ClientSnapshotState<S>>>,
     config: Res<LockstepConfig>,
@@ -78,7 +78,7 @@ pub fn flush_pending_actions<A: LockstepAction, S: JoinSnapshot>(
     client_lobby: Option<Single<Entity, (With<Lobby>, Without<Host>)>>,
     mut commands: Commands,
 ) {
-    if ticks_paused.is_some() {
+    if holds.is_held() {
         return;
     }
 

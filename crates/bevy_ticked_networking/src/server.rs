@@ -6,7 +6,7 @@ use bevy::prelude::*;
 use bevy_ticked::{
     TickedLoop, TickedSystems,
     registry::TickedComponentRegistry,
-    tick::{CurrentTick, HistoryBufferTicks, TicksPaused},
+    tick::{CurrentTick, HistoryBufferTicks, TickHoldReason, TickHolds},
     tracked_entity::{TickTrackedEntity, TickTrackedEntityCounter},
 };
 
@@ -132,6 +132,11 @@ impl<T: TickedInput> Plugin for TickedServerPlugin<T> {
 fn reset_on_host<T: TickedInput>(world: &mut World) {
     let highest = highest_tracked_id(world);
     world.insert_resource(CurrentTick(0));
+    // A host's clock is the session's clock: nothing to wait for. Its own reasons only; a game
+    // that opened the lobby from a pause menu keeps its pause.
+    let mut holds = world.resource_mut::<TickHolds>();
+    holds.release(TickHoldReason::AwaitingSync);
+    holds.release(TickHoldReason::SoftHold);
     world.insert_resource(TickTrackedEntityCounter(highest));
     world.resource_mut::<InputQueue<T>>().inputs.clear();
     // The tick counter goes back to zero, so a high-water mark from the last
@@ -243,15 +248,29 @@ fn forget_departed_peer<T: TickedInput>(
 
 /// After the core tick, build and broadcast a snapshot.
 /// Only runs if `LocalServerPlayer` is present (i.e., this peer is the host).
+///
+/// A held clock does not stop the broadcast. A host that pauses still has clients to tell,
+/// and a client that joins during the pause needs the world; what changes is the rate: the
+/// tick is the same every pass, so once every [`HELD_BROADCAST_EVERY`] passes is enough for a
+/// joiner and spares everyone else a stream of identical packets.
 fn broadcast_snapshot(
     tick: Res<CurrentTick>,
-    ticks_paused: Option<Res<TicksPaused>>,
+    holds: Res<TickHolds>,
     server_player: Option<Res<LocalServerPlayer>>,
     recipients: Option<Res<SnapshotRecipients>>,
+    mut passes_held: Local<u32>,
     mut commands: Commands,
 ) {
-    if ticks_paused.is_some() || server_player.is_none() {
+    if server_player.is_none() || holds.holds(TickHoldReason::AwaitingSync) {
         return;
+    }
+    if holds.is_held() {
+        *passes_held += 1;
+        if !(*passes_held).is_multiple_of(HELD_BROADCAST_EVERY) {
+            return;
+        }
+    } else {
+        *passes_held = 0;
     }
     // Before `build_snapshot`, which is the whole point. See [`SnapshotRecipients`].
     if recipients.is_some_and(|recipients| recipients.0 == 0) {
@@ -259,6 +278,9 @@ fn broadcast_snapshot(
     }
     commands.queue(BroadcastSnapshotCommand(tick.0));
 }
+
+/// Passes of the loop between snapshots while the clock is held: half a second at 64 Hz.
+const HELD_BROADCAST_EVERY: u32 = 32;
 
 struct BroadcastSnapshotCommand(u64);
 

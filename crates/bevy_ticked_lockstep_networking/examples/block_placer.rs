@@ -659,7 +659,7 @@ fn format_in_game_ui(
 #[cfg(feature = "transport-webrtc")]
 fn update_ui(
     tick: Res<CurrentTick>,
-    ticks_paused: Option<Res<TicksPaused>>,
+    holds: Res<TickHolds>,
     host_lobbies: Query<(), (With<Lobby>, With<Host>)>,
     client_lobbies: Query<(), (With<Lobby>, Without<Host>)>,
     pending_lobbies: Query<(), With<PendingLobby>>,
@@ -704,7 +704,7 @@ fn update_ui(
     };
     **text = format_in_game_ui(
         tick.0,
-        ticks_paused.is_some(),
+        holds.is_held(),
         is_host,
         lobby_entity,
         &participants,
@@ -715,7 +715,7 @@ fn update_ui(
 #[cfg(feature = "transport-steam")]
 fn update_ui(
     tick: Res<CurrentTick>,
-    ticks_paused: Option<Res<TicksPaused>>,
+    holds: Res<TickHolds>,
     host_lobbies: Query<(), (With<Lobby>, With<Host>)>,
     client_lobbies: Query<(), (With<Lobby>, Without<Host>)>,
     pending_lobbies: Query<(), With<PendingLobby>>,
@@ -760,7 +760,7 @@ fn update_ui(
     };
     **text = format_in_game_ui(
         tick.0,
-        ticks_paused.is_some(),
+        holds.is_held(),
         is_host,
         lobby_entity,
         &participants,

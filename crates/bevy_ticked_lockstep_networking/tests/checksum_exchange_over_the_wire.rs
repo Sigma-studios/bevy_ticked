@@ -22,7 +22,7 @@ use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
 use bevy_ensemble::{EnsemblePlugin, LocalMultiplayerPlayerId, PlayerUUID};
 use bevy_ensemble_loopback::{LoopbackNetwork, LoopbackTransportPlugin};
-use bevy_ticked::prelude::{CurrentTick, TickedPlugin, TickedSimulation};
+use bevy_ticked::prelude::{CurrentTick, TickHoldReason, TickHolds, TickSource, TickedPlugin, TickedSimulation};
 use bevy_ticked_lockstep_networking::{
     ActionTracker, ApplyJoinSnapshot, CaptureJoinSnapshot, ChecksumExchangePlugin, ChecksumLog,
     ChecksumLogPlugin, Desync, JoinSnapshotApplied, LocalPendingActions, LockstepConfig,
@@ -108,7 +108,10 @@ fn peer(uuid: PlayerUUID) -> App {
     app.add_plugins(MinimalPlugins)
         .insert_resource(TimeUpdateStrategy::ManualDuration(TICK))
         .add_plugins((
-            TickedPlugin::default(),
+            TickedPlugin {
+                source: TickSource::Hz(64.0),
+                ..default()
+            },
             EnsemblePlugin,
             LoopbackTransportPlugin,
             LockstepPlugin::<Action, Snapshot> {
@@ -239,5 +242,50 @@ fn the_report_survives_a_link_that_drops_and_reorders() {
         net.run_until(2000, |net| desync_on(net, 1).is_some()),
         "a dropped report costs one interval of detection latency and nothing more; a checker \
          that only works on a perfect link is a checker that never runs where it is needed"
+    );
+}
+
+// ── The pause vocabulary ─────────────────────────────────────────────────────
+
+/// A lockstep client holds and releases `WaitingForPeers` every frame from what it has
+/// received. It used to do that with the one pause marker, so the next authoritative tick to
+/// arrive un-paused a game whose player had opened the menu.
+#[test]
+fn a_user_pause_is_not_lifted_by_an_arriving_authoritative_tick() {
+    let mut net = joined_pair();
+    let client = bevy_ensemble_loopback::PeerId(1);
+    net.app_mut(client)
+        .world_mut()
+        .resource_mut::<TickHolds>()
+        .hold(TickHoldReason::Manual);
+    let paused_at = current_tick(&net, 1);
+
+    net.run(100);
+
+    let holds = net.app(client).world().resource::<TickHolds>();
+    assert!(holds.holds(TickHoldReason::Manual), "the menu is still open");
+    assert_eq!(
+        current_tick(&net, 1),
+        paused_at,
+        "the lockstep sync ran a hundred frames and none of them moved a paused client"
+    );
+    // The host waits on the paused client's actions: a stall, until the lockstep phase's
+    // stall policy pauses the session and then kicks. Today it simply waits.
+    let host_while_paused = current_tick(&net, 0);
+
+    net.app_mut(client)
+        .world_mut()
+        .resource_mut::<TickHolds>()
+        .release(TickHoldReason::Manual);
+    net.run(200);
+    assert!(
+        current_tick(&net, 1) > paused_at + 50,
+        "released, the client runs again ({} -> {})",
+        paused_at,
+        current_tick(&net, 1)
+    );
+    assert!(
+        current_tick(&net, 0) > host_while_paused + 50,
+        "and the host with it"
     );
 }
