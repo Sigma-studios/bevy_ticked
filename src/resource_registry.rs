@@ -159,6 +159,19 @@ impl TickedResourceRegistry {
         self.register_inner::<R>(Some(wire_name), None, None);
     }
 
+    /// Rollback only, and left as it is when the session ends: `reset_all` clears its history
+    /// but does not put it back to `Default`. For a resource another library owns and keeps
+    /// consistent with the world on its own (a physics engine's contact graph), where a reset
+    /// to empty while the bodies still stand would be the inconsistency.
+    pub fn register_kept_on_leave<R: TickedResource>(&mut self) {
+        self.register_inner::<R>(None, None, None);
+        let type_id = TypeId::of::<R>();
+        let inner = Arc::make_mut(&mut self.inner);
+        if let Some(index) = inner.type_indices.get(&type_id).copied() {
+            inner.entries[index as usize].reset = clear_resource::<R>;
+        }
+    }
+
     /// Register a networked resource. Called by the networking crate. The name is required: it
     /// is the resource's identity on the wire.
     ///
@@ -461,6 +474,9 @@ fn reset_resource<R: TickedResource>(world: &mut World) {
 pub trait TickedResourceAppExt {
     /// Captured and rolled back, never sent.
     fn register_ticked_resource<R: TickedResource>(&mut self) -> &mut Self;
+    /// As [`register_ticked_resource`](Self::register_ticked_resource), but not reset to
+    /// `Default` when the session ends. See [`TickedResourceRegistry::register_kept_on_leave`].
+    fn register_ticked_resource_kept_on_leave<R: TickedResource>(&mut self) -> &mut Self;
 }
 
 impl TickedResourceAppExt for App {
@@ -470,6 +486,15 @@ impl TickedResourceAppExt for App {
         self.world_mut()
             .resource_mut::<TickedResourceRegistry>()
             .register::<R>();
+        self
+    }
+
+    fn register_ticked_resource_kept_on_leave<R: TickedResource>(&mut self) -> &mut Self {
+        self.init_resource::<TickedResourceRegistry>();
+        self.init_resource::<ResourceActions<R>>();
+        self.world_mut()
+            .resource_mut::<TickedResourceRegistry>()
+            .register_kept_on_leave::<R>();
         self
     }
 }

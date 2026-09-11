@@ -6,6 +6,7 @@ use bevy_ensemble::{
 };
 use bevy_ensemble_webrtc::{BevyEnsembleWebrtcPlugin, JoinWebrtcLobby, RefreshLobbyList};
 use bevy_ticked::prelude::*;
+use bevy_ticked_avian::avian2d::TickedAvianPlugin;
 use bevy_ticked_networking::prelude::*;
 use bevy_ticked_networking_ensemble::{
     SpawnerSlots, TickedEnsembleSessionPlugin, TickedNetworkingEnsemblePlugin,
@@ -83,7 +84,11 @@ fn main() {
             source: TickSource::Hz(64.0),
             ..default()
         })
+        // avian on the tick, replay-safe: the four body components registered under
+        // `avian::*`, warm starting off, sleeping off, the contact graph rolled back, bodies
+        // placed by `Position`. The example used to write the registrations by hand.
         .add_plugins(PhysicsPlugins::new(TickedSimulation).with_length_unit(1.0))
+        .add_plugins(TickedAvianPlugin::default())
         .insert_resource(Gravity(Vec2::ZERO))
         .add_plugins(TickedServerPlugin::<PlayerInput>::new())
         .add_plugins(TickedClientPlugin::<PlayerInput>::new())
@@ -95,13 +100,13 @@ fn main() {
         // to a predicted body slides into place instead of blinking there. Neither touches
         // what the simulation reads.
         .add_plugins((TickedInterpolationPlugin, TickedSmoothingPlugin))
+        // The local player's input, sampled once per tick inside the loop and filed for the
+        // tick about to run: a keypress costs no extra frame, and a frame that runs two
+        // ticks samples twice. It used to be an `Update` system stamping `tick + 1`.
+        .add_plugins(TickedInputPlugin::<PlayerInput>::new(capture_local_input))
         // Register networked components. The wire name is the type's identity on the
         // wire and must be the same on every peer; registration order does not matter.
         // `Owner` — whose body this is — is the stack's own and is registered by it.
-        .register_networked_ticked_component::<Position>("avian::Position")
-        .register_networked_ticked_component::<Rotation>("avian::Rotation")
-        .register_networked_ticked_component::<LinearVelocity>("avian::LinearVelocity")
-        .register_networked_ticked_component::<AngularVelocity>("avian::AngularVelocity")
         .register_networked_ticked_component::<AimAngle>("AimAngle")
         .register_networked_ticked_component::<EntityKind>("EntityKind")
         .register_networked_ticked_component::<SpawnPoint>("SpawnPoint")
@@ -119,7 +124,6 @@ fn main() {
                 lobby_escape_key,
                 cleanup_on_lobby_gone,
                 server_spawn_players,
-                capture_local_input,
                 sync_visuals,
                 update_ui,
             ),
@@ -342,25 +346,21 @@ fn server_spawn_players(
     }
 }
 
-// --- Client: capture local input each frame and write to InputQueue ---
+// --- The local player's input, sampled by `TickedInputPlugin` once per tick ---
 
 fn capture_local_input(
     keys: Res<ButtonInput<KeyCode>>,
     mouse_buttons: Res<ButtonInput<MouseButton>>,
     windows: Query<&Window>,
     cameras: Query<(&Camera, &GlobalTransform)>,
-    tick: Res<CurrentTick>,
-    local_client: Option<Res<LocalClientPlayer>>,
-    local_server: Option<Res<LocalServerPlayer>>,
-    mut input_queue: ResMut<InputQueue<PlayerInput>>,
+    local: Res<LocalPlayer>,
     players: Query<(&Position, &Owner)>,
-) {
-    // Determine our UUID
-    let my_uuid = local_client
-        .as_ref()
-        .map(|p| p.0)
-        .or_else(|| local_server.as_ref().map(|p| p.0));
-    let Some(my_uuid) = my_uuid else { return };
+) -> Option<PlayerInput> {
+    // No session, no body to drive.
+    if local.0 == 0 {
+        return None;
+    }
+    let my_uuid = local.0;
 
     // Movement from WASD
     let mut movement = Vec2::ZERO;
@@ -401,14 +401,11 @@ fn capture_local_input(
 
     let shooting = mouse_buttons.pressed(MouseButton::Left);
 
-    let input = PlayerInput {
+    Some(PlayerInput {
         movement: [movement.x, movement.y],
         aim_angle,
         shooting,
-    };
-
-    // Write to input queue for the NEXT tick (current tick + 1, since advance hasn't happened yet)
-    input_queue.insert(tick.0 + 1, my_uuid, input);
+    })
 }
 
 // --- Simulation systems (run in TickedSimulation) ---
