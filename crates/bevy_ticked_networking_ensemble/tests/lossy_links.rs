@@ -74,11 +74,15 @@ fn a_client_converges_over_every_preset() {
         net.hold_input(client, Input::NONE, 4);
         net.run(200);
 
-        let host_pos = latest::<Pos>(net.app(net.host()), body_of(&seats, net.uuid(client)));
-        assert_eq!(
-            host_pos.map(|pos| pos.0),
-            Some(held),
-            "{name}: the key was down for {held} ticks; the host moved the body {host_pos:?}"
+        let host_pos = latest::<Pos>(net.app(net.host()), body_of(&seats, net.uuid(client)))
+            .map(|pos| pos.0)
+            .expect("the host has the body");
+        // A release that arrives late is applied late, and the key is held until then: a
+        // tick or two of extra motion on a slow link, where a lost keypress was the
+        // alternative.
+        assert!(
+            (held..=held + 2).contains(&host_pos),
+            "{name}: the key was down for {held} ticks; the host moved the body {host_pos}"
         );
         assert_everyone_converged(&net, &seats);
         println!("{name}: converged, host body at {host_pos:?}");
@@ -124,7 +128,11 @@ fn a_laggy_client_can_move() {
     net.run(400);
 
     let pos = latest::<Pos>(net.app(host), id).expect("the host has the body");
-    assert_eq!(pos.0, held, "a 600 ms round trip is late, not lossy");
+    assert!(
+        (held..=held + 2).contains(&pos.0),
+        "a 600 ms round trip is late, not lossy: held {held}, moved {}",
+        pos.0
+    );
     assert_everyone_converged(&net, &seats);
     let lead = lead(net.app(client), net.app(host));
     assert!(

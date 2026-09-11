@@ -260,10 +260,13 @@ fn pruning_inputs_on_the_history_window_cannot_starve_a_replay() {
     );
 }
 
-// ── §3.7, not fixed: the cost, measured ──────────────────────────────────────
+// ── §3.7, fixed: an identical snapshot costs nothing ─────────────────────────
 
+/// The inverse of `a_client_replays_its_whole_lead_on_every_snapshot_even_when_nothing_changed`,
+/// which pinned the cost this fix removes: a frame whose snapshot agrees with the prediction
+/// runs one tick, not the whole lead again.
 #[test]
-fn a_client_replays_its_whole_lead_on_every_snapshot_even_when_nothing_changed() {
+fn an_identical_snapshot_costs_no_rollback_and_no_replay() {
     let mut app = client();
     sync(&mut app);
 
@@ -281,17 +284,36 @@ fn a_client_replays_its_whole_lead_on_every_snapshot_even_when_nothing_changed()
         app.update();
         per_frame.push(app.world().resource::<SimRuns>().0);
     }
-
-    let steady = *per_frame.last().unwrap();
-    println!("lead={lead} per_frame={per_frame:?}");
     assert!(
-        steady >= lead as u32,
-        "§3.7: a frame replays the whole lead. lead {lead}, saw {per_frame:?}"
+        per_frame.iter().all(|runs| *runs == 1),
+        "a frame with a matching snapshot runs exactly one tick; saw {per_frame:?} (lead {lead})"
     );
-    // None of that work changed anything: the snapshot agreed with the prediction
-    // every time.
-    let mut q = app.world_mut().query::<&Pos>();
-    assert_eq!(q.iter(app.world()).next().copied(), Some(Pos(0)));
+    let stats = app
+        .world()
+        .resource::<bevy_ticked_networking::diagnostics::ReplayStats>();
+    assert_eq!(stats.skipped_identical, 8);
+    assert_eq!(stats.rollbacks, 1, "only the initial sync rolled the world");
+}
+
+/// And one that disagrees still does: the fast path is a comparison, not a shortcut.
+#[test]
+fn a_differing_snapshot_still_replays() {
+    let mut app = client();
+    sync(&mut app);
+    let lead = app
+        .world()
+        .resource::<ClientTickBuffer>()
+        .target_replay_distance;
+    let current = app.world().resource::<CurrentTick>().0;
+    let snapshot = snapshot_placing(&mut app, current - lead, 77);
+    app.world_mut().trigger(ReceivedNetworkSnapshot(snapshot));
+    app.world_mut().resource_mut::<SimRuns>().0 = 0;
+    app.update();
+    assert!(
+        app.world().resource::<SimRuns>().0 >= lead as u32,
+        "a correction replays the lead"
+    );
+    assert_eq!(pos(&mut app), Some(Pos(77)));
 }
 
 /// §3.7's fix is feasible without new bookkeeping: the client's own prediction for

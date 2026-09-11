@@ -65,7 +65,7 @@ struct PlayerInput {
 
 /// Absolute view orientation. Source of truth for player aim and bullet travel;
 /// elan's (non-networked) `Look` is derived from this every tick.
-#[derive(Component, Clone, Copy, Debug, Serialize, Deserialize, Default)]
+#[derive(Component, PartialEq, Clone, Copy, Debug, Serialize, Deserialize, Default)]
 struct Aim {
     yaw: f32,
     pitch: f32,
@@ -84,10 +84,10 @@ enum EntityKind {
     Bullet,
 }
 
-#[derive(Component, Clone, Debug, Serialize, Deserialize)]
+#[derive(Component, PartialEq, Clone, Debug, Serialize, Deserialize)]
 struct SpawnPoint(Vec3);
 
-#[derive(Component, Clone, Debug, Serialize, Deserialize, Default)]
+#[derive(Component, PartialEq, Clone, Debug, Serialize, Deserialize, Default)]
 struct ShootCooldown(u64);
 
 // --- Local-only marker components ---

@@ -16,7 +16,7 @@ use crate::{
     diagnostics::{HealthWarnings, ReplayStats},
     input::{InputQueue, TickedInput},
     messages::{ReceivedNetworkSnapshot, SendNetworkInput},
-    snapshot::{SnapshotBody, SnapshotPacket, apply_full_body},
+    snapshot::{FullBody, SnapshotBody, SnapshotPacket, apply_full_body},
 };
 
 /// Resource identifying the local player on the client.
@@ -397,12 +397,69 @@ pub struct SnapshotApplied {
     pub first: bool,
 }
 
+/// A replay that did not fit in one frame: the tick it is heading for. While present the
+/// clock holds [`TickHoldReason::Replaying`] and each loop pass runs up to `MaxTicksPerFrame`
+/// more of it. A new snapshot supersedes it.
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AwaitingReplay {
+    pub end_tick: u64,
+}
+
+/// Run ticks `from + 1 ..= end_tick`, at most `budget` of them, capturing each. Returns the
+/// tick reached.
+fn replay_ticks(
+    world: &mut World,
+    registry: &TickedComponentRegistry,
+    from: u64,
+    end_tick: u64,
+    budget: u64,
+) -> u64 {
+    let stop = end_tick.min(from + budget);
+    for tick in (from + 1)..=stop {
+        world.resource_mut::<CurrentTick>().0 = tick;
+        run_tick_schedule(world, tick, TickedSimulation);
+        registry.capture_all(world, tick);
+    }
+    world.resource_mut::<CurrentTick>().0 = stop;
+    stop
+}
+
+/// Replay toward `end_tick` from the current tick, within this frame's budget; if it is not
+/// finished, leave [`AwaitingReplay`] and hold the clock so the next pass continues it.
+fn replay_bounded(world: &mut World, registry: &TickedComponentRegistry, end_tick: u64) {
+    let from = world.resource::<CurrentTick>().0;
+    let budget = u64::from(world.resource::<bevy_ticked::MaxTicksPerFrame>().0);
+    let reached = replay_ticks(world, registry, from, end_tick, budget);
+    {
+        let mut stats = world.resource_mut::<ReplayStats>();
+        stats.ticks_replayed += reached.saturating_sub(from);
+    }
+    let mut holds = world.resource_mut::<TickHolds>();
+    if reached < end_tick {
+        holds.hold(TickHoldReason::Replaying);
+        world.insert_resource(AwaitingReplay { end_tick });
+    } else {
+        holds.release(TickHoldReason::Replaying);
+        world.remove_resource::<AwaitingReplay>();
+    }
+}
+
 /// PreTick: if a server snapshot arrived, rollback and replay local inputs to now.
 fn handle_server_snapshot<T: TickedInput>(world: &mut World) {
     let Some(packet) = world.resource_mut::<PendingSnapshot>().0.take() else {
+        // Nothing new: carry on with a replay that did not fit in the last frame.
+        if let Some(awaiting) = world.get_resource::<AwaitingReplay>().copied() {
+            let registry = world.resource::<TickedComponentRegistry>().clone();
+            replay_bounded(world, &registry, awaiting.end_tick);
+        }
         return;
     };
     world.resource_mut::<PendingSnapshotTick>().0 = None;
+    // A new snapshot supersedes a replay in progress: the rollback below starts over from it.
+    world.remove_resource::<AwaitingReplay>();
+    world
+        .resource_mut::<TickHolds>()
+        .release(TickHoldReason::Replaying);
     let body = match &packet.body {
         SnapshotBody::Full(body) => body,
         SnapshotBody::Delta(_) => {
@@ -435,6 +492,20 @@ fn handle_server_snapshot<T: TickedInput>(world: &mut World) {
     let snapshot_tick = packet.tick;
 
     let registry = world.resource::<TickedComponentRegistry>().clone();
+
+    // The fast path: the authority agrees with the prediction, so there is nothing to
+    // correct and nothing to replay. The comparison is exact — a prediction off by an ulp is
+    // one that will drift, and the replay is how it is put right — and it costs a decode of
+    // the packet, which the slow path pays anyway. Before this a client replayed its whole
+    // lead on every snapshot: seven simulation runs per frame on a world where nothing had
+    // happened, and every `Changed<T>` and observer firing seven times for it.
+    if !was_paused
+        && snapshot_tick < current_tick
+        && prediction_matches(world, &registry, body, snapshot_tick)
+    {
+        accept_identical::<T>(world, &packet, body, current_tick);
+        return;
+    }
 
     // A snapshot older than anything still in history can be applied, but the replay from it
     // cannot restore rollback-only state for the ticks in between: they are gone. Counted, and
@@ -472,20 +543,7 @@ fn handle_server_snapshot<T: TickedInput>(world: &mut World) {
         });
         health.duplicate_ids_in_snapshot = count;
     }
-    // Other players' inputs the host already holds. The local player's own are dropped: the
-    // client has them, and a relayed copy could be older than what it has queued since.
-    let local = world.get_resource::<LocalClientPlayer>().map(|p| p.0);
-    if !body.inputs_ahead.is_empty() {
-        let mut queue = world.resource_mut::<InputQueue<T>>();
-        for relayed in &body.inputs_ahead {
-            if Some(relayed.player) == local {
-                continue;
-            }
-            if let Ok(input) = postcard::from_bytes::<T>(&relayed.bytes) {
-                queue.insert(relayed.tick, relayed.player, input);
-            }
-        }
-    }
+    file_relayed_inputs::<T>(world, body);
     world.insert_resource(AppliedSnapshotTick(Some(snapshot_tick)));
     world.insert_resource(LastAppliedSeq(Some(packet.seq)));
     {
@@ -546,20 +604,11 @@ fn handle_server_snapshot<T: TickedInput>(world: &mut World) {
         registry.capture_all(world, snapshot_tick);
 
         let target = world.resource::<ClientTickBuffer>().target_replay_distance;
-        for tick in (snapshot_tick + 1)..=(snapshot_tick + target) {
-            world.resource_mut::<CurrentTick>().0 = tick;
-            run_tick_schedule(world, tick, TickedSimulation);
-            registry.capture_all(world, tick);
-        }
-        world.resource_mut::<CurrentTick>().0 = snapshot_tick + target;
-        {
-            let mut stats = world.resource_mut::<ReplayStats>();
-            stats.rollbacks += 1;
-            stats.ticks_replayed += target;
-        }
+        world.resource_mut::<ReplayStats>().rollbacks += 1;
         world
             .resource_mut::<TickHolds>()
             .release(TickHoldReason::AwaitingSync);
+        replay_bounded(world, &registry, snapshot_tick + target);
         // The lead was just set outright, so there is no error left for the rate
         // trim to work on. Leaving a stale value here is not harmless: a client
         // that was shedding lead at 0.98 when it fell behind would keep running
@@ -597,16 +646,119 @@ fn handle_server_snapshot<T: TickedInput>(world: &mut World) {
     let target = world.resource::<ClientTickBuffer>().target_replay_distance;
     let end_tick = converge_lead(world, current_tick, replay_distance as u64, target);
 
-    for tick in (snapshot_tick + 1)..=end_tick {
-        world.resource_mut::<CurrentTick>().0 = tick;
-        run_tick_schedule(world, tick, TickedSimulation);
-        registry.capture_all(world, tick);
+    world.resource_mut::<ReplayStats>().rollbacks += 1;
+    replay_bounded(world, &registry, end_tick);
+}
+
+/// Whether the authority's body for `tick` is exactly what this client predicted for it.
+///
+/// The set of tracked ids must be the same (a spawn or a despawn is a correction), every
+/// predicted entity's networked components must be present in the same set and equal to the
+/// values captured at `tick`, and the networked resources must encode to the same bytes.
+/// Interpolated entities are not compared: they are never predicted, so their record is
+/// simply what will be drawn. Anything that fails to decode is a mismatch, and the slow path
+/// reports it.
+fn prediction_matches(
+    world: &mut World,
+    registry: &TickedComponentRegistry,
+    body: &FullBody,
+    tick: u64,
+) -> bool {
+    let local: std::collections::HashMap<u64, bool> = {
+        let mut query = world.query::<(&TickTrackedEntity, Option<&crate::replication::ReplicationMode>)>();
+        query
+            .iter(world)
+            .map(|(tracked, mode)| {
+                (
+                    tracked.0,
+                    matches!(mode, Some(crate::replication::ReplicationMode::Predicted)),
+                )
+            })
+            .collect()
+    };
+    if local.len() != body.entities.len() {
+        return false;
     }
-    world.resource_mut::<CurrentTick>().0 = end_tick;
+    for record in &body.entities {
+        let Some(predicted) = local.get(&record.id) else {
+            return false;
+        };
+        if !predicted {
+            continue;
+        }
+        if registry.saved_wire_types_at(world, tick, record.id) != record.present {
+            return false;
+        }
+        let mut rest: &[u8] = &record.bytes;
+        for wire_index in record.present.iter() {
+            match registry.matches_at(world, wire_index, tick, record.id, rest) {
+                Some((true, consumed)) => rest = &rest[consumed..],
+                _ => return false,
+            }
+        }
+    }
+    let ours = world
+        .get_resource::<TickedResourceRegistry>()
+        .cloned()
+        .map(|resources| resources.serialize_all(world, tick))
+        .unwrap_or_default();
+    ours == body.resources
+}
+
+/// The bookkeeping of applying a snapshot, for one that changed nothing: the history, the
+/// acks, the relayed inputs, the margin — and the lead, which may still need a step.
+fn accept_identical<T: TickedInput>(
+    world: &mut World,
+    packet: &SnapshotPacket,
+    body: &FullBody,
+    current_tick: u64,
+) {
+    let snapshot_tick = packet.tick;
+    world
+        .resource_mut::<crate::replication::AuthoritativeHistory>()
+        .record(snapshot_tick, body.entities.iter().cloned());
+    file_relayed_inputs::<T>(world, body);
+    world.insert_resource(AppliedSnapshotTick(Some(snapshot_tick)));
+    world.insert_resource(LastAppliedSeq(Some(packet.seq)));
     {
         let mut stats = world.resource_mut::<ReplayStats>();
-        stats.rollbacks += 1;
-        stats.ticks_replayed += end_tick.saturating_sub(snapshot_tick);
+        stats.snapshots_applied += 1;
+        stats.skipped_identical += 1;
+        stats.last_replay_distance = current_tick as i64 - snapshot_tick as i64;
+    }
+    world.write_message(SnapshotApplied {
+        tick: snapshot_tick,
+        first: false,
+    });
+    let replay_distance = current_tick as i64 - snapshot_tick as i64;
+    world
+        .resource_mut::<ClientTickBuffer>()
+        .observe(replay_distance, i64::from(packet.your_margin));
+    let target = world.resource::<ClientTickBuffer>().target_replay_distance;
+    let end_tick = converge_lead(world, current_tick, replay_distance as u64, target);
+    // A lead deficit is taken forward, as a plain simulation of the missing ticks; an excess
+    // is left to the rate trim, since going back would be a rewind of correct ticks.
+    if end_tick > current_tick {
+        let registry = world.resource::<TickedComponentRegistry>().clone();
+        replay_bounded(world, &registry, end_tick);
+    }
+}
+
+/// Other players' inputs the host already holds. The local player's own are dropped: the
+/// client has them, and a relayed copy could be older than what it has queued since.
+fn file_relayed_inputs<T: TickedInput>(world: &mut World, body: &FullBody) {
+    if body.inputs_ahead.is_empty() {
+        return;
+    }
+    let local = world.get_resource::<LocalClientPlayer>().map(|p| p.0);
+    let mut queue = world.resource_mut::<InputQueue<T>>();
+    for relayed in &body.inputs_ahead {
+        if Some(relayed.player) == local {
+            continue;
+        }
+        if let Ok(input) = postcard::from_bytes::<T>(&relayed.bytes) {
+            queue.insert(relayed.tick, relayed.player, input);
+        }
     }
 }
 

@@ -6,6 +6,45 @@ what to change in a game, and why. Both peers of a session must be built from th
 Phases that changed `bevy_ensemble` too say which of its commits they pin; that crate's own
 `docs/MIGRATION.md` covers what changed there.
 
+## T9 — the misprediction fast path, send rate, bounded replay
+
+Nothing on the wire changed.
+
+### A snapshot that agrees with the prediction costs nothing
+
+**Before** a client rolled back and replayed its whole lead on every snapshot: seven
+simulation runs per frame on a world where nothing had happened, every `Changed<T>` and
+observer firing seven times for it, and an unregistered counter advancing seven times per
+tick. **After** the client compares the packet with what it predicted for the packet's tick
+— every predicted entity's networked components, by encoded bytes, plus the set of tracked
+ids and the networked resources — and when they agree it records the packet, files the
+relayed inputs, observes its margin and moves on. `ReplayStats.skipped_identical` counts
+those. Interpolated entities are not compared: they are never predicted.
+
+The comparison is exact and on the bytes. There is no `PartialEq` bound: a foreign component
+(a character controller's state from another crate) that never implemented equality is
+still networkable, and a type whose encoding is not canonical for equal values is replayed
+rather than mis-skipped.
+
+**Delete** a game's own "did anything change" check around its rollback, and any
+`Changed<T>`-driven presentation that was rate-limited to survive the replays. **Watch** a
+test that delivered a *matching* snapshot to force a replay: it forces nothing now; deliver a
+packet that differs.
+
+### `TickedServerPlugin::send_every`
+
+`TickedServerPlugin::new().send_every(n)` broadcasts every `n`th tick (`SendEvery` resource).
+With the fast path a snapshot costs an agreeing client nothing, so the rate is a bandwidth
+knob only; the welcome carries it and a client draws remote bodies `2 * send_every` ticks
+behind.
+
+### A replay is bounded per frame
+
+A correction from far back (a burst of stale snapshots after a stall) replays at most
+`MaxTicksPerFrame` ticks in a frame; the rest carries over under `AwaitingReplay`, with the
+clock held by `TickHoldReason::Replaying` (new) until the world is caught up. A new snapshot
+supersedes a replay in progress.
+
 ## T8 — remote entity modes, hold-last input, correction smoothing
 
 Nothing on the wire changed except one new networked component, `bevy_ticked::Owner`, which

@@ -97,8 +97,12 @@ fn deliver(app: &mut App, tick: u64) {
 
 fn sync(app: &mut App) {
     app.update();
-    app.world_mut()
-        .spawn((TickTrackedEntity(1), Pos(0), TicksSeen(0)));
+    app.world_mut().spawn((
+        TickTrackedEntity(1),
+        Pos(0),
+        TicksSeen(0),
+        bevy_ticked_networking::replication::ReplicationMode::Predicted,
+    ));
     let registry = app.world().resource::<TickedComponentRegistry>().clone();
     registry.capture_all(app.world_mut(), 0);
     deliver(app, 0);
@@ -149,9 +153,24 @@ fn a_client_rollback_unpublishes_events_from_ticks_the_authority_erased() {
     let presented_before = app.world().resource::<Presented>().0.len();
     assert!(presented_before > 0);
 
-    // The authority's version of the last `lead` ticks has no footsteps in it.
+    // The authority's version of the last `lead` ticks has no footsteps in it, and disagrees
+    // with the prediction, so the client replays (a snapshot that agreed would cost nothing
+    // and change nothing, footsteps included).
     app.insert_resource(Walking(false));
-    deliver(&mut app, current - lead);
+    let mut packet = SnapshotPacket::full(
+        current - lead,
+        build_full_body(app.world_mut(), current - lead),
+    );
+    packet.your_margin = 2;
+    if let bevy_ticked_networking::snapshot::SnapshotBody::Full(body) = &mut packet.body {
+        let index = app
+            .world()
+            .resource::<TickedComponentRegistry>()
+            .wire_index_of::<Pos>()
+            .unwrap();
+        body.put(bevy_ticked_networking::snapshot::EntityRecord::new(1).with(index, &Pos(9)));
+    }
+    app.world_mut().trigger(ReceivedNetworkSnapshot(packet));
     app.update();
 
     let log = app.world().resource::<TickedEvents<Footstep>>();
