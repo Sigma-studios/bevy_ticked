@@ -22,7 +22,9 @@ tick clock could be set to another rate, and nothing reported the mismatch.
 `ButtonInput<KeyCode>`, `Gamepads`, `CursorMoved`, `AccumulatedMouseMotion` inside a tick
 read *this frame's* input; a replayed tick reads a different frame's. Sample input once per
 tick outside the simulation, stamp it with the tick it will run in, and read
-`InputQueue::at_tick` inside. The source guard flags the direct reads.
+`InputQueue::at_tick` inside. `TickedInputPlugin::<I>::new(sampler)` (T14) does the first
+two: the sampler runs in `TickedSystems::SampleInput`, once per tick, and its return value is
+filed for the tick about to run under `LocalPlayer`. The source guard flags the direct reads.
 
 ## 3. No wall-clock randomness
 
@@ -49,10 +51,19 @@ Register with `register_ticked_component` (rollback only) or
 
 ## 6. Spawn and despawn through the tracked paths
 
-Until the lifecycle phase lands, rewinding past a spawn leaves the entity standing with its
-state stripped (the crate warns about "husks"), and rewinding past a despawn does not bring
-it back. Spawn from the authority and let the snapshot replicate; use `despawn_ticked` once
-it exists.
+Spawn with `TrackedSpawner::spawn` (or `spawn_by(slot, ..)` for a predicted spawn on a
+client) and despawn with `despawn_ticked`. Since T10 the existence history rewinds both: a
+rewind past a spawn removes the entity, a rewind past a despawn brings it back as the same
+entity (a tombstone, `Disabled`, revived). A plain `despawn` on a tracked entity is recorded
+and warned about once; the rewind then rebuilds the entity through the snapshot spawn path,
+losing any local-only state on it.
+
+## 7. Physics: use the bundle
+
+avian keeps state between steps that no body component holds — the contact manifolds, the
+constraint colouring, the islands. `TickedAvianPlugin` (`bevy_ticked_avian`, T14) rolls it
+back with the bodies, zeroes warm starting, disables sleeping and turns the `Transform` →
+`Position` sync off; `docs/avian.md` has the table and what each setting was found to cost.
 
 ## Catching a plain `despawn` (clippy)
 

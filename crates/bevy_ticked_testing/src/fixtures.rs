@@ -413,3 +413,106 @@ pub mod minimal {
         }
     }
 }
+
+/// A stack of boxes under avian, the physics fixture. Feature `avian`.
+///
+/// A ground and a leaning stack of boxes that topples: contacts, friction, restitution,
+/// rotation — every solver path a game's bodies take, with a hash of every bit of every
+/// body so a divergence of one ulp is a divergence.
+#[cfg(feature = "avian")]
+pub mod avian {
+
+    use std::hash::{Hash, Hasher};
+
+    use avian3d::prelude::*;
+    use bevy::prelude::*;
+    use bevy_ticked::checksum::WorldHash;
+    use bevy_ticked::tracked_entity::{SpawnerSlot, TickTrackedEntity, TrackedWorldExt};
+    pub use bevy_ticked_avian::TickedSimulationSet;
+    pub use bevy_ticked_avian::avian3d::TickedAvianPlugin;
+
+    /// Every bit of every tracked body's position, rotation and velocities, in id order.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct AvianHash(pub u64);
+
+    impl WorldHash for AvianHash {
+        fn sample(world: &mut World) -> Self {
+            let mut bodies = world.query::<(
+                &TickTrackedEntity,
+                &Position,
+                &Rotation,
+                &LinearVelocity,
+                &AngularVelocity,
+            )>();
+            let mut rows: Vec<(u64, [u32; 13])> = bodies
+                .iter(world)
+                .map(|(id, p, r, v, w)| {
+                    let mut bits = [0u32; 13];
+                    bits[0..3].copy_from_slice(&p.0.to_array().map(f32::to_bits));
+                    bits[3..7].copy_from_slice(&r.0.to_array().map(f32::to_bits));
+                    bits[7..10].copy_from_slice(&v.0.to_array().map(f32::to_bits));
+                    bits[10..13].copy_from_slice(&w.0.to_array().map(f32::to_bits));
+                    (id.0, bits)
+                })
+                .collect();
+            rows.sort_unstable_by_key(|(id, _)| *id);
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            rows.hash(&mut hasher);
+            Self(hasher.finish())
+        }
+
+        fn value(&self) -> u64 {
+            self.0
+        }
+    }
+
+    /// The documented bundle: assets avian's collider backend needs, `TickedAvianPlugin`,
+    /// gravity. Call from a peer's build closure.
+    pub fn install(app: &mut App) {
+        install_with(app, TickedAvianPlugin::default());
+    }
+
+    /// The bundle with sleeping allowed: the negative control.
+    pub fn install_sleepy(app: &mut App) {
+        install_with(app, TickedAvianPlugin::default().allow_sleeping());
+    }
+
+    fn install_with(app: &mut App, plugin: TickedAvianPlugin) {
+        app.add_plugins((AssetPlugin::default(), bevy::scene::ScenePlugin))
+            .init_asset::<Mesh>()
+            .add_plugins(plugin)
+            .insert_resource(Gravity(Vec3::NEG_Y * 9.81));
+    }
+
+    /// A static ground and `boxes` unit cubes stacked with a lean, so the stack topples and
+    /// the bodies tumble over one another for a few seconds. Returns the boxes' tracked ids.
+    pub fn spawn_stack(world: &mut World, boxes: usize) -> Vec<u64> {
+        world.spawn((
+            RigidBody::Static,
+            Collider::cuboid(40.0, 1.0, 40.0),
+            Transform::from_xyz(0.0, -0.5, 0.0),
+        ));
+        (0..boxes)
+            .map(|i| {
+                let lean = 0.15 * i as f32;
+                let entity = world.spawn_tracked_by(
+                    SpawnerSlot::AUTHORITY,
+                    (
+                        RigidBody::Dynamic,
+                        Collider::cuboid(1.0, 1.0, 1.0),
+                        Transform::from_xyz(lean, 0.5 + 1.05 * i as f32, lean * 0.5),
+                    ),
+                );
+                world.get::<TickTrackedEntity>(entity).expect("tracked").0
+            })
+            .collect()
+    }
+
+    /// How many bodies avian has put to sleep.
+    pub fn sleeping_bodies(world: &mut World) -> usize {
+        world
+            .query_filtered::<(), With<Sleeping>>()
+            .iter(world)
+            .count()
+    }
+}

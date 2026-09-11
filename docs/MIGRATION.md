@@ -6,6 +6,51 @@ what to change in a game, and why. Both peers of a session must be built from th
 Phases that changed `bevy_ensemble` too say which of its commits they pin; that crate's own
 `docs/MIGRATION.md` covers what changed there.
 
+## T14 — the avian bundle and the input plugin
+
+No wire change. Rebuild every peer anyway: `TickedSystems` gained a set.
+
+### `bevy_ticked_avian`
+
+**Before** every game registered avian's four body components by hand, ran
+`PhysicsPlugins::new(TickedSimulation)`, and either turned warm starting and sleeping off or
+did not know it had to. **After** `TickedAvianPlugin` (one per dimension:
+`bevy_ticked_avian::avian3d::TickedAvianPlugin`, `::avian2d::TickedAvianPlugin`) does the
+registrations under `avian::*`, zeroes warm starting, disables sleeping, turns avian's
+`Transform` → `Position` sync off (placing a body spawned with a `Transform` once), and
+rolls back the solver's own state — `ContactGraph`, `ConstraintGraph`, `PhysicsIslands`,
+`JointGraph`, `BodyIslandNode` — which a replay read before it read any body and which
+nothing restored. `docs/avian.md` has the table and the measurements.
+
+**Do** add it after `TickedPlugin` (and after your own `PhysicsPlugins` if you add them);
+put your systems in `TickedSimulationSet::{Input, BeforePhysics, AfterPhysics}`; place
+bodies by `Position`. **Delete** the `avian::*` registrations, `transform_to_position:
+false`, and any `SolverConfig`/sleeping configuration the plugin now owns. **Watch** a
+game that positioned bodies through `Transform` after spawn: that path is off
+(`positions_from_transforms()` to keep it, solo only).
+
+### `TickedInputPlugin`
+
+**Before** every game had a `capture_local_input` system in `Update` that read the
+keyboard, chose between `LocalClientPlayer` and `LocalServerPlayer`, and wrote
+`queue.insert(tick + 1, uuid, input)`: once per frame (so a two-tick frame fed the second
+tick its predecessor's input) and after the tick (so a keypress waited a frame). **After**
+`TickedInputPlugin::<I>::new(sampler)` runs the sampler inside `TickedLoop` in the new
+`TickedSystems::SampleInput` set — after the rollback, before the tick, once per tick — and
+files what it returns for the tick about to run under `LocalPlayer`, which the role plugins
+keep current (the host's uuid, the client's, `0` solo). The sampler is an ordinary system
+returning `I` or `Option<I>`. It is skipped on a restore pass and while the clock is held.
+
+**Do** turn the capture system into a sampler (drop the queue, the tick and the two role
+resources; return the input) and add the plugin. **Delete** the `Update` registration.
+Measured: the press is read by a tick in the same frame (the `Update` capture: the next).
+
+### Registry
+
+`register_ticked_resource_kept_on_leave::<R>()`: rolled back like any ticked resource, but
+not reset to `Default` when the session ends, for a resource another library keeps
+consistent with the world on its own.
+
 ## T13 — delta replication, replicate-once, send rates, compression
 
 The wire is unchanged in shape (`PROTOCOL_VERSION` stays 2: the `Delta` body was reserved in

@@ -9,6 +9,7 @@ members = [
     "crates/bevy_ticked_networking_ensemble",
     "crates/bevy_ticked_lockstep_networking",
     "crates/bevy_ticked_testing",
+    "crates/bevy_ticked_avian",
 ]
 
 # bevy_ensemble is pinned here, once, by commit. Every crate in this workspace takes it with

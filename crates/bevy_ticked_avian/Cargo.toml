@@ -1,0 +1,25 @@
+[package]
+name = "bevy_ticked_avian"
+version = "0.1.0"
+edition = "2024"
+description = "The avian physics bundle that replays bit-identically under bevy_ticked"
+
+[features]
+default = ["3d"]
+2d = ["dep:avian2d"]
+3d = ["dep:avian3d"]
+
+[dependencies]
+bevy = { version = "0.19", default-features = false, features = ["std", "bevy_log"] }
+bevy_ticked = { path = "../.." }
+bevy_ticked_networking = { path = "../bevy_ticked_networking", default-features = false }
+avian2d = { version = "0.7", features = ["serialize"], optional = true }
+avian3d = { version = "0.7", features = ["serialize"], optional = true }
+
+[dev-dependencies]
+bevy = "0.19"
+bevy_ticked_testing = { path = "../bevy_ticked_testing", features = ["avian"] }
+
+[lints.clippy]
+too_many_arguments = "allow"
+type_complexity = "allow"

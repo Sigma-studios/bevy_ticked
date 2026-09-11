@@ -2,6 +2,7 @@ pub mod client;
 pub mod delta;
 pub mod diagnostics;
 pub mod input;
+pub mod input_plugin;
 pub mod messages;
 pub mod networked_registry;
 pub mod pause;
@@ -58,6 +59,7 @@ pub fn reset_on_leave<T: TickedInput>(world: &mut World) {
     world.insert_resource(CurrentTick(0));
     world.insert_resource(TrackedIdAllocator::default());
     world.remove_resource::<LocalSpawnerSlot>();
+    world.insert_resource(input_plugin::LocalPlayer::default());
     world.resource_mut::<InputQueue<T>>().inputs.clear();
     let registry = world.resource::<TickedComponentRegistry>().clone();
     registry.clear_all(world);
