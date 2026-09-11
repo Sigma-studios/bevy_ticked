@@ -5,6 +5,7 @@
 //! ticking into a future the host has not produced. Both cases are a few seconds of a real
 //! session and were, before this suite, a few minutes of visible wrongness afterwards.
 
+use bevy_ticked::prelude::{TickHoldReason, TickHolds};
 use bevy_ticked_testing::fixtures::minimal::{self, Input, seat_everyone};
 use bevy_ticked_testing::prelude::*;
 
@@ -63,23 +64,40 @@ fn a_client_alt_tab_reacquires_its_lead_without_a_visible_rewind() {
 /// While the host's frames stop, clients must not run ahead into ticks the host will never
 /// confirm; when it comes back, nobody should be holding a two-second lead to shed.
 #[test]
-#[ignore = "fixed in the pause phase (T11): the host auto-pauses on a stalled clock and clients hold"]
 fn a_host_alt_tab_auto_pauses_and_no_lead_piles_up() {
     let mut net = session();
     let (host, client) = (net.host(), net.client());
     let target = target_replay_distance(net.app(client)) as i64;
 
     net.freeze(host, TWO_SECONDS);
+    // While the host produced nothing the client heard nothing, and after a quarter of a
+    // second of silence it held its own clock rather than run into a future the host was not
+    // making. The audit measured about 1900 ticks of excess lead here, shed at 1.28 a second.
     let piled = lead(net.app(client), net.app(host));
     assert!(
-        piled <= target + 8,
+        piled <= target + 24,
         "the client ran {piled} ticks ahead of a host that produced none"
     );
+    assert!(
+        net.app(client)
+            .world()
+            .resource::<TickHolds>()
+            .holds(TickHoldReason::SoftHold),
+        "the client is holding on its own"
+    );
 
+    // The host's first frame back is two seconds long: it pauses the session at the tick it
+    // is still on, every client rolls back to it and forgets what it predicted, and the next
+    // frame resumes. The lead is then re-acquired forward, not shed.
     net.run(64);
     let lead = lead(net.app(client), net.app(host));
     assert!(
         (target..=target + 2).contains(&lead),
         "one second after the host came back the client leads by {lead}, target {target}"
+    );
+    assert!(
+        !net.app(client).world().resource::<TickHolds>().is_held(),
+        "and nothing holds the client any more: {:?}",
+        net.app(client).world().resource::<TickHolds>()
     );
 }

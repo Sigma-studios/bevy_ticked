@@ -3,6 +3,11 @@ name = "bevy_ticked_networking"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["window"]
+# The host pauses the session when its window loses focus.
+window = ["bevy/bevy_window"]
+
 [dependencies]
 bevy = { version = "0.19", default-features = false, features = ["std", "bevy_log"] }
 bevy_ticked = { path = "../.." }

@@ -75,6 +75,8 @@ pub struct TickedNetwork {
     cadence: Vec<(PeerId, u32, u32)>,
     /// Network frames stepped so far; the slow peers' phase.
     frame: u64,
+    /// Peers whose next frame is a long one (after a freeze), and the frame to put back.
+    clock_restore: Vec<(PeerId, Duration)>,
 }
 
 impl TickedNetwork {
@@ -121,6 +123,7 @@ impl TickedNetwork {
             issued: None,
             cadence: Vec::new(),
             frame: 0,
+            clock_restore: Vec::new(),
         };
         for _ in 0..clients {
             this.add_client();
@@ -285,6 +288,7 @@ impl TickedNetwork {
     /// Wall time is the network's frame for everyone; a peer with a cadence set runs fewer or
     /// more updates in it, never a longer or shorter frame than the clock says.
     pub fn step(&mut self) {
+        let restore = std::mem::take(&mut self.clock_restore);
         if self.cadence.is_empty() {
             self.net.step();
         } else {
@@ -307,6 +311,11 @@ impl TickedNetwork {
             });
         }
         self.frame += 1;
+        for (peer, frame) in restore {
+            self.net
+                .app_mut(peer)
+                .insert_resource(TimeUpdateStrategy::ManualDuration(frame));
+        }
         self.after_frame();
     }
 
@@ -371,6 +380,13 @@ impl TickedNetwork {
             self.net.step_only(&others);
             self.after_frame();
         }
+        // The frozen peer's next frame is as long as the freeze: that is what a real clock
+        // reports after a tab switch, and what the host's auto-pause looks for.
+        let frame = self.frame_of(peer);
+        self.net
+            .app_mut(peer)
+            .insert_resource(TimeUpdateStrategy::ManualDuration(frame * frames as u32));
+        self.clock_restore.push((peer, frame));
     }
 
     /// One frame that is `ticks` ticks long on every peer, then back to whatever each had.
