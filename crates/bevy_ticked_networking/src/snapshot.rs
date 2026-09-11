@@ -326,7 +326,9 @@ pub fn apply_full_body(world: &mut World, tick: u64, body: &FullBody) -> Applied
             }
         }
         if fresh {
-            world.entity_mut(entity).insert(TickTrackedEntity(record.id));
+            world
+                .entity_mut(entity)
+                .insert(TickTrackedEntity(record.id));
             applied.spawned.push(record.id);
         }
     }
@@ -356,12 +358,24 @@ pub fn apply_full_body(world: &mut World, tick: u64, body: &FullBody) -> Applied
     applied
 }
 
-/// Encode a packet for the wire.
+/// Encode a packet for the wire, uncompressed.
 pub fn encode_packet(packet: &SnapshotPacket) -> Vec<u8> {
-    postcard::to_allocvec(packet).expect("a snapshot packet always encodes")
+    encode_packet_with(packet, crate::delta::Compression::None)
 }
 
-/// Decode a packet from the wire. `None` for anything that is not one.
+/// Encode a packet for the wire with the given compression: a tag byte, then postcard bytes,
+/// LZ4-compressed when the policy and the size say so.
+pub fn encode_packet_with(
+    packet: &SnapshotPacket,
+    compression: crate::delta::Compression,
+) -> Vec<u8> {
+    let encoded = postcard::to_allocvec(packet).expect("a snapshot packet always encodes");
+    crate::delta::wrap(&encoded, compression)
+}
+
+/// Decode a packet from the wire, whichever way it was wrapped. `None` for anything that is
+/// not one.
 pub fn decode_packet(bytes: &[u8]) -> Option<SnapshotPacket> {
-    postcard::from_bytes(bytes).ok()
+    let inner = crate::delta::unwrap(bytes)?;
+    postcard::from_bytes(&inner).ok()
 }

@@ -201,7 +201,10 @@ pub fn assert_replays_identically_with<H: WorldHash>(
     ticks: u64,
     poison: impl Fn(&mut World),
 ) {
-    assert!(ticks >= 2, "a replay of fewer than two ticks cannot show a change");
+    assert!(
+        ticks >= 2,
+        "a replay of fewer than two ticks cannot show a change"
+    );
     assert_ne!(
         role(app),
         Role::Client,

@@ -29,16 +29,16 @@ compile_error!("One of `transport-webrtc` or `transport-steam` must be enabled."
 
 use avian2d::prelude::*;
 use bevy::prelude::*;
+#[cfg(feature = "transport-webrtc")]
+use bevy_ensemble::PublicLobbies;
 use bevy_ensemble::{
     EnsemblePlugin, Host, Lobby, LobbyParticipant, LobbyParticipantOf, LocalMultiplayerPlayerId,
     PendingLobby, StartHosting,
 };
-#[cfg(feature = "transport-webrtc")]
-use bevy_ensemble::PublicLobbies;
-#[cfg(feature = "transport-webrtc")]
-use bevy_ensemble_webrtc::{BevyEnsembleWebrtcPlugin, JoinWebrtcLobby, RefreshLobbyList};
 #[cfg(feature = "transport-steam")]
 use bevy_ensemble_steam::{BevyEnsembleSteamPlugin, JoinSteamLobby, SteamFriendLobbies};
+#[cfg(feature = "transport-webrtc")]
+use bevy_ensemble_webrtc::{BevyEnsembleWebrtcPlugin, JoinWebrtcLobby, RefreshLobbyList};
 use bevy_ticked::prelude::*;
 use bevy_ticked_lockstep_networking::ChecksumLogPlugin;
 use bevy_ticked_lockstep_networking::prelude::*;
@@ -160,7 +160,10 @@ impl WorldHash for GameHash {
             .collect();
         blocks.sort_by_key(|(id, _, _, _)| *id);
         let mut blocks_hash = 0xcbf2_9ce4_8422_2325;
-        fnv(&mut blocks_hash, &world.resource::<NextBlockId>().0.to_le_bytes());
+        fnv(
+            &mut blocks_hash,
+            &world.resource::<NextBlockId>().0.to_le_bytes(),
+        );
         for (id, owner, position, half) in blocks {
             fnv(&mut blocks_hash, &id.to_le_bytes());
             fnv(&mut blocks_hash, &owner.to_le_bytes());
@@ -210,8 +213,7 @@ fn player_color(uuid: u128) -> Color {
 
 fn main() {
     let mut app = App::new();
-    app.add_plugins(DefaultPlugins)
-        .add_plugins(EnsemblePlugin);
+    app.add_plugins(DefaultPlugins).add_plugins(EnsemblePlugin);
 
     #[cfg(feature = "transport-webrtc")]
     {
@@ -233,34 +235,34 @@ fn main() {
         source: TickSource::Hz(64.0),
         ..default()
     })
-        .add_plugins(PhysicsPlugins::new(TickedSimulation).with_length_unit(1.0))
-        .insert_resource(Gravity(Vec2::ZERO))
-        .add_plugins((
-            LockstepPlugin::<Action, GameSnapshot>::default(),
-            AdaptiveTickBufferPlugin,
-            // After physics, so the hash describes a finished tick: positions that were
-            // integrated, not the ones the actions were applied to.
-            ChecksumLogPlugin::<GameHash>::default().in_set(PhysicsSystems::Last),
-            ChecksumExchangePlugin::<GameHash>::default(),
-        ))
-        .init_resource::<NextBlockId>()
-        // Startup
-        .add_systems(Startup, setup)
-        // Lobby management + input + visuals
-        .add_systems(
-            Update,
-            (
-                lobby_host_key,
-                lobby_escape_key,
-                cleanup_on_lobby_gone,
-                capture_local_input,
-                capture_join_snapshot.in_set(LockstepJoinSet::CaptureJoinSnapshot),
-                apply_join_snapshot.in_set(LockstepJoinSet::ApplyJoinSnapshot),
-                attach_visuals,
-                sync_visuals,
-                update_ui,
-            ),
-        );
+    .add_plugins(PhysicsPlugins::new(TickedSimulation).with_length_unit(1.0))
+    .insert_resource(Gravity(Vec2::ZERO))
+    .add_plugins((
+        LockstepPlugin::<Action, GameSnapshot>::default(),
+        AdaptiveTickBufferPlugin,
+        // After physics, so the hash describes a finished tick: positions that were
+        // integrated, not the ones the actions were applied to.
+        ChecksumLogPlugin::<GameHash>::default().in_set(PhysicsSystems::Last),
+        ChecksumExchangePlugin::<GameHash>::default(),
+    ))
+    .init_resource::<NextBlockId>()
+    // Startup
+    .add_systems(Startup, setup)
+    // Lobby management + input + visuals
+    .add_systems(
+        Update,
+        (
+            lobby_host_key,
+            lobby_escape_key,
+            cleanup_on_lobby_gone,
+            capture_local_input,
+            capture_join_snapshot.in_set(LockstepJoinSet::CaptureJoinSnapshot),
+            apply_join_snapshot.in_set(LockstepJoinSet::ApplyJoinSnapshot),
+            attach_visuals,
+            sync_visuals,
+            update_ui,
+        ),
+    );
 
     #[cfg(feature = "transport-webrtc")]
     app.add_systems(Update, (lobby_join_key_webrtc, lobby_refresh_key_webrtc));
@@ -352,10 +354,7 @@ fn lobby_refresh_key_webrtc(
 }
 
 #[cfg(feature = "transport-steam")]
-fn lobby_refresh_key_steam(
-    mut commands: Commands,
-    keys: Res<ButtonInput<KeyCode>>,
-) {
+fn lobby_refresh_key_steam(mut commands: Commands, keys: Res<ButtonInput<KeyCode>>) {
     if keys.just_pressed(KeyCode::KeyR) {
         commands.remove_resource::<SteamFriendLobbies>();
     }
@@ -410,7 +409,11 @@ fn spawn_joined_players(
     mut commands: Commands,
     current_tick: Res<CurrentTick>,
     lobbies: Query<Entity, With<Lobby>>,
-    participants: Query<(&LobbyParticipant, &LockstepLobbyParticipant, &LobbyParticipantOf)>,
+    participants: Query<(
+        &LobbyParticipant,
+        &LockstepLobbyParticipant,
+        &LobbyParticipantOf,
+    )>,
     existing_players: Query<&PlayerUuid, With<Player>>,
 ) {
     let Some(lobby_entity) = lobbies.iter().next() else {
@@ -538,10 +541,8 @@ fn apply_actions(world: &mut World) {
         for action in player_actions {
             match action {
                 Action::Move { direction } => {
-                    let velocity =
-                        Vec2::new(direction[0], direction[1]) * PLAYER_SPEED;
-                    let mut query =
-                        world.query::<(&PlayerUuid, &mut LinearVelocity)>();
+                    let velocity = Vec2::new(direction[0], direction[1]) * PLAYER_SPEED;
+                    let mut query = world.query::<(&PlayerUuid, &mut LinearVelocity)>();
                     for (uuid, mut vel) in query.iter_mut(world) {
                         if uuid.0 == *player_uuid {
                             vel.0 = velocity;
@@ -557,10 +558,11 @@ fn apply_actions(world: &mut World) {
 
                     // Check overlap with existing blocks (AABB)
                     let overlaps = {
-                        let mut query = world.query_filtered::<(&Position, &BlockHalfSize), With<Block>>();
-                        query.iter(world).any(|(pos, bhs)| {
-                            aabb_overlap(new_pos, new_half, pos.0, bhs.0)
-                        })
+                        let mut query =
+                            world.query_filtered::<(&Position, &BlockHalfSize), With<Block>>();
+                        query
+                            .iter(world)
+                            .any(|(pos, bhs)| aabb_overlap(new_pos, new_half, pos.0, bhs.0))
                     };
 
                     // Check overlap with players
@@ -568,12 +570,7 @@ fn apply_actions(world: &mut World) {
                         let mut query = world.query_filtered::<&Position, With<Player>>();
                         query.iter(world).any(|pos| {
                             // Treat player as AABB with PLAYER_RADIUS half-size
-                            aabb_overlap(
-                                new_pos,
-                                new_half,
-                                pos.0,
-                                Vec2::splat(PLAYER_RADIUS),
-                            )
+                            aabb_overlap(new_pos, new_half, pos.0, Vec2::splat(PLAYER_RADIUS))
                         })
                     } else {
                         false
@@ -603,9 +600,7 @@ fn apply_actions(world: &mut World) {
                         let mut query = world.query::<(Entity, &BlockId, &BlockOwner)>();
                         query
                             .iter(world)
-                            .find(|(_, bid, owner)| {
-                                bid.0 == *block_id && owner.0 == *player_uuid
-                            })
+                            .find(|(_, bid, owner)| bid.0 == *block_id && owner.0 == *player_uuid)
                             .map(|(e, _, _)| e)
                     };
                     if let Some(entity) = entity_to_despawn {
@@ -644,9 +639,7 @@ fn capture_join_snapshot(
                 .collect(),
             blocks: blocks
                 .iter()
-                .map(|(bid, pos, bhs, owner)| {
-                    (bid.0, pos.0.x, pos.0.y, bhs.0.x, bhs.0.y, owner.0)
-                })
+                .map(|(bid, pos, bhs, owner)| (bid.0, pos.0.x, pos.0.y, bhs.0.x, bhs.0.y, owner.0))
                 .collect(),
             next_block_id: next_block_id.0,
         };
@@ -720,10 +713,7 @@ fn apply_join_snapshot(
 fn attach_visuals(
     mut commands: Commands,
     players: Query<(Entity, &PlayerUuid, &Position), (With<Player>, Without<Sprite>)>,
-    blocks: Query<
-        (Entity, &BlockOwner, &Position, &BlockHalfSize),
-        (With<Block>, Without<Sprite>),
-    >,
+    blocks: Query<(Entity, &BlockOwner, &Position, &BlockHalfSize), (With<Block>, Without<Sprite>)>,
 ) {
     for (entity, uuid, position) in players.iter() {
         commands.entity(entity).insert((

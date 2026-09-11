@@ -87,7 +87,9 @@ fn setup(
     ));
 
     commands.spawn((
-        Text::new("Space: Play/Pause | A/D: Step Back/Forward | Q/E: Scrub Back/Forward | R: Reset"),
+        Text::new(
+            "Space: Play/Pause | A/D: Step Back/Forward | Q/E: Scrub Back/Forward | R: Reset",
+        ),
         Node {
             position_type: PositionType::Absolute,
             bottom: Val::Px(10.0),

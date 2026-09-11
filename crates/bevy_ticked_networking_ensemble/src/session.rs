@@ -203,11 +203,14 @@ fn adopt_role(
         return;
     }
 
-    // The solo world ends here and it has to end completely. Upstream's resets zero the tick, the
-    // counter and the history; neither despawns, and a body left standing is an untracked
-    // duplicate the moment the host's world arrives.
-    for entity in &tracked {
-        commands.entity(entity).try_despawn();
+    // A joiner's solo world ends here and it has to end completely: a body left standing is an
+    // untracked duplicate the moment the host's world arrives. A host's solo world is the
+    // session's world — a player who opens their game to friends keeps what they built, and
+    // `reset_on_host` raises the id counter over it rather than starting a second one.
+    if !is_host {
+        for entity in &tracked {
+            commands.entity(entity).try_despawn();
+        }
     }
 
     // Neither role touches the clock here. A client's `reset_on_join` holds `AwaitingSync`

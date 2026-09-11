@@ -43,8 +43,10 @@ pub struct ReplayStats {
     pub dropped_before_handshake: u64,
     /// `current_tick - snapshot_tick` at the last applied snapshot: the replay distance.
     pub last_replay_distance: i64,
-    /// Packets with a `Delta` body, which this client cannot apply until the delta phase.
-    pub dropped_delta_body: u64,
+    /// Deltas dropped because their baseline was no longer held; a full body was asked for.
+    pub dropped_unknown_baseline: u64,
+    /// Packets that arrived as deltas and were rebuilt into full bodies.
+    pub deltas_applied: u64,
 }
 
 impl ReplayStats {
@@ -71,6 +73,10 @@ pub struct SnapshotStats {
     /// Packets larger than [`SNAPSHOT_ADVISORY_BYTES`]: over a datagram's comfortable size, and
     /// on some links over the size that arrives at all. Warned once.
     pub oversize: u64,
+    /// Packets sent as deltas.
+    pub deltas: u64,
+    /// Packets sent as full bodies (joins, keyframes, nacks, evicted baselines).
+    pub keyframes: u64,
 }
 
 /// A snapshot above this many bytes is a warning. Below the common path MTU with room for

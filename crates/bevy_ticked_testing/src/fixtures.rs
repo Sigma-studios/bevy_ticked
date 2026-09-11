@@ -12,15 +12,15 @@ pub mod minimal {
     //! One integer axis, one input, one body per player.
 
     use bevy::prelude::*;
+    use bevy_ticked::TickedSimulation;
     use bevy_ticked::checksum::WorldHash;
     use bevy_ticked::interpolation::{TickedInterpolation, TickedInterpolationPlugin};
+    use bevy_ticked::lifetimes::TickedEntityCommandsExt;
     use bevy_ticked::registry::TickedAppExt;
     use bevy_ticked::tick::CurrentTick;
-    use bevy_ticked::lifetimes::TickedEntityCommandsExt;
     use bevy_ticked::tracked_entity::{
         LocalSpawnerSlot, SpawnerSlot, TickTrackedEntity, TrackedIdAllocator, TrackedSpawner,
     };
-    use bevy_ticked::TickedSimulation;
     use bevy_ticked_networking::input::InputQueue;
     use bevy_ticked_networking::networked_registry::NetworkedTickedAppExt;
     use serde::{Deserialize, Serialize};
@@ -58,7 +58,10 @@ pub mod minimal {
 
     impl Input {
         pub const RIGHT: Self = Self { dx: 1, fire: false };
-        pub const LEFT: Self = Self { dx: -1, fire: false };
+        pub const LEFT: Self = Self {
+            dx: -1,
+            fire: false,
+        };
         pub const NONE: Self = Self { dx: 0, fire: false };
         pub const FIRE: Self = Self { dx: 0, fire: true };
     }
@@ -187,7 +190,7 @@ pub mod minimal {
     pub fn register_components(app: &mut App) {
         app.register_networked_ticked_component::<Pos>("Pos")
             .register_networked_ticked_component::<Vel>("Vel")
-            .register_networked_ticked_component::<EntityKind>("EntityKind")
+            .register_networked_ticked_component_once::<EntityKind>("EntityKind")
             .register_networked_ticked_component::<PlayerSlot>("PlayerSlot")
             .register_networked_ticked_component::<Fuse>("Fuse");
         // `Owner` is the stack's own and is registered by the role plugins.
@@ -335,7 +338,10 @@ pub mod minimal {
             .map(|(uuid, slot)| {
                 let entity = spawn_player(world, uuid);
                 world.entity_mut(entity).insert(PlayerSlot(slot));
-                let id = world.get::<TickTrackedEntity>(entity).expect("just spawned").0;
+                let id = world
+                    .get::<TickTrackedEntity>(entity)
+                    .expect("just spawned")
+                    .0;
                 (uuid, id)
             })
             .collect()

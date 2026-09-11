@@ -14,7 +14,9 @@ use bevy_ticked_networking::diagnostics::{HealthWarnings, InputStats, ReplayStat
 use bevy_ticked_networking::messages::{ReceivedNetworkInput, ReceivedNetworkSnapshot};
 use bevy_ticked_networking::prelude::*;
 use bevy_ticked_networking::server::LocalServerPlayer;
-use bevy_ticked_networking::snapshot::{EntityRecord, SnapshotBody, SnapshotPacket, build_full_body};
+use bevy_ticked_networking::snapshot::{
+    EntityRecord, SnapshotBody, SnapshotPacket, build_full_body,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
@@ -117,9 +119,15 @@ fn every_applied_snapshot_is_counted_and_its_replay_distance_is_the_lead() {
     let mut app = client();
     sync(&mut app);
     let before = replay(&app);
-    assert_eq!(before.snapshots_applied, 1, "the initial sync is a snapshot too");
+    assert_eq!(
+        before.snapshots_applied, 1,
+        "the initial sync is a snapshot too"
+    );
 
-    let lead = app.world().resource::<ClientTickBuffer>().target_replay_distance;
+    let lead = app
+        .world()
+        .resource::<ClientTickBuffer>()
+        .target_replay_distance;
     let current = app.world().resource::<CurrentTick>().0;
     deliver_differing(&mut app, current - lead);
     app.update();
@@ -153,7 +161,10 @@ fn a_stale_snapshot_is_counted_as_dropped_not_applied() {
 
     let stats = replay(&app);
     assert_eq!(stats.dropped_stale, 1);
-    assert_eq!(stats.snapshots_applied, applied, "a stale snapshot never reaches the world");
+    assert_eq!(
+        stats.snapshots_applied, applied,
+        "a stale snapshot never reaches the world"
+    );
 }
 
 #[test]
@@ -176,7 +187,10 @@ fn tick_cost_counts_replayed_ticks_as_ticks() {
     sync(&mut app);
     let before = app.world().resource::<TickCost>().ticks;
 
-    let lead = app.world().resource::<ClientTickBuffer>().target_replay_distance;
+    let lead = app
+        .world()
+        .resource::<ClientTickBuffer>()
+        .target_replay_distance;
     let current = app.world().resource::<CurrentTick>().0;
     deliver_differing(&mut app, current - lead);
     app.update();
@@ -197,13 +211,27 @@ fn a_client_that_mints_a_tracked_id_is_caught_once_and_counted_after() {
     sync(&mut app);
 
     // Something on the client hands out an id. Only the authority may.
-    app.world_mut().resource_mut::<TrackedIdAllocator>().next_authority();
+    app.world_mut()
+        .resource_mut::<TrackedIdAllocator>()
+        .next_authority();
     app.update();
-    assert_eq!(app.world().resource::<HealthWarnings>().client_minted_tracked_id, 1);
+    assert_eq!(
+        app.world()
+            .resource::<HealthWarnings>()
+            .client_minted_tracked_id,
+        1
+    );
 
-    app.world_mut().resource_mut::<TrackedIdAllocator>().next_authority();
+    app.world_mut()
+        .resource_mut::<TrackedIdAllocator>()
+        .next_authority();
     app.update();
-    assert_eq!(app.world().resource::<HealthWarnings>().client_minted_tracked_id, 2);
+    assert_eq!(
+        app.world()
+            .resource::<HealthWarnings>()
+            .client_minted_tracked_id,
+        2
+    );
 }
 
 #[test]
@@ -227,7 +255,9 @@ fn a_counter_moved_by_a_snapshot_is_not_a_client_minted_id() {
     app.update();
 
     assert_eq!(
-        app.world().resource::<HealthWarnings>().client_minted_tracked_id,
+        app.world()
+            .resource::<HealthWarnings>()
+            .client_minted_tracked_id,
         0,
         "the authority moved the counter, which is its job"
     );
@@ -264,7 +294,9 @@ fn a_snapshot_older_than_the_history_window_is_counted() {
     app.update();
 
     assert_eq!(
-        app.world().resource::<HealthWarnings>().snapshot_older_than_history,
+        app.world()
+            .resource::<HealthWarnings>()
+            .snapshot_older_than_history,
         1
     );
 }
@@ -305,7 +337,13 @@ fn the_host_counts_every_snapshot_it_broadcasts() {
     let stats = *app.world().resource::<SnapshotStats>();
     let ticks = app.world().resource::<CurrentTick>().0;
     assert!(ticks > 0);
-    assert_eq!(stats.sent, ticks, "one broadcast per tick until send rates land");
-    assert!(stats.bytes > 0, "the server encodes the packet itself and counts it");
+    assert_eq!(
+        stats.sent, ticks,
+        "one broadcast per tick until send rates land"
+    );
+    assert!(
+        stats.bytes > 0,
+        "the server encodes the packet itself and counts it"
+    );
     assert_eq!(stats.oversize, 0);
 }

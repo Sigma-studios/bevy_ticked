@@ -21,7 +21,9 @@ use bevy_ensemble::{
 use bevy_ensemble_webrtc::{BevyEnsembleWebrtcPlugin, JoinWebrtcLobby, RefreshLobbyList};
 use bevy_ticked::prelude::*;
 use bevy_ticked_networking::prelude::*;
-use bevy_ticked_networking_ensemble::{SpawnerSlots, TickedEnsembleSessionPlugin, TickedNetworkingEnsemblePlugin};
+use bevy_ticked_networking_ensemble::{
+    SpawnerSlots, TickedEnsembleSessionPlugin, TickedNetworkingEnsemblePlugin,
+};
 use serde::{Deserialize, Serialize};
 
 // --- Constants ---
@@ -382,7 +384,6 @@ fn cleanup_on_lobby_gone(
     commands.remove_resource::<LocalClientPlayer>();
 }
 
-
 // --- Server: spawn player entities when participants join ---
 
 fn server_spawn_players(
@@ -409,10 +410,16 @@ fn server_spawn_players(
         }
         // A body carries its player's spawner slot, so it waits for the slot: the host's own
         // is 0, a client's arrives with the registry handshake.
-        let slot = if local_player.as_ref().is_some_and(|me| me.0 == participant.player_uuid) {
+        let slot = if local_player
+            .as_ref()
+            .is_some_and(|me| me.0 == participant.player_uuid)
+        {
             0
         } else {
-            match slots.as_ref().and_then(|slots| slots.slot_of(participant.player_uuid)) {
+            match slots
+                .as_ref()
+                .and_then(|slots| slots.slot_of(participant.player_uuid))
+            {
                 Some(slot) => slot,
                 None => continue,
             }
@@ -615,8 +622,14 @@ fn move_bullets(world: &mut World) {
     // in uuid order, so every peer mints the same ids.
     let mut players: Vec<(u128, Vec3, Aim, u64, u8)> = Vec::new();
     {
-        let mut query =
-            world.query::<(&Owner, &Position, &Aim, &ShootCooldown, &PlayerSlot, &EntityKind)>();
+        let mut query = world.query::<(
+            &Owner,
+            &Position,
+            &Aim,
+            &ShootCooldown,
+            &PlayerSlot,
+            &EntityKind,
+        )>();
         for (uuid, pos, aim, cooldown, slot, kind) in query.iter(world) {
             if *kind == EntityKind::Player {
                 players.push((uuid.0, pos.0, *aim, cooldown.0, slot.0));
@@ -639,7 +652,12 @@ fn move_bullets(world: &mut World) {
     for (owner_uuid, slot, bullet_pos, aim) in spawns {
         world.spawn_tracked_by(
             SpawnerSlot(slot),
-            (EntityKind::Bullet, Position(bullet_pos), aim, Owner(owner_uuid)),
+            (
+                EntityKind::Bullet,
+                Position(bullet_pos),
+                aim,
+                Owner(owner_uuid),
+            ),
         );
 
         // Reset the shooter's cooldown.

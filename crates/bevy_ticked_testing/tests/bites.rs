@@ -232,7 +232,10 @@ fn garbage_packets_never_panic() {
     net.run(20);
 
     assert!(tick(net.app(host)) > before.0, "the host stopped ticking");
-    assert!(tick(net.app(client)) > before.1, "the client stopped ticking");
+    assert!(
+        tick(net.app(client)) > before.1,
+        "the client stopped ticking"
+    );
 }
 
 #[test]
@@ -250,7 +253,10 @@ fn truncated_snapshot_packets_never_panic() {
         .max_by_key(|packet| packet.bytes.len())
         .expect("a snapshot crossed the link")
         .bytes;
-    assert!(snapshot.len() > 8, "the traced snapshot is implausibly small");
+    assert!(
+        snapshot.len() > 8,
+        "the traced snapshot is implausibly small"
+    );
 
     for prefix in truncations(&snapshot) {
         deliver_raw(&mut net, client, host_uuid, prefix.to_vec());

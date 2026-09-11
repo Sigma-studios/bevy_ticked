@@ -43,9 +43,9 @@
 //! default of 64 is once a second at 64 Hz. Two logs can only be compared at ticks they *both*
 //! sampled, so peers that disagree about the interval will find nothing to compare.
 
+use crate::tick::CurrentTick;
 use bevy::ecs::intern::Interned;
 use bevy::prelude::*;
-use crate::tick::CurrentTick;
 use std::marker::PhantomData;
 
 /// A game's reduction of its world to something two peers can compare.
@@ -233,10 +233,7 @@ impl<H: WorldHash> Plugin for ChecksumLogPlugin<H> {
         app.init_resource::<ChecksumLog<H>>();
         match self.set {
             Some(set) => {
-                app.add_systems(
-                    crate::TickedSimulation,
-                    record_checksum::<H>.in_set(set),
-                );
+                app.add_systems(crate::TickedSimulation, record_checksum::<H>.in_set(set));
             }
             None => {
                 app.add_systems(crate::TickedSimulation, record_checksum::<H>);

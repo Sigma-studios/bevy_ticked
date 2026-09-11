@@ -44,7 +44,10 @@ fn peer() -> App {
 fn spawn_tracked(app: &mut App, count: usize) -> Vec<u64> {
     let mut ids = Vec::new();
     for i in 0..count {
-        let id = app.world_mut().resource_mut::<TrackedIdAllocator>().next_authority();
+        let id = app
+            .world_mut()
+            .resource_mut::<TrackedIdAllocator>()
+            .next_authority();
         ids.push(id.0);
         app.world_mut().spawn((id, Pos(i as i32)));
     }
@@ -75,7 +78,10 @@ fn hosting_never_reissues_an_id_that_is_already_in_use() {
         before,
         "a solo world must survive being opened to others"
     );
-    let next = app.world_mut().resource_mut::<TrackedIdAllocator>().next_authority();
+    let next = app
+        .world_mut()
+        .resource_mut::<TrackedIdAllocator>()
+        .next_authority();
     assert!(
         !before.contains(&next.0),
         "issued {} again, which is already in use -- apply_snapshot keys the world \
