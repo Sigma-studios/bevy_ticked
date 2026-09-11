@@ -1,4 +1,6 @@
 pub mod handshake;
+#[cfg(feature = "overlay")]
+mod overlay;
 pub mod session;
 
 pub use handshake::{RegistryMismatch, TickedRegistryHandshake};
@@ -62,8 +64,15 @@ impl<T: TickedInput + Serialize + for<'de> Deserialize<'de>> Plugin
     for TickedNetworkingEnsemblePlugin<T>
 {
     fn build(&self, app: &mut App) {
-        app.register_ensemble_message_type::<EnsembleSnapshotMessage>()
-            .register_ensemble_message_type::<EnsembleInputMessage<T>>()
+        #[cfg(feature = "overlay")]
+        app.add_plugins(overlay::TickedOverlayPlugin);
+        // One snapshot type and one input type per app, so the names are fixed. A snapshot is
+        // the authority's word: a client takes it from its host and nobody else.
+        app.register_ensemble_message_type_with::<EnsembleSnapshotMessage>(
+            "bevy_ticked/Snapshot",
+            bevy_ensemble::MessageAuthority::HostOnly,
+        )
+        .register_ensemble_message_type::<EnsembleInputMessage<T>>("bevy_ticked/Input")
             // After the transport has drained its socket, and not merely in the same
             // schedule. These read `Messages` the backend writes from an exclusive
             // system, and the multi-threaded executor puts an exclusive system
@@ -126,6 +135,8 @@ fn forward_outgoing_snapshots(
     trigger: On<SendNetworkSnapshot>,
     lobby: Option<Single<Entity, With<Lobby>>>,
     mut commands: Commands,
+    stats: Option<ResMut<bevy_ticked_networking::diagnostics::SnapshotStats>>,
+    recipients: Option<Res<bevy_ticked_networking::server::SnapshotRecipients>>,
 ) {
     let Some(lobby) = lobby else { return };
     let lobby_entity = *lobby;
@@ -134,6 +145,17 @@ fn forward_outgoing_snapshots(
             snapshot: trigger.event().0.clone(),
         },
     };
+    // The size the wire will carry, per recipient. One extra encode per broadcast; the
+    // transport is about to do the same one, and a game that wants this number gone can
+    // read `SnapshotStats.sent` instead.
+    if let Some(mut stats) = stats
+        && let Ok(bytes) = postcard::to_allocvec(&message).map(|v| v.len())
+    {
+        let recipients = recipients.map_or(1, |r| r.0.max(1));
+        for _ in 0..recipients {
+            stats.record_bytes(bytes);
+        }
+    }
     commands
         .entity(lobby_entity)
         .trigger(move |entity| LobbyMessage {
@@ -198,7 +220,7 @@ mod tests {
                     },
                 },
             },
-            received_at: std::time::Duration::ZERO,
+            received_at: bevy_ensemble::Instant::now(),
         });
     }
 

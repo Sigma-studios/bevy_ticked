@@ -12,3 +12,5 @@ serde = { version = "1", features = ["derive"] }
 [dev-dependencies]
 # The tests and examples run whole apps; the library itself only needs the ECS.
 bevy = "0.19"
+# The source guard and golden helpers; tests only.
+bevy_ticked_testing = { path = "../bevy_ticked_testing" }

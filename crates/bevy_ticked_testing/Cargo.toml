@@ -1,0 +1,34 @@
+[package]
+name = "bevy_ticked_testing"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Two-peer harness, probes, assertions and guardrails for testing bevy_ticked games in-process"
+
+[features]
+default = []
+# The lockstep vocabulary: `TickedNetwork::lockstep`, `ActionScript` runners, checksum agreement.
+lockstep = ["dep:bevy_ticked_lockstep_networking"]
+# avian3d fixtures for rollback-purity and determinism tests.
+avian = ["dep:avian3d"]
+
+[dependencies]
+bevy = { version = "0.19", default-features = false, features = ["std", "serialize", "bevy_log"] }
+bevy_ticked = { path = "../.." }
+bevy_ticked_networking = { path = "../bevy_ticked_networking" }
+bevy_ticked_networking_ensemble = { path = "../bevy_ticked_networking_ensemble" }
+bevy_ticked_lockstep_networking = { path = "../bevy_ticked_lockstep_networking", optional = true, default-features = false }
+bevy_ensemble = { workspace = true }
+bevy_ensemble_loopback = { workspace = true }
+avian3d = { version = "0.7", features = ["serialize"], optional = true }
+serde = { version = "1", features = ["derive"] }
+postcard = { version = "1", features = ["alloc"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["registry"] }
+
+[dev-dependencies]
+bevy = "0.19"
+
+[lints.clippy]
+too_many_arguments = "allow"
+type_complexity = "allow"

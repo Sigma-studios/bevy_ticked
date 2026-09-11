@@ -80,6 +80,7 @@ struct RegisteredTickedComponent {
     prune_before: fn(&mut World, u64),
     clear: fn(&mut World),
     has_tick: fn(&World, u64) -> bool,
+    oldest_tick: fn(&World) -> Option<u64>,
     /// Which tracked-entity ids this type has saved state for at a tick.
     saved_ids: fn(&World, u64) -> Vec<u64>,
     /// Optional serialization support, populated by the networking crate.
@@ -149,6 +150,7 @@ impl TickedComponentRegistry {
             prune_before: prune_component::<T>,
             clear: clear_component::<T>,
             has_tick: has_tick_component::<T>,
+            oldest_tick: oldest_tick_component::<T>,
             saved_ids: saved_ids_component::<T>,
             serialize_at,
             deserialize_and_apply,
@@ -221,6 +223,15 @@ impl TickedComponentRegistry {
 
     pub fn is_empty(&self) -> bool {
         self.inner.entries.is_empty()
+    }
+
+    /// The oldest tick any registered component still holds state for.
+    pub fn oldest_captured_tick(&self, world: &World) -> Option<u64> {
+        self.inner
+            .entries
+            .iter()
+            .filter_map(|entry| (entry.oldest_tick)(world))
+            .min()
     }
 
     /// Check if any registered component has captured state at the given tick.
@@ -509,6 +520,10 @@ fn saved_ids_component<T: TickedComponent>(world: &World, tick: u64) -> Vec<u64>
         .at_tick(tick)
         .map(|state| state.keys().copied().collect())
         .unwrap_or_default()
+}
+
+fn oldest_tick_component<T: TickedComponent>(world: &World) -> Option<u64> {
+    world.resource::<WorldActions<T>>().oldest_recorded_tick()
 }
 
 fn has_tick_component<T: TickedComponent>(world: &World, tick: u64) -> bool {

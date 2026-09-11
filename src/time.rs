@@ -222,8 +222,13 @@ pub fn run_tick_schedule(world: &mut World, tick: u64, schedule: impl ScheduleLa
 
     let outer = *world.resource::<Time>();
     *world.resource_mut::<Time>() = clock.as_generic();
+    let started = std::time::Instant::now();
     world.run_schedule(schedule);
+    let elapsed = started.elapsed();
     *world.resource_mut::<Time>() = outer;
+    if let Some(mut cost) = world.get_resource_mut::<crate::diagnostics::TickCost>() {
+        cost.record(elapsed);
+    }
 }
 
 #[cfg(test)]
