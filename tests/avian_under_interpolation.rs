@@ -64,5 +64,8 @@ fn an_avian_body_under_interpolation_keeps_its_speed() {
          at tick 99 when the blend fed back through Transform",
         position.x
     );
-    assert!((simulated - ticks).abs() < 0.5, "and the tick's transform agrees: {simulated}");
+    assert!(
+        (simulated - ticks).abs() < 0.5,
+        "and the tick's transform agrees: {simulated}"
+    );
 }

@@ -85,8 +85,16 @@ fn body(app: &App, tick: u64, local: i32, remote: i32) -> SnapshotPacket {
     let (pos, owner) = (wire::<Pos>(app), wire::<Owner>(app));
     let mut body = FullBody::default();
     // "Pos" < "bevy_ticked::Owner": Pos goes first.
-    body.put(EntityRecord::new(1).with(pos, &Pos(local)).with(owner, &Owner(LOCAL)));
-    body.put(EntityRecord::new(2).with(pos, &Pos(remote)).with(owner, &Owner(REMOTE)));
+    body.put(
+        EntityRecord::new(1)
+            .with(pos, &Pos(local))
+            .with(owner, &Owner(LOCAL)),
+    );
+    body.put(
+        EntityRecord::new(2)
+            .with(pos, &Pos(remote))
+            .with(owner, &Owner(REMOTE)),
+    );
     let mut packet = SnapshotPacket::full(tick, body);
     packet.your_margin = 2;
     packet
@@ -98,12 +106,17 @@ fn deliver(app: &mut App, packet: SnapshotPacket) {
 
 fn pos_of(app: &mut App, id: u64) -> Option<Pos> {
     let mut q = app.world_mut().query::<(&TickTrackedEntity, &Pos)>();
-    q.iter(app.world()).find(|(t, _)| t.0 == id).map(|(_, p)| *p)
+    q.iter(app.world())
+        .find(|(t, _)| t.0 == id)
+        .map(|(_, p)| *p)
 }
 
 fn entity_of(app: &mut App, id: u64) -> Entity {
     let mut q = app.world_mut().query::<(Entity, &TickTrackedEntity)>();
-    q.iter(app.world()).find(|(_, t)| t.0 == id).map(|(e, _)| e).unwrap()
+    q.iter(app.world())
+        .find(|(_, t)| t.0 == id)
+        .map(|(e, _)| e)
+        .unwrap()
 }
 
 fn sync(app: &mut App) {
@@ -142,7 +155,11 @@ fn an_interpolated_entity_shows_the_authority_a_few_ticks_back() {
         deliver(&mut app, packet);
         app.update();
     }
-    let latest = app.world().resource::<AuthoritativeHistory>().newest_tick().unwrap();
+    let latest = app
+        .world()
+        .resource::<AuthoritativeHistory>()
+        .newest_tick()
+        .unwrap();
     let delay = app.world().resource::<InterpolationDelay>().0;
     let history = app.world().resource::<AuthoritativeHistory>().clone();
     let (shown_tick, record) = history
@@ -165,9 +182,11 @@ fn a_predicted_entity_is_not_touched_by_the_interpolation_restore() {
     // The local player walks: its body must move with the prediction, not sit on the record.
     for _ in 0..8 {
         let tick = app.world().resource::<CurrentTick>().0;
-        app.world_mut()
-            .resource_mut::<InputQueue<Input>>()
-            .insert(tick + 1, LOCAL, Input { dx: 1 });
+        app.world_mut().resource_mut::<InputQueue<Input>>().insert(
+            tick + 1,
+            LOCAL,
+            Input { dx: 1 },
+        );
         app.update();
     }
     assert!(
@@ -175,7 +194,11 @@ fn a_predicted_entity_is_not_touched_by_the_interpolation_restore() {
         "the predicted body moved with the local input: {:?}",
         pos_of(&mut app, 1)
     );
-    assert_eq!(pos_of(&mut app, 2), Some(Pos(0)), "the interpolated one stayed on the record");
+    assert_eq!(
+        pos_of(&mut app, 2),
+        Some(Pos(0)),
+        "the interpolated one stayed on the record"
+    );
 }
 
 #[test]
@@ -242,7 +265,10 @@ fn correction_smoothing_never_touches_the_local_player() {
     let mut app = client();
     sync(&mut app);
     with_transforms(&mut app);
-    let lead = app.world().resource::<ClientTickBuffer>().target_replay_distance;
+    let lead = app
+        .world()
+        .resource::<ClientTickBuffer>()
+        .target_replay_distance;
     let current = app.world().resource::<CurrentTick>().0;
     // The authority disagrees with both predictions by a unit.
     let packet = body(&app, current - lead, 1, 1);
@@ -268,24 +294,46 @@ fn a_small_correction_decays_and_never_snaps() {
     let mut app = client();
     sync(&mut app);
     with_transforms(&mut app);
-    let lead = app.world().resource::<ClientTickBuffer>().target_replay_distance;
+    let lead = app
+        .world()
+        .resource::<ClientTickBuffer>()
+        .target_replay_distance;
     let current = app.world().resource::<CurrentTick>().0;
     let packet = body(&app, current - lead, 0, 1);
     deliver(&mut app, packet);
     app.update();
 
     let theirs = entity_of(&mut app, 2);
-    let first = app.world().get::<SmoothingOffset>(theirs).unwrap().translation.length();
-    assert!(first > 0.5, "the whole unit is hidden on the first frame: {first}");
+    let first = app
+        .world()
+        .get::<SmoothingOffset>(theirs)
+        .unwrap()
+        .translation
+        .length();
+    assert!(
+        first > 0.5,
+        "the whole unit is hidden on the first frame: {first}"
+    );
     let mut last = first;
     let mut frames = 0;
     while last > 1e-3 {
         app.update();
         frames += 1;
-        let now = app.world().get::<SmoothingOffset>(theirs).unwrap().translation.length();
-        assert!(now < last, "the offset grew from {last} to {now} on frame {frames}");
+        let now = app
+            .world()
+            .get::<SmoothingOffset>(theirs)
+            .unwrap()
+            .translation
+            .length();
+        assert!(
+            now < last,
+            "the offset grew from {last} to {now} on frame {frames}"
+        );
         last = now;
-        assert!(frames < 128, "a unit of correction should be gone within two seconds");
+        assert!(
+            frames < 128,
+            "a unit of correction should be gone within two seconds"
+        );
     }
     // What the renderer saw on the way: the true position plus the shrinking offset.
     assert!((shown_x(&mut app, 2) - 1.0).abs() < 1e-2);
@@ -296,7 +344,10 @@ fn a_correction_beyond_max_offset_is_shown_as_a_jump() {
     let mut app = client();
     sync(&mut app);
     with_transforms(&mut app);
-    let lead = app.world().resource::<ClientTickBuffer>().target_replay_distance;
+    let lead = app
+        .world()
+        .resource::<ClientTickBuffer>()
+        .target_replay_distance;
     let current = app.world().resource::<CurrentTick>().0;
     let packet = body(&app, current - lead, 0, 500);
     deliver(&mut app, packet);
@@ -306,7 +357,11 @@ fn a_correction_beyond_max_offset_is_shown_as_a_jump() {
     // The blend shows the previous tick at a frame boundary; one more tick and both states
     // are past the jump.
     app.update();
-    assert!((shown_x(&mut app, 2) - 500.0).abs() < 1e-3, "{}", shown_x(&mut app, 2));
+    assert!(
+        (shown_x(&mut app, 2) - 500.0).abs() < 1e-3,
+        "{}",
+        shown_x(&mut app, 2)
+    );
 }
 
 #[test]
@@ -327,7 +382,10 @@ fn the_simulation_never_sees_the_smoothing_offset() {
         })
         .after(integrate),
     );
-    let lead = app.world().resource::<ClientTickBuffer>().target_replay_distance;
+    let lead = app
+        .world()
+        .resource::<ClientTickBuffer>()
+        .target_replay_distance;
     let current = app.world().resource::<CurrentTick>().0;
     let packet = body(&app, current - lead, 0, 1);
     deliver(&mut app, packet);
@@ -350,7 +408,10 @@ fn prediction_error_is_measured_at_the_snapshot_tick() {
     for _ in 0..4 {
         app.update();
     }
-    let lead = app.world().resource::<ClientTickBuffer>().target_replay_distance;
+    let lead = app
+        .world()
+        .resource::<ClientTickBuffer>()
+        .target_replay_distance;
     let current = app.world().resource::<CurrentTick>().0;
     let packet = body(&app, current - lead, 3, 0);
     deliver(&mut app, packet);
@@ -381,7 +442,9 @@ fn a_snapshot_too_late_for_the_rollback_is_still_recorded_for_interpolation() {
         history.has_tick(4),
         "the late packet was dropped for the rollback and kept for the drawn path"
     );
-    let stats = *app.world().resource::<bevy_ticked_networking::diagnostics::ReplayStats>();
+    let stats = *app
+        .world()
+        .resource::<bevy_ticked_networking::diagnostics::ReplayStats>();
     assert_eq!(stats.dropped_stale, 1);
 }
 
@@ -402,6 +465,11 @@ fn a_snapshot_superseded_before_it_was_applied_is_still_recorded() {
     for tick in [4, 5, 6] {
         assert!(history.has_tick(tick), "tick {tick} is in the history");
     }
-    let stats = *app.world().resource::<bevy_ticked_networking::diagnostics::ReplayStats>();
-    assert_eq!(stats.snapshots_applied, 2, "the initial sync and the newest of the three");
+    let stats = *app
+        .world()
+        .resource::<bevy_ticked_networking::diagnostics::ReplayStats>();
+    assert_eq!(
+        stats.snapshots_applied, 2,
+        "the initial sync and the newest of the three"
+    );
 }

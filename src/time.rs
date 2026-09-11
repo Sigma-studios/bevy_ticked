@@ -255,7 +255,11 @@ struct FrameClocks {
 fn swap_frame_clocks(world: &mut World, tick: &Time<Ticked>) -> FrameClocks {
     let delta = tick.delta();
     let elapsed = tick.elapsed();
-    fn reclocked<T: Default + Clone>(outer: &Time<T>, elapsed: Duration, delta: Duration) -> Time<T> {
+    fn reclocked<T: Default + Clone>(
+        outer: &Time<T>,
+        elapsed: Duration,
+        delta: Duration,
+    ) -> Time<T> {
         let mut clock = Time::new_with(outer.context().clone());
         clock.advance_by(elapsed.saturating_sub(delta));
         clock.advance_by(delta);

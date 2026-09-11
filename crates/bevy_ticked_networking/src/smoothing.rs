@@ -18,11 +18,8 @@
 
 use bevy::prelude::*;
 use bevy_ticked::{
-    TickedLoop, TickedSystems,
-    interpolation::TickedInterpolationSet,
-    registry::TickedComponent,
-    tracked_entity::TickTrackedEntity,
-    world_actions::WorldActions,
+    TickedLoop, TickedSystems, interpolation::TickedInterpolationSet, registry::TickedComponent,
+    tracked_entity::TickTrackedEntity, world_actions::WorldActions,
 };
 use std::collections::HashMap;
 
@@ -197,7 +194,9 @@ fn absorb_corrections(
         stats.total_offset += distance;
         stats.max_offset = stats.max_offset.max(distance);
         stats.last_offset = distance;
-        if distance > smoothing.max_offset || turn.angle_between(Quat::IDENTITY) > smoothing.max_angle {
+        if distance > smoothing.max_offset
+            || turn.angle_between(Quat::IDENTITY) > smoothing.max_angle
+        {
             stats.snapped += 1;
             if let Some(mut offset) = offset {
                 offset.translation = Vec3::ZERO;
@@ -367,7 +366,12 @@ fn sample_prediction_before<T: TickedComponent>(world: &mut World) {
     let predicted = world
         .resource::<WorldActions<T>>()
         .at_tick(tick)
-        .map(|state| state.iter().map(|(id, v)| (*id, v.clone())).collect::<HashMap<_, _>>());
+        .map(|state| {
+            state
+                .iter()
+                .map(|(id, v)| (*id, v.clone()))
+                .collect::<HashMap<_, _>>()
+        });
     world.insert_resource(PredictedAt::<T>(predicted.map(|p| (tick, p))));
 }
 

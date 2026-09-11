@@ -121,7 +121,10 @@ fn a_client_rollback_restores_rollback_only_components() {
     for _ in 0..20 {
         app.update();
     }
-    let lead = app.world().resource::<ClientTickBuffer>().target_replay_distance;
+    let lead = app
+        .world()
+        .resource::<ClientTickBuffer>()
+        .target_replay_distance;
     let current = app.world().resource::<CurrentTick>().0;
     let before = ticks_seen(&mut app);
     assert_eq!(before, current, "one increment per tick, so far");
@@ -147,7 +150,10 @@ fn a_client_rollback_unpublishes_events_from_ticks_the_authority_erased() {
     for _ in 0..20 {
         app.update();
     }
-    let lead = app.world().resource::<ClientTickBuffer>().target_replay_distance;
+    let lead = app
+        .world()
+        .resource::<ClientTickBuffer>()
+        .target_replay_distance;
     let current = app.world().resource::<CurrentTick>().0;
 
     let presented_before = app.world().resource::<Presented>().0.len();

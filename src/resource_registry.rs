@@ -29,7 +29,7 @@
 //! objective nobody holds) are better served by a value that says so.
 
 use std::{
-    any::{type_name, TypeId},
+    any::{TypeId, type_name},
     collections::{HashMap, VecDeque},
     sync::{Arc, OnceLock},
 };
@@ -70,9 +70,7 @@ impl<R: TickedResource> ResourceActions<R> {
     }
 
     pub fn at_tick(&self, tick: u64) -> Option<&R> {
-        self.position(tick)
-            .ok()
-            .map(|at| &self.history[at].1)
+        self.position(tick).ok().map(|at| &self.history[at].1)
     }
 
     pub fn oldest_recorded_tick(&self) -> Option<u64> {
@@ -100,11 +98,7 @@ impl<R: TickedResource> ResourceActions<R> {
     }
 
     pub fn prune_before(&mut self, tick: u64) {
-        while self
-            .history
-            .front()
-            .is_some_and(|(at, _)| *at < tick)
-        {
+        while self.history.front().is_some_and(|(at, _)| *at < tick) {
             self.history.pop_front();
         }
     }
@@ -177,7 +171,11 @@ impl TickedResourceRegistry {
         serialize_at: fn(&World, u64) -> Option<Vec<u8>>,
         deserialize_and_apply: fn(&mut World, u64, &[u8]),
     ) {
-        self.register_inner::<R>(Some(wire_name), Some(serialize_at), Some(deserialize_and_apply));
+        self.register_inner::<R>(
+            Some(wire_name),
+            Some(serialize_at),
+            Some(deserialize_and_apply),
+        );
     }
 
     fn register_inner<R: TickedResource>(
@@ -265,7 +263,10 @@ impl TickedResourceRegistry {
                     &crate::registry::PROTOCOL_VERSION.to_le_bytes(),
                 ),
                 |hash, name| {
-                    crate::registry::fnv_fold(crate::registry::fnv_fold(hash, name.as_bytes()), b"\0")
+                    crate::registry::fnv_fold(
+                        crate::registry::fnv_fold(hash, name.as_bytes()),
+                        b"\0",
+                    )
                 },
             );
             FrozenResources {

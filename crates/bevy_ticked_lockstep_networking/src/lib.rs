@@ -44,7 +44,6 @@ pub use messages::{
     JoinSnapshotResponse, LockstepPauseReason, ParticipantJoined, PauseLockstep,
     ProvideJoinSnapshot, ResumeLockstep, RosterChange, SystemAction,
 };
-pub use session::{LockstepSimulationSet, TARGET_ARRIVAL_MARGIN};
 pub use participants::{
     LockstepLobbyParticipant, PendingLockstepParticipantJoins, activate_loaded_client_participants,
     add_host_participant, apply_pending_lockstep_participants, apply_received_participants,
@@ -60,6 +59,7 @@ pub use resources::{
     PendingClientJoins, PendingJoinSnapshotFlushes, PendingSystemActions, StallPolicy,
     StashedAuthoritativeTicks,
 };
+pub use session::{LockstepSimulationSet, TARGET_ARRIVAL_MARGIN};
 
 use serde::{Serialize, de::DeserializeOwned};
 

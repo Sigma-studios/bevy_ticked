@@ -32,7 +32,9 @@ fn peer() -> App {
         })
         .add_plugins(TickedClientPlugin::<Input>::new())
         .add_plugins(TickedServerPlugin::<Input>::new())
-        .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_micros(15_625)))
+        .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_micros(
+            15_625,
+        )))
         .register_networked_ticked_component::<Pos>("Pos");
     app.update();
     app
@@ -135,7 +137,10 @@ fn a_paused_host_keeps_broadcasting_at_a_low_rate() {
     for _ in 0..8 {
         app.update();
     }
-    assert!(app.world().resource::<Sent>().0 >= 8, "one per tick while running");
+    assert!(
+        app.world().resource::<Sent>().0 >= 8,
+        "one per tick while running"
+    );
 
     app.world_mut().resource_mut::<Sent>().0 = 0;
     app.world_mut()

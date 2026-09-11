@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
-use bevy_ticked::prelude::*;
 use bevy_ticked::TickedSimulation;
+use bevy_ticked::prelude::*;
 
 /// What the simulation saw, one entry per tick that actually ran.
 #[derive(Resource, Default)]
@@ -94,7 +94,11 @@ fn manual_step_integrates_by_a_tick_not_by_the_frame() {
     }
 
     let observed = app.world().resource::<Observed>();
-    assert_eq!(observed.deltas.len(), 5, "expected one tick per StepForward");
+    assert_eq!(
+        observed.deltas.len(),
+        5,
+        "expected one tick per StepForward"
+    );
     assert!(
         observed.deltas.iter().all(|d| *d == timestep),
         "manually stepped ticks must integrate by one timestep, not the frame \
@@ -213,7 +217,11 @@ fn hz_source_does_not_run_at_bevys_fixed_rate() {
     }
 
     let observed = app.world().resource::<Observed>();
-    assert_eq!(observed.ticks.len(), 5, "10Hz over 5 real frames is 5 ticks");
+    assert_eq!(
+        observed.ticks.len(),
+        5,
+        "10Hz over 5 real frames is 5 ticks"
+    );
     assert!(
         observed
             .deltas
@@ -246,10 +254,10 @@ fn the_outer_clock_is_restored_after_a_tick() {
 
     #[derive(Resource, Default)]
     struct OuterDelta(Duration);
-    app.init_resource::<OuterDelta>().add_systems(
-        Last,
-        |time: Res<Time>, mut out: ResMut<OuterDelta>| out.0 = time.delta(),
-    );
+    app.init_resource::<OuterDelta>()
+        .add_systems(Last, |time: Res<Time>, mut out: ResMut<OuterDelta>| {
+            out.0 = time.delta()
+        });
 
     // Bevy's first update establishes the time baseline and reports a zero
     // delta, so burn it and take the steady-state frame as the control.

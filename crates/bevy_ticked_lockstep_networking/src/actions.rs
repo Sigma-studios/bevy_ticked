@@ -222,20 +222,13 @@ pub fn receive_client_actions<A: LockstepAction>(
             continue;
         }
         if tick > horizon {
-            debug!(
-                "dropping actions from {sender} for tick {tick}: past the horizon ({horizon})"
-            );
+            debug!("dropping actions from {sender} for tick {tick}: past the horizon ({horizon})");
             continue;
         }
         // How early this batch was: the number the client sizes its buffer from.
         let margin = (tick as i64 - current_tick.0 as i64).clamp(i16::MIN as i64, i16::MAX as i64);
         margins.0.insert(sender, margin as i16);
 
-        insert_actions_into_tracker(
-            &mut tracker,
-            tick,
-            sender,
-            message.message.actions.clone(),
-        );
+        insert_actions_into_tracker(&mut tracker, tick, sender, message.message.actions.clone());
     }
 }

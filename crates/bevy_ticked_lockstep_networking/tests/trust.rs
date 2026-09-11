@@ -27,7 +27,11 @@ const CLIENT_PEER: PeerId = PeerId(1);
 const CLIENT: u128 = 2;
 
 /// A message the host would receive from `sender`, exactly as its transport would hand it over.
-fn deliver<T: bevy_ensemble::EnsembleMessage>(net: &mut LoopbackNetwork, sender: u128, message: &T) {
+fn deliver<T: bevy_ensemble::EnsembleMessage>(
+    net: &mut LoopbackNetwork,
+    sender: u128,
+    message: &T,
+) {
     let bytes = encode_as(net.app(HOST_PEER), message);
     net.deliver_raw(HOST_PEER, sender, bytes);
 }
@@ -93,9 +97,12 @@ fn a_late_client_action_for_a_simulated_tick_is_dropped_not_merged() {
         Link::delayed(Duration::from_millis(100)),
         Link::delayed(Duration::from_millis(100)),
     );
-    run_until(&mut net, 100, "the newcomer's join becoming pending", |net| {
-        pending_on_host(net).contains(&3)
-    });
+    run_until(
+        &mut net,
+        100,
+        "the newcomer's join becoming pending",
+        |net| pending_on_host(net).contains(&3),
+    );
     net.run(2);
 
     let simulated = tick(&net, HOST_PEER) - 1;
@@ -119,9 +126,12 @@ fn a_late_client_action_for_a_simulated_tick_is_dropped_not_merged() {
         "the late action was merged into a tick the host had already simulated and broadcast"
     );
 
-    run_until(&mut net, 400, "the newcomer becoming a participant", |net| {
-        participant_joined_at(net.app(HOST_PEER), 3).is_some()
-    });
+    run_until(
+        &mut net,
+        400,
+        "the newcomer becoming a participant",
+        |net| participant_joined_at(net.app(HOST_PEER), 3).is_some(),
+    );
     net.run(300);
     for client in [CLIENT_PEER, newcomer] {
         assert!(logs_overlap(&net, HOST_PEER, client, 50));

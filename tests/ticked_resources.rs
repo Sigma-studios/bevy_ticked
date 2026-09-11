@@ -72,7 +72,10 @@ fn a_resource_rolls_back() {
 #[test]
 fn a_resource_and_a_component_roll_back_together() {
     let mut app = app();
-    let entity = app.world_mut().spawn((TickTrackedEntity(1), Height(0))).id();
+    let entity = app
+        .world_mut()
+        .spawn((TickTrackedEntity(1), Height(0)))
+        .id();
 
     step(&mut app);
     step(&mut app);
