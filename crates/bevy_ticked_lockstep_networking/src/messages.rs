@@ -50,6 +50,70 @@ pub struct ClientScheduledActions<A> {
 pub struct AuthoritativeTick<A> {
     pub tick: u64,
     pub players_actions: Vec<(u128, Vec<A>)>,
+    /// What the session itself did on this tick: a participant joined or left, the session
+    /// paused or resumed. Applied inside the tick on every peer, so every peer sees the roster
+    /// change on the same tick — the leave tick the example never had.
+    #[serde(default)]
+    pub system: Vec<SystemAction>,
+    /// Each client's input-arrival margin as the host measured it: how many ticks ahead of the
+    /// host's clock that client's newest batch arrived (negative is late). A client sizes its
+    /// buffer from its own entry.
+    #[serde(default)]
+    pub margins: Vec<(u128, i16)>,
+}
+
+impl<A> AuthoritativeTick<A> {
+    /// A tick with nothing but players' actions.
+    pub fn new(tick: u64, players_actions: Vec<(u128, Vec<A>)>) -> Self {
+        Self {
+            tick,
+            players_actions,
+            system: Vec::new(),
+            margins: Vec::new(),
+        }
+    }
+}
+
+/// Something the session did on a tick, ruled on by the host like an action.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SystemAction {
+    /// This player's actions are part of the simulation from this tick on.
+    ParticipantJoined(u128),
+    /// This player is gone from this tick on: kicked, disconnected, or left.
+    ParticipantLeft(u128),
+    /// The session is paused after this tick.
+    Pause(LockstepPauseReason),
+    /// The session runs again from this tick.
+    Resume,
+}
+
+/// Why a lockstep session paused.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LockstepPauseReason {
+    /// The host asked.
+    Host,
+    /// A participant stopped answering and the session waited for them.
+    PeerAway(u128),
+    /// A game's own reason.
+    Custom(u8),
+}
+
+/// Ask the host to pause the session after the tick about to run. Host-side only: a client
+/// writing it is ignored (the client-server crate's request path does not exist here yet).
+#[derive(Message, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PauseLockstep(pub LockstepPauseReason);
+
+/// Ask the host to resume.
+#[derive(Message, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ResumeLockstep;
+
+/// A roster change, written inside the tick it happened on, on every peer. Read it with
+/// `TickedEventReader<RosterChange>` to spawn or despawn a player's body on the same tick
+/// everywhere.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RosterChange {
+    Joined(u128),
+    Left(u128),
 }
 
 #[derive(Message, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]

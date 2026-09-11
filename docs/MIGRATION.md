@@ -6,6 +6,56 @@ what to change in a game, and why. Both peers of a session must be built from th
 Phases that changed `bevy_ensemble` too say which of its commits they pin; that crate's own
 `docs/MIGRATION.md` covers what changed there.
 
+## T12 — lockstep part 2: the session on the tick, the stall, catching up
+
+`AuthoritativeTick` gained two fields (`system`, `margins`), covered by the ensemble
+protocol hash: rebuild every peer.
+
+### The session's own actions are ruled onto a tick
+
+**Before** a participant joined on an agreed tick and left on no tick at all: the host
+stopped requiring their actions when their `LobbyClient` went, and every peer noticed on
+whatever frame its roster changed, so a departed body could not be despawned
+deterministically. **After** `AuthoritativeTick.system: Vec<SystemAction>` carries
+`ParticipantJoined`, `ParticipantLeft`, `Pause(LockstepPauseReason)` and `Resume`, ruled by
+the host into the next tick it simulates like an action. Every peer applies them inside
+that tick (`LockstepSimulationSet::System`, before `::Game`): `LockstepRoster` changes and a
+`TickedEvents<RosterChange>` entry is written on the same tick everywhere. A late joiner is
+seeded from the roster messages for joins its snapshot already contained.
+
+**Do** read `TickedEventReader<RosterChange>` inside the simulation to spawn and despawn
+player bodies, and put your simulation systems in `LockstepSimulationSet::Game`. **Delete**
+`spawn_players_at_agreed_tick`-style derivations from `LockstepLobbyParticipant`.
+
+### Pause
+
+`PauseLockstep(reason)` / `ResumeLockstep` on the host: the pause is ruled into the next
+tick, the host holds `TickHoldReason::SessionPause` after running it and keeps nothing
+flowing, clients apply the tick and wait on the next authoritative one; the resume is
+ruled into the tick that lifts the hold. `LockstepPaused(Option<reason>)` on every peer says
+so as of the ticks it has run. A client's own `Manual` hold composes with it: the host runs
+the ticks that client scheduled before the pause and then waits on it.
+
+### The stall, named and bounded
+
+`LockstepStall { waiting_on, since, paused }` says who this peer is waiting on and for how
+long (on the host, the clients whose actions the next tick needs; on a client, the host).
+`StallPolicy { pause_after: 1 s, kick_after: Some(10 s) }`: past `pause_after` the stall is
+reported as a pause; past `kick_after` the host despawns the participant's `LobbyClient`,
+which rules a `ParticipantLeft` into the next tick, and the session runs again for the
+survivors, who agree. Each waited-on peer is timed on its own.
+
+### Catching up, and the buffer
+
+A joiner with more ticks in hand than its buffer runs its clock up to fifty percent fast
+(`TickRateDilation`) until the backlog is gone; the host never freezes for a join. A client
+sizes `client_tick_buffer` from its own arrival margin, which the host measures as each
+batch arrives and reports in `AuthoritativeTick.margins` (`OwnInputMargin`): the buffer
+grows at once by the shortfall below `TARGET_ARRIVAL_MARGIN` (2) and shrinks a tick at a
+time when comfortably early. The ping-based `AdaptiveTickBufferPlugin` remains the seed
+before the first margin. `LockstepConfig::host_tick_buffer` defaults to 1, the smallest
+grace window; the host pays no input lag of its own.
+
 ## T11 — the session pause
 
 One new networked resource, `bevy_ticked::SessionPause`, covered by the handshake.
