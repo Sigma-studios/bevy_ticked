@@ -2,6 +2,7 @@ pub mod checksum;
 pub mod diagnostics;
 pub mod events;
 pub mod interpolation;
+pub mod lifetimes;
 pub mod prelude;
 pub mod registry;
 pub mod resource_registry;
@@ -17,10 +18,11 @@ use bevy::ecs::schedule::ScheduleLabel;
 use bevy::prelude::*;
 
 use registry::TickedComponentRegistry;
+use resource_registry::TickedResourceAppExt;
 use rollback::rollback_and_resimulate;
 use tick::{CurrentTick, HistoryBufferTicks, ResetToTick, StepBackward, StepForward, TickHolds};
 use time::{run_tick_schedule, TickRateDilation, Ticked, TickedTime};
-use tracked_entity::{TickTrackedEntity, TickTrackedEntityCounter};
+use tracked_entity::{TickTrackedEntity, TrackedIdAllocator};
 
 /// The schedule where all tick-driven simulation systems run.
 ///
@@ -217,10 +219,13 @@ impl Plugin for TickedPlugin {
         app.init_resource::<CurrentTick>()
             .init_resource::<TickedComponentRegistry>()
             .init_resource::<resource_registry::TickedResourceRegistry>()
-            .init_resource::<TickTrackedEntityCounter>()
+            .init_resource::<TrackedIdAllocator>()
+            .init_resource::<lifetimes::TrackedEntityLifetimes>()
             .init_resource::<tracked_index::TrackedEntityIndex>()
             .add_observer(tracked_index::index_tracked)
             .add_observer(tracked_index::unindex_tracked)
+            .add_observer(lifetimes::record_plain_despawn)
+            .register_ticked_resource::<TrackedIdAllocator>()
             .insert_resource(ConfiguredTickSource(self.source))
             .init_resource::<TickHolds>()
             .init_resource::<Time<Ticked>>()

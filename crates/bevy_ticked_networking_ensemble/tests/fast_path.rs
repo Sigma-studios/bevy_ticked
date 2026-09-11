@@ -30,7 +30,10 @@ fn a_static_world_never_replays() {
     );
     assert!(after.skipped_identical - before.skipped_identical >= 150);
     let cost = measure_tick_cost(net.app(client));
-    println!("sims per frame on a static client: {} (was 7)", (after.ticks_replayed - before.ticks_replayed) as f64 / 200.0 + 1.0);
+    println!(
+        "sims per frame on a static client: {} (was 7)",
+        (after.ticks_replayed - before.ticks_replayed) as f64 / 200.0 + 1.0
+    );
     let _ = cost;
 }
 

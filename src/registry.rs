@@ -88,13 +88,12 @@ struct RegisteredTickedComponent {
     type_id: TypeId,
     capture: fn(&mut World, u64),
     restore: fn(&mut World, u64),
+    restore_one: fn(&mut World, u64, u64, Entity),
     truncate_after: fn(&mut World, u64),
     prune_before: fn(&mut World, u64),
     clear: fn(&mut World),
     has_tick: fn(&World, u64) -> bool,
     oldest_tick: fn(&World) -> Option<u64>,
-    /// Which tracked-entity ids this type has saved state for at a tick.
-    saved_ids: fn(&World, u64) -> Vec<u64>,
     /// The wire, populated by the networking crate. `None` for a rollback-only type.
     wire: Option<WireFns>,
 }
@@ -194,12 +193,12 @@ impl TickedComponentRegistry {
             type_id,
             capture: capture_component::<T>,
             restore: restore_component::<T>,
+            restore_one: restore_one_component::<T>,
             truncate_after: truncate_component::<T>,
             prune_before: prune_component::<T>,
             clear: clear_component::<T>,
             has_tick: has_tick_component::<T>,
             oldest_tick: oldest_tick_component::<T>,
-            saved_ids: saved_ids_component::<T>,
             wire,
         });
         inner.type_indices.insert(type_id, next_index);
@@ -336,35 +335,35 @@ impl TickedComponentRegistry {
         if let Some(resources) = world.get_resource::<TickedResourceRegistry>().cloned() {
             resources.capture_all(world, tick);
         }
+        // Existence, separately from any component: a tombstone is `Disabled` and so absent
+        // from the query, which is what "died at this tick" means.
+        crate::lifetimes::TrackedEntityLifetimes::capture(world, tick);
     }
 
-    /// Restore all registered components from the given tick.
+    /// Restore every registered component, resource, and the set of tracked entities, to
+    /// `tick`.
     ///
-    /// Rewinding past a spawn leaves a **husk**, and this reports it. `restore_all`
-    /// iterates entities that *currently* carry [`TickTrackedEntity`] and, per type,
-    /// inserts the saved value or removes the component when that entity is absent
-    /// from the tick's map. An entity spawned after the target tick is in no saved
-    /// map at all, so every registered component is stripped from it — and nothing
-    /// despawns it. What is left still carries its marker, its collider and its
-    /// visuals, but none of its state, and nothing will ever put them back.
-    ///
-    /// The real fix is entity lifecycle in the history, so a rewind despawns what
-    /// did not exist. Until then the least this can do is not be silent: a
-    /// determinism harness that can quietly corrupt the world it is testing is the
-    /// worst possible shape for an instrument.
-    ///
-    /// Reported rather than repaired, and deliberately not guessed at: an entity
-    /// that legitimately carries none of the registered types at the target tick is
-    /// indistinguishable from one that did not exist, so a
-    /// despawn-what-has-no-state heuristic would kill it.
+    /// Existence is restored from [`TrackedEntityLifetimes`](crate::lifetimes::TrackedEntityLifetimes):
+    /// an entity spawned after `tick` is tombstoned (kept, disabled, for the replay that may
+    /// spawn it again), one despawned after `tick` is revived, and one destroyed outright is
+    /// rebuilt from the histories through the spawn path. There are no husks any more.
     pub fn restore_all(&self, world: &mut World, tick: u64) {
+        // Existence first, so every entity that should exist at `tick` does when its
+        // components are put back, and none that should not is still standing.
+        crate::lifetimes::restore_existence(world, self, tick);
         for entry in &self.inner.entries {
             (entry.restore)(world, tick);
         }
         if let Some(resources) = world.get_resource::<TickedResourceRegistry>().cloned() {
             resources.restore_all(world, tick);
         }
-        self.report_husks(world, tick);
+    }
+
+    /// Put every registered component saved for `(tick, id)` onto `entity`, for a rebuild.
+    pub(crate) fn restore_one_from_history(&self, world: &mut World, tick: u64, id: u64, entity: Entity) {
+        for entry in &self.inner.entries {
+            (entry.restore_one)(world, tick, id, entity);
+        }
     }
 
     /// Restore only the types that never travel: registered here without serialization, so
@@ -388,43 +387,6 @@ impl TickedComponentRegistry {
         }
     }
 
-    /// Warn about tracked entities with no saved state at `tick`.
-    fn report_husks(&self, world: &mut World, tick: u64) {
-        // Only meaningful if the tick was captured at all; restoring an unknown
-        // tick is a no-op for every type, so nothing was stripped.
-        if !self.has_tick_captured(world, tick) {
-            return;
-        }
-        let present: Vec<(Entity, u64)> = {
-            let mut tracked = world.query::<(Entity, &TickTrackedEntity)>();
-            tracked.iter(world).map(|(e, t)| (e, t.0)).collect()
-        };
-        let saved: Vec<u64> = self
-            .inner
-            .entries
-            .iter()
-            .flat_map(|entry| (entry.saved_ids)(world, tick))
-            .collect();
-
-        let husks: Vec<u64> = present
-            .iter()
-            .map(|(_, net_id)| *net_id)
-            .filter(|net_id| !saved.contains(net_id))
-            .collect();
-        if husks.is_empty() {
-            return;
-        }
-        warn!(
-            "rolled back to tick {tick} past the spawn of {} tracked {}: net {:?} \
-             existed at no point in that tick's history, so every registered \
-             component has just been stripped from them and nothing will put them \
-             back. They are still tracked, still drawn, and now stateless.",
-            husks.len(),
-            if husks.len() == 1 { "entity" } else { "entities" },
-            husks
-        );
-    }
-
     /// Truncate all WorldActions history after the given tick.
     pub fn truncate_all_after(&self, world: &mut World, tick: u64) {
         for entry in &self.inner.entries {
@@ -433,9 +395,13 @@ impl TickedComponentRegistry {
         if let Some(resources) = world.get_resource::<TickedResourceRegistry>().cloned() {
             resources.truncate_all_after(world, tick);
         }
+        if let Some(mut lifetimes) = world.get_resource_mut::<crate::lifetimes::TrackedEntityLifetimes>() {
+            lifetimes.truncate_after(tick);
+        }
     }
 
-    /// Remove all WorldActions history before the given tick.
+    /// Remove all WorldActions history before the given tick, and reap the tombstones the
+    /// window has passed.
     pub fn prune_all_before(&self, world: &mut World, tick: u64) {
         for entry in &self.inner.entries {
             (entry.prune_before)(world, tick);
@@ -443,9 +409,14 @@ impl TickedComponentRegistry {
         if let Some(resources) = world.get_resource::<TickedResourceRegistry>().cloned() {
             resources.prune_all_before(world, tick);
         }
+        if let Some(mut lifetimes) = world.get_resource_mut::<crate::lifetimes::TrackedEntityLifetimes>() {
+            lifetimes.prune_before(tick);
+        }
+        crate::lifetimes::reap_before(world, tick);
     }
 
-    /// Clear all WorldActions history for all registered components.
+    /// Clear all WorldActions history for all registered components, the lifetimes, and every
+    /// tombstone.
     pub fn clear_all(&self, world: &mut World) {
         for entry in &self.inner.entries {
             (entry.clear)(world);
@@ -453,6 +424,10 @@ impl TickedComponentRegistry {
         if let Some(resources) = world.get_resource::<TickedResourceRegistry>().cloned() {
             resources.clear_all(world);
         }
+        if let Some(mut lifetimes) = world.get_resource_mut::<crate::lifetimes::TrackedEntityLifetimes>() {
+            lifetimes.clear();
+        }
+        crate::lifetimes::reap_all(world);
     }
 
     // ---- the wire, entity by entity --------------------------------------------------------
@@ -688,6 +663,17 @@ fn restore_component<T: TickedComponent>(world: &mut World, tick: u64) {
     }
 }
 
+fn restore_one_component<T: TickedComponent>(world: &mut World, tick: u64, id: u64, entity: Entity) {
+    let saved = world
+        .resource::<WorldActions<T>>()
+        .at_tick(tick)
+        .and_then(|state| state.get(&id))
+        .cloned();
+    if let Some(component) = saved {
+        world.entity_mut(entity).insert(component);
+    }
+}
+
 fn truncate_component<T: TickedComponent>(world: &mut World, tick: u64) {
     world
         .resource_mut::<WorldActions<T>>()
@@ -702,14 +688,6 @@ fn prune_component<T: TickedComponent>(world: &mut World, tick: u64) {
 
 fn clear_component<T: TickedComponent>(world: &mut World) {
     world.resource_mut::<WorldActions<T>>().clear();
-}
-
-fn saved_ids_component<T: TickedComponent>(world: &World, tick: u64) -> Vec<u64> {
-    world
-        .resource::<WorldActions<T>>()
-        .at_tick(tick)
-        .map(|state| state.keys().copied().collect())
-        .unwrap_or_default()
 }
 
 fn oldest_tick_component<T: TickedComponent>(world: &World) -> Option<u64> {

@@ -15,7 +15,7 @@ use bevy_ticked::{
     registry::TickedComponentRegistry,
     resource_registry::TickedResourceRegistry,
     tick::{CurrentTick, TickHoldReason, TickHolds},
-    tracked_entity::{TickTrackedEntity, TickTrackedEntityCounter},
+    tracked_entity::{LocalSpawnerSlot, TickTrackedEntity, TrackedIdAllocator},
 };
 
 use crate::input::{InputQueue, TickedInput};
@@ -54,7 +54,8 @@ pub fn reset_on_leave<T: TickedInput>(world: &mut World) {
     }
 
     world.insert_resource(CurrentTick(0));
-    world.insert_resource(TickTrackedEntityCounter::default());
+    world.insert_resource(TrackedIdAllocator::default());
+    world.remove_resource::<LocalSpawnerSlot>();
     world.resource_mut::<InputQueue<T>>().inputs.clear();
     let registry = world.resource::<TickedComponentRegistry>().clone();
     registry.clear_all(world);

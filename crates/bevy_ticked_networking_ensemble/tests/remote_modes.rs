@@ -233,7 +233,11 @@ fn an_interpolated_entity_is_never_replayed() {
 
     let restored = std::mem::take(&mut net.world_mut(b).resource_mut::<Restored>().0);
     let of_a: Vec<&(u64, u64, i64)> = restored.iter().filter(|(_, id, _)| *id == a_body).collect();
-    assert!(of_a.len() >= 48, "the probe saw A's body restored {} times in 64 frames", of_a.len());
+    assert!(
+        of_a.len() >= 48,
+        "the probe saw A's body restored {} times in 64 frames",
+        of_a.len()
+    );
     for (display, id, shown) in of_a {
         // The newest record at or before, as the plugin does; on a cable every tick has one.
         let truth = (0..=*display)
@@ -363,7 +367,11 @@ fn the_server_relays_inputs_it_holds_for_ticks_after_the_snapshot_tick() {
     }
 
     let packets = net.decode_snapshots(host, b);
-    assert!(packets.len() >= 16, "few snapshots were traced: {}", packets.len());
+    assert!(
+        packets.len() >= 16,
+        "few snapshots were traced: {}",
+        packets.len()
+    );
     let mut ahead = 0usize;
     let mut with_a = 0usize;
     for packet in &packets {
@@ -388,7 +396,10 @@ fn the_server_relays_inputs_it_holds_for_ticks_after_the_snapshot_tick() {
         ahead > 0,
         "no snapshot to B carried an input of A's for a tick after its own ({with_a} relayed)"
     );
-    println!("{ahead} of A's inputs relayed ahead of the snapshot tick over {} packets", packets.len());
+    println!(
+        "{ahead} of A's inputs relayed ahead of the snapshot tick over {} packets",
+        packets.len()
+    );
 }
 
 /// B's queue holds A's inputs up to the snapshot tick plus A's margin: the first stretch of
@@ -419,7 +430,10 @@ fn relayed_inputs_cover_the_first_margin_of_the_replay() {
         .get(&a_uuid)
         .copied()
         .expect("the host has heard from A");
-    assert!(margin > 0, "A's inputs are arriving late at the host (margin {margin})");
+    assert!(
+        margin > 0,
+        "A's inputs are arriving late at the host (margin {margin})"
+    );
     // The margin is the host's newest measurement; the relayed set travelled a frame or two
     // earlier, so allow that much.
     let floor = applied as i64 + margin - 2;
@@ -509,10 +523,19 @@ fn correction_smoothing_never_touches_the_local_player() {
     mark_predicted(&mut net, b, a_body);
     corrupt_visibly(&mut net, host, b, a_body);
     let landed = net.run_until(16, |net| offset_on(net.app(b), a_body).is_some());
-    assert!(landed, "the corrected remote body never got a smoothing offset");
+    assert!(
+        landed,
+        "the corrected remote body never got a smoothing offset"
+    );
     let stats = stats_on(net.app(b));
-    assert!(stats.corrections >= 1, "the correction was not counted: {stats:?}");
-    assert_eq!(stats.snapped, 0, "a one-unit correction was shown as a jump: {stats:?}");
+    assert!(
+        stats.corrections >= 1,
+        "the correction was not counted: {stats:?}"
+    );
+    assert_eq!(
+        stats.snapped, 0,
+        "a one-unit correction was shown as a jump: {stats:?}"
+    );
     assert_eq!(
         offset_on(net.app(b), b_body),
         None,
@@ -542,13 +565,19 @@ fn a_small_correction_decays_and_never_snaps() {
     let smoothing = latest::<CorrectionSmoothing>(net.app(b), a_body).expect("smoothed");
     let per_frame = (-smoothing.decay_rate * TICK.as_secs_f32()).exp();
     let mut last = offset_on(net.app(b), a_body).unwrap().length();
-    assert!(last > 0.5, "the offset is {last}, smaller than the one-unit correction");
+    assert!(
+        last > 0.5,
+        "the offset is {last}, smaller than the one-unit correction"
+    );
     let mut frames = 0;
     let mut below_a_hundredth = None;
     while last >= 1e-3 {
         net.step();
         frames += 1;
-        assert!(frames <= 64, "the offset is still {last} a second after the correction");
+        assert!(
+            frames <= 64,
+            "the offset is still {last} a second after the correction"
+        );
         let now = offset_on(net.app(b), a_body)
             .map(|offset| offset.length())
             .unwrap_or(0.0);
@@ -620,7 +649,11 @@ fn remote_bodies_no_longer_snap_at_every_snapshot() {
         "the transform B draws A's body from moved {largest_per_tick} units in one tick (frame \
          {at_frame}); B's lead is {lead}, which is what it used to move by"
     );
-    let over_one: usize = steps.iter().filter(|(step, _)| **step > 1).map(|(_, n)| n).sum();
+    let over_one: usize = steps
+        .iter()
+        .filter(|(step, _)| **step > 1)
+        .map(|(_, n)| n)
+        .sum();
     assert!(
         over_one <= 20,
         "the drawn body moved by two units per tick on {over_one} frames of 100: {steps:?}"
@@ -633,15 +666,26 @@ fn remote_bodies_no_longer_snap_at_every_snapshot() {
 fn get_or_last_holds_the_last_known_input() {
     let mut queue = InputQueue::<Input>::default();
     queue.insert(3, 7, Input::RIGHT);
-    assert_eq!(queue.get_or_last(7, 7), Some(&Input::RIGHT), "tick 7 falls back to tick 3");
-    assert_eq!(queue.get_or_last(3, 7), Some(&Input::RIGHT), "the tick itself");
+    assert_eq!(
+        queue.get_or_last(7, 7),
+        Some(&Input::RIGHT),
+        "tick 7 falls back to tick 3"
+    );
+    assert_eq!(
+        queue.get_or_last(3, 7),
+        Some(&Input::RIGHT),
+        "the tick itself"
+    );
     assert_eq!(queue.get_or_last(2, 7), None, "nothing at or before tick 2");
     assert_eq!(queue.get_or_last(7, 8), None, "another player has nothing");
     queue.insert(5, 7, Input::LEFT);
-    assert_eq!(queue.get_or_last(7, 7), Some(&Input::LEFT), "the newest earlier one wins");
+    assert_eq!(
+        queue.get_or_last(7, 7),
+        Some(&Input::LEFT),
+        "the newest earlier one wins"
+    );
     assert_eq!(queue.get_or_last(4, 7), Some(&Input::RIGHT));
     let all = queue.at_tick_or_last(9);
     assert_eq!(all.get(&7), Some(&Input::LEFT));
     assert_eq!(all.len(), 1);
 }
-

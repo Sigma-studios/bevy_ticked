@@ -158,6 +158,16 @@ pub fn tracked_entity(app: &App, id: u64) -> Option<Entity> {
     app.world().resource::<TrackedEntityIndex>().get(id)
 }
 
+/// How many tracked entities are alive (tombstones excluded).
+pub fn tracked_entity_count(app: &App) -> usize {
+    app.world().resource::<TrackedEntityIndex>().len()
+}
+
+/// How many tracked entities are tombstoned: despawned, kept for a rewind.
+pub fn tombstone_count(app: &App) -> usize {
+    app.world().resource::<TrackedEntityIndex>().tombstones().count()
+}
+
 /// What history says `T` was on `id` at `tick`.
 pub fn component_at<T: TickedComponent>(app: &App, id: u64, tick: u64) -> Option<T> {
     app.world()

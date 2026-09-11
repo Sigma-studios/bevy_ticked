@@ -21,7 +21,11 @@ pub use crate::{
         StepForward, TickHoldReason, TickHolds, SECONDS_PER_TICK, TICKS_PER_SECOND,
     },
     time::{run_tick_schedule, TickRateDilation, Ticked, TickedTime},
-    tracked_entity::{TickTrackedEntity, TickTrackedEntityCounter},
+    lifetimes::{Lifetime, TickedEntityCommandsExt, Tombstone, TrackedEntityLifetimes},
+    tracked_entity::{
+        LocalSpawnerSlot, SLOT_BITS, SpawnerSlot, TickTrackedEntity, TrackedIdAllocator,
+        TrackedSpawner, TrackedWorldExt,
+    },
     tracked_index::TrackedEntityIndex,
     world_actions::WorldActions,
 };

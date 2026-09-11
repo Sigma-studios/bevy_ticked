@@ -30,7 +30,7 @@
 
 use std::{
     any::{type_name, TypeId},
-    collections::{BTreeMap, HashMap},
+    collections::{HashMap, VecDeque},
     sync::{Arc, OnceLock},
 };
 
@@ -48,43 +48,65 @@ pub trait TickedResource: Resource + Clone + Default + Send + Sync + 'static {}
 impl<R> TickedResource for R where R: Resource + Clone + Default + Send + Sync + 'static {}
 
 /// The history of one registered resource type across ticks.
+///
+/// A ring in tick order rather than a map: a capture after warm-up pushes into capacity the
+/// prune just freed and allocates nothing, which is the rule the component histories keep.
 #[derive(Resource)]
 pub struct ResourceActions<R: TickedResource> {
-    pub(crate) history: BTreeMap<u64, R>,
+    history: VecDeque<(u64, R)>,
 }
 
 impl<R: TickedResource> Default for ResourceActions<R> {
     fn default() -> Self {
         Self {
-            history: BTreeMap::new(),
+            history: VecDeque::new(),
         }
     }
 }
 
 impl<R: TickedResource> ResourceActions<R> {
+    fn position(&self, tick: u64) -> Result<usize, usize> {
+        self.history.binary_search_by_key(&tick, |(at, _)| *at)
+    }
+
     pub fn at_tick(&self, tick: u64) -> Option<&R> {
-        self.history.get(&tick)
+        self.position(tick)
+            .ok()
+            .map(|at| &self.history[at].1)
     }
 
     pub fn oldest_recorded_tick(&self) -> Option<u64> {
-        self.history.keys().next().copied()
+        self.history.front().map(|(tick, _)| *tick)
     }
 
     pub fn newest_recorded_tick(&self) -> Option<u64> {
-        self.history.keys().next_back().copied()
+        self.history.back().map(|(tick, _)| *tick)
     }
 
     pub fn set_tick(&mut self, tick: u64, value: R) {
-        self.history.insert(tick, value);
+        match self.position(tick) {
+            Ok(at) => self.history[at].1 = value,
+            Err(at) if at == self.history.len() => self.history.push_back((tick, value)),
+            Err(at) => self.history.insert(at, (tick, value)),
+        }
     }
 
     pub fn truncate_after(&mut self, tick: u64) {
-        self.history.split_off(&(tick + 1));
+        let keep = match self.position(tick) {
+            Ok(at) => at + 1,
+            Err(at) => at,
+        };
+        self.history.truncate(keep);
     }
 
     pub fn prune_before(&mut self, tick: u64) {
-        let kept = self.history.split_off(&tick);
-        self.history = kept;
+        while self
+            .history
+            .front()
+            .is_some_and(|(at, _)| *at < tick)
+        {
+            self.history.pop_front();
+        }
     }
 
     pub fn clear(&mut self) {
@@ -174,8 +196,18 @@ impl TickedResourceRegistry {
         let inner = Arc::make_mut(&mut self.inner);
         let wire_name = wire_name.unwrap_or(tname);
 
-        if inner.type_indices.contains_key(&type_id) {
-            panic!("Ticked resource type `{tname}` was registered more than once");
+        if let Some(index) = inner.type_indices.get(&type_id).copied() {
+            // Already rolled back; now networked too. The core registers its own resources
+            // (the id allocator) for rollback, and the networking crate puts them on the
+            // wire: one upgrade, never a second registration of a networked type.
+            let entry = &mut inner.entries[index as usize];
+            if entry.serialize_at.is_some() || serialize_at.is_none() {
+                panic!("Ticked resource type `{tname}` was registered more than once");
+            }
+            entry.wire_name = wire_name;
+            entry.serialize_at = serialize_at;
+            entry.deserialize_and_apply = deserialize_and_apply;
+            return;
         }
         if serialize_at.is_some()
             && inner
@@ -252,6 +284,14 @@ impl TickedResourceRegistry {
     /// Whether the wire order has been computed, after which no registration is accepted.
     pub fn is_frozen(&self) -> bool {
         self.inner.frozen.get().is_some()
+    }
+
+    /// Whether a networked resource is registered under `wire_name`, without freezing.
+    pub fn wire_names_unfrozen_contains(&self, wire_name: &str) -> bool {
+        self.inner
+            .entries
+            .iter()
+            .any(|entry| entry.serialize_at.is_some() && entry.wire_name == wire_name)
     }
 
     /// The wire index of a networked resource: its rank among the networked names. Freezes.

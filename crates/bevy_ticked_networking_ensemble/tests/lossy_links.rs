@@ -302,7 +302,8 @@ fn three_clients_on_a_rollback_stack_agree_about_the_roster() {
             .collect();
         owners.sort_unstable();
         assert_eq!(
-            owners, expected,
+            owners,
+            expected,
             "peer {peer:?} (uuid {}) sees a different roster",
             net.uuid(peer)
         );
@@ -342,7 +343,10 @@ fn peers_at_different_frame_rates_converge() {
     let host = net.host();
     let fast = latest::<Pos>(net.app(host), body_of(&seats, net.uuid(clients[0]))).unwrap();
     let slow = latest::<Pos>(net.app(host), body_of(&seats, net.uuid(clients[1]))).unwrap();
-    assert!(fast.0 > 0 && slow.0 < 0, "both bodies moved on the host: {fast:?} {slow:?}");
+    assert!(
+        fast.0 > 0 && slow.0 < 0,
+        "both bodies moved on the host: {fast:?} {slow:?}"
+    );
     assert_everyone_converged(&net, &seats);
 }
 
@@ -357,7 +361,11 @@ fn a_ten_thousand_tick_session_keeps_history_and_queues_bounded() {
     let window = net.app(client).world().resource::<HistoryBufferTicks>().0;
 
     for round in 0..100 {
-        let input = if round % 2 == 0 { Input::RIGHT } else { Input::LEFT };
+        let input = if round % 2 == 0 {
+            Input::RIGHT
+        } else {
+            Input::LEFT
+        };
         net.hold_input(client, input, 100);
     }
     net.hold_input(client, Input::NONE, 4);
