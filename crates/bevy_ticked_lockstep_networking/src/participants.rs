@@ -194,12 +194,23 @@ pub fn apply_received_participants(
         &LobbyParticipantOf,
     )>,
     mut pending_joins: ResMut<PendingLockstepParticipantJoins>,
+    current_tick: Res<CurrentTick>,
+    mut roster: ResMut<crate::LockstepRoster>,
+    mut changes: bevy_ticked::events::TickedEventWriter<crate::RosterChange>,
 ) {
     let Some(client_lobby) = client_lobby else {
         return;
     };
 
     for message in messages.read() {
+        // A participant whose agreed tick this peer has already simulated joined before this
+        // peer's snapshot: the tick that carried the join is not coming, so the roster is
+        // seeded here. One whose tick is ahead is added by that tick, on every peer alike.
+        if message.message.joined_at_tick <= current_tick.0
+            && roster.0.insert(message.message.player_uuid)
+        {
+            changes.write(current_tick.0, crate::RosterChange::Joined(message.message.player_uuid));
+        }
         if let Some((participant_entity, _, _, _)) =
             participants
                 .iter()

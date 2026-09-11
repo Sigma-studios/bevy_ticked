@@ -90,6 +90,8 @@ pub fn broadcast_buffered_authoritative_actions_to_loaded_clients<A: LockstepAct
             let message = AuthoritativeTick {
                 tick,
                 players_actions,
+                system: tracker.system_actions_for_tick(tick).to_vec(),
+                margins: Vec::new(),
             };
             // Deliberately the coalescing default, unlike the steady-state broadcast. This loop
             // emits one message per missed tick and the range is however long the join took, so it
@@ -116,6 +118,7 @@ pub fn broadcast_authoritative_actions<A: LockstepAction>(
     host_lobby: Option<Single<Entity, (With<Lobby>, With<Host>)>>,
     lobby_clients: Query<(), With<LobbyClient>>,
     participants: Query<(&LobbyParticipant, &LockstepLobbyParticipant, &LobbyParticipantOf)>,
+    margins: Res<crate::ArrivalMargins>,
 ) {
     let Some(host_lobby) = host_lobby else {
         return;
@@ -171,6 +174,8 @@ pub fn broadcast_authoritative_actions<A: LockstepAction>(
         let message = AuthoritativeTick {
             tick,
             players_actions: broadcast_actions,
+            system: tracker.system_actions_for_tick(tick).to_vec(),
+            margins: margins.0.iter().map(|(uuid, margin)| (*uuid, *margin)).collect(),
         };
         // Not held back to be packed: every client's simulation is stopped until this lands, and
         // the next one is a tick away, so a coalescing send waits for company that never comes and
@@ -189,6 +194,8 @@ pub fn receive_authoritative_actions<A: LockstepAction, S: crate::JoinSnapshot>(
     mut stashed_authoritative_ticks: ResMut<StashedAuthoritativeTicks<A>>,
     snapshot_state: Res<ClientSnapshotState<S>>,
     client_lobbies: Query<(), (With<Lobby>, Without<Host>)>,
+    local: Option<Res<bevy_ensemble::LocalMultiplayerPlayerId>>,
+    mut own_margin: ResMut<crate::OwnInputMargin>,
 ) {
     if client_lobbies.is_empty() {
         return;
@@ -196,6 +203,14 @@ pub fn receive_authoritative_actions<A: LockstepAction, S: crate::JoinSnapshot>(
 
     for message in messages.read() {
         let authoritative_tick = message.message.clone();
+        if let Some(me) = local.as_ref()
+            && let Some((_, margin)) = authoritative_tick
+                .margins
+                .iter()
+                .find(|(uuid, _)| *uuid == me.0)
+        {
+            own_margin.0 = Some(*margin);
+        }
         if !snapshot_state.ready {
             stashed_authoritative_ticks.0.push(authoritative_tick);
             continue;
@@ -271,6 +286,11 @@ pub fn apply_authoritative_tick<A: Clone>(
     for (player_uuid, actions) in &authoritative_tick.players_actions {
         players_actions.insert(*player_uuid, actions.clone());
     }
+    if !authoritative_tick.system.is_empty() {
+        tracker
+            .system
+            .insert(authoritative_tick.tick, authoritative_tick.system.clone());
+    }
 }
 
 /// Remove tracker entries for ticks that have already been simulated and broadcast, but
@@ -302,6 +322,7 @@ pub fn cleanup_old_tracker_entries<A: LockstepAction>(
         .unwrap_or(current_tick.0)
         .min(current_tick.0);
     tracker.ticks.retain(|tick, _| *tick >= min_keep);
+    tracker.system.retain(|tick, _| *tick >= min_keep);
 }
 
 #[cfg(test)]
@@ -314,10 +335,7 @@ mod tests {
 
         apply_authoritative_tick(
             &mut tracker,
-            &AuthoritativeTick {
-                tick: 7,
-                players_actions: Vec::new(),
-            },
+            &AuthoritativeTick::new(7, Vec::new()),
         );
 
         assert!(
@@ -338,10 +356,7 @@ mod tests {
         // host's catch-up. While this merged, the overlap doubled every action in it on the
         // joining client: two buildings from one placement, two charges from one purchase.
         let mut tracker = ActionTracker::<u8>::default();
-        let authoritative = AuthoritativeTick {
-            tick: 5,
-            players_actions: vec![(11, vec![1, 2])],
-        };
+        let authoritative = AuthoritativeTick::new(5, vec![(11, vec![1, 2])]);
 
         apply_authoritative_tick(&mut tracker, &authoritative);
         apply_authoritative_tick(&mut tracker, &authoritative);
@@ -359,10 +374,7 @@ mod tests {
 
         apply_authoritative_tick(
             &mut tracker,
-            &AuthoritativeTick {
-                tick: 3,
-                players_actions: vec![(11, vec![1, 2]), (22, Vec::new())],
-            },
+            &AuthoritativeTick::new(3, vec![(11, vec![1, 2]), (22, Vec::new())]),
         );
 
         assert_eq!(tracker.ticks[&3][&11], vec![1, 2]);

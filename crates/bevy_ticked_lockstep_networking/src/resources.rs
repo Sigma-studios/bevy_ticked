@@ -1,7 +1,10 @@
-use crate::{AuthoritativeTick, JoinSnapshot, JoinSnapshotResponse, LockstepConfig};
+use crate::{
+    AuthoritativeTick, JoinSnapshot, JoinSnapshotResponse, LockstepConfig, LockstepPauseReason,
+    SystemAction,
+};
 use bevy::prelude::*;
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     marker::PhantomData,
     time::Duration,
 };
@@ -18,11 +21,27 @@ impl<A> Default for LocalPendingActions<A> {
 #[derive(Resource)]
 pub struct ActionTracker<A> {
     pub ticks: HashMap<u64, BTreeMap<u128, Vec<A>>>,
+    /// The session's own actions per tick, ruled on by the host with the players'.
+    pub system: HashMap<u64, Vec<SystemAction>>,
 }
 
 impl<A> ActionTracker<A> {
     pub fn actions_for_tick(&self, tick: u64) -> Option<&BTreeMap<u128, Vec<A>>> {
         self.ticks.get(&tick)
+    }
+
+    /// The session's actions on `tick`, empty if none.
+    pub fn system_actions_for_tick(&self, tick: u64) -> &[SystemAction] {
+        self.system.get(&tick).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// The newest tick the tracker holds anything for.
+    pub fn newest_tick(&self) -> Option<u64> {
+        self.ticks
+            .keys()
+            .chain(self.system.keys())
+            .copied()
+            .max()
     }
 }
 
@@ -30,9 +49,63 @@ impl<A> Default for ActionTracker<A> {
     fn default() -> Self {
         Self {
             ticks: HashMap::new(),
+            system: HashMap::new(),
         }
     }
 }
+
+/// Host side: session actions waiting to be ruled into the next tick.
+#[derive(Resource, Default, Debug, Clone)]
+pub struct PendingSystemActions(pub Vec<SystemAction>);
+
+/// Who is in the simulation, as of the ticks this peer has run. Changes only inside a tick,
+/// from the tick's [`SystemAction`]s, so every peer changes it on the same tick.
+#[derive(Resource, Default, Debug, Clone, PartialEq, Eq)]
+pub struct LockstepRoster(pub BTreeSet<u128>);
+
+/// Whether the session is paused, as of the ticks this peer has run.
+#[derive(Resource, Default, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LockstepPaused(pub Option<LockstepPauseReason>);
+
+/// What the host does about a participant that stops answering.
+#[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StallPolicy {
+    /// After this long waiting on a participant, [`LockstepStall::paused`] is set for the
+    /// UI: the session is, in effect, paused for them.
+    pub pause_after: Duration,
+    /// After this long, the host kicks the participant: everyone sees them leave on the same
+    /// tick and the session runs again. `None` waits for ever.
+    pub kick_after: Option<Duration>,
+}
+
+impl Default for StallPolicy {
+    fn default() -> Self {
+        Self {
+            pause_after: Duration::from_secs(1),
+            kick_after: Some(Duration::from_secs(10)),
+        }
+    }
+}
+
+/// Who this peer is waiting on, and for how long. For an overlay: "waiting for Alice (3 s)".
+#[derive(Resource, Default, Debug, Clone, PartialEq, Eq)]
+pub struct LockstepStall {
+    /// The participants whose actions the next tick needs and does not have (host), or the
+    /// host, when the next authoritative tick has not come (client).
+    pub waiting_on: Vec<u128>,
+    /// How long this has been going on, on the frame clock.
+    pub since: Duration,
+    /// Past [`StallPolicy::pause_after`].
+    pub paused: bool,
+}
+
+/// Client side: this peer's own input-arrival margin, as the host last reported it.
+#[derive(Resource, Default, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OwnInputMargin(pub Option<i16>);
+
+/// Host side: the newest arrival margin per client.
+#[derive(Resource, Default, Debug, Clone, PartialEq, Eq)]
+pub struct ArrivalMargins(pub BTreeMap<u128, i16>);
 
 /// Host side: clients that have been sent a join snapshot and have not yet said `ClientLoaded`,
 /// by the tick their snapshot described.

@@ -42,7 +42,10 @@ pub struct LockstepConfig {
 impl Default for LockstepConfig {
     fn default() -> Self {
         Self {
-            host_tick_buffer: 6,
+            // One: the smallest grace window. The buffer that matters for the session's
+            // rate is the client's, and the host's used to be its own input lag, which it no
+            // longer pays.
+            host_tick_buffer: 1,
             client_tick_buffer: 6,
             action_horizon: 128,
         }
@@ -97,6 +100,7 @@ fn reset_lockstep_state_on_lobby_removed<A: LockstepAction, S: JoinSnapshot>(
         return;
     }
     tracker.ticks.clear();
+    tracker.system.clear();
     if let Some(mut pending_actions) = pending_actions {
         pending_actions.0.clear();
     }
@@ -130,6 +134,10 @@ where
             warn!("LockstepConfig::host_tick_buffer of 0 is clamped to 1");
             config.host_tick_buffer = 1;
         }
+        crate::session::install::<A>(app);
+        app.insert_resource(crate::session::StageSystemActions(
+            crate::session::stage_into_tracker::<A>,
+        ));
         app.insert_resource(config)
             .insert_resource(InitialLockstepConfig(config))
             .init_resource::<ActionTracker<A>>()
