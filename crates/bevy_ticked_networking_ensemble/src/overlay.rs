@@ -62,47 +62,47 @@ fn publish_ticked_lines(
             last.ticks = cost.ticks;
         }
     }
-    if let Some(replay) = replay {
-        if refresh {
-            let rollbacks_per_s = (replay.rollbacks - last.rollbacks) as f64 / dt;
-            let ticks_per_s = (replay.ticks_replayed - last.ticks_replayed) as f64 / dt;
-            extras.set(
-                "ticked.replay",
-                format!(
-                    "replay: {rollbacks_per_s:.1} rollbacks/s, {ticks_per_s:.0} ticks/s, \
+    if let Some(replay) = replay
+        && refresh
+    {
+        let rollbacks_per_s = (replay.rollbacks - last.rollbacks) as f64 / dt;
+        let ticks_per_s = (replay.ticks_replayed - last.ticks_replayed) as f64 / dt;
+        extras.set(
+            "ticked.replay",
+            format!(
+                "replay: {rollbacks_per_s:.1} rollbacks/s, {ticks_per_s:.0} ticks/s, \
                      distance {}, {} identical, {} stale",
-                    replay.last_replay_distance, replay.skipped_identical, replay.dropped_stale
-                ),
-            );
-            last.rollbacks = replay.rollbacks;
-            last.ticks_replayed = replay.ticks_replayed;
-        }
+                replay.last_replay_distance, replay.skipped_identical, replay.dropped_stale
+            ),
+        );
+        last.rollbacks = replay.rollbacks;
+        last.ticks_replayed = replay.ticks_replayed;
     }
-    if let Some(snapshots) = snapshots {
-        if refresh {
-            let per_s = (snapshots.sent - last.snapshots) as f64 / dt;
-            extras.set(
-                "ticked.snapshot",
-                format!(
-                    "snapshot: {per_s:.1}/s, {} B last, {} B max, {} oversize",
-                    snapshots.last_bytes, snapshots.max_bytes, snapshots.oversize
-                ),
-            );
-            last.snapshots = snapshots.sent;
-        }
+    if let Some(snapshots) = snapshots
+        && refresh
+    {
+        let per_s = (snapshots.sent - last.snapshots) as f64 / dt;
+        extras.set(
+            "ticked.snapshot",
+            format!(
+                "snapshot: {per_s:.1}/s, {} B last, {} B max, {} oversize",
+                snapshots.last_bytes, snapshots.max_bytes, snapshots.oversize
+            ),
+        );
+        last.snapshots = snapshots.sent;
     }
-    if let Some(inputs) = inputs {
-        if refresh {
-            let per_s = (inputs.received - last.inputs) as f64 / dt;
-            extras.set(
-                "ticked.input",
-                format!(
-                    "input: {per_s:.1}/s, {} late, {} out of window",
-                    inputs.late, inputs.dropped_out_of_window
-                ),
-            );
-            last.inputs = inputs.received;
-        }
+    if let Some(inputs) = inputs
+        && refresh
+    {
+        let per_s = (inputs.received - last.inputs) as f64 / dt;
+        extras.set(
+            "ticked.input",
+            format!(
+                "input: {per_s:.1}/s, {} late, {} out of window",
+                inputs.late, inputs.dropped_out_of_window
+            ),
+        );
+        last.inputs = inputs.received;
     }
     if let Some(health) = health {
         let total = health.client_minted_tracked_id

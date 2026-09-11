@@ -20,19 +20,20 @@ use bevy_ticked_networking_ensemble::{
     EnsembleSnapshotMessage, HandshakeTimedOut, HandshakeTimeout, LocalSpawnerSlot,
     RegistryMismatch, RegistryVerified, SpawnerSlots,
 };
-use bevy_ticked_testing::fixtures::minimal::{
-    self, EntityKind, Input, Vel, seat_everyone,
-};
+use bevy_ticked_testing::fixtures::minimal::{self, EntityKind, Input, Vel, seat_everyone};
 use bevy_ticked_testing::log::{errors_since, mark};
 use bevy_ticked_testing::prelude::*;
 
 const SETTLE: usize = 400;
 
-/// A peer from a commit that never registered `Pos`: the other three names, systems and all.
+/// A peer from a commit that never registered `Pos`: the other names, systems and all.
 fn without_pos(app: &mut App) {
+    use bevy_ticked_testing::fixtures::minimal::{Fuse, PlayerSlot};
     minimal::install_systems(app);
     app.register_networked_ticked_component::<Vel>("Vel")
-        .register_networked_ticked_component::<EntityKind>("EntityKind");
+        .register_networked_ticked_component::<EntityKind>("EntityKind")
+        .register_networked_ticked_component::<PlayerSlot>("PlayerSlot")
+        .register_networked_ticked_component::<Fuse>("Fuse");
 }
 
 fn host_margins(net: &TickedNetwork) -> Vec<(u128, i64)> {
@@ -69,7 +70,7 @@ fn slot_on(net: &TickedNetwork, peer: PeerId) -> Option<u8> {
     net.app(peer)
         .world()
         .get_resource::<LocalSpawnerSlot>()
-        .map(|slot| slot.0)
+        .map(|slot| slot.0.0)
 }
 
 // ── The gate ─────────────────────────────────────────────────────────────────
@@ -103,7 +104,11 @@ fn no_snapshot_is_applied_before_the_registry_handshake_matches() {
     let mut frames_unverified = 0;
     for _ in 0..SETTLE {
         net.step();
-        if net.app(client).world().contains_resource::<RegistryVerified>() {
+        if net
+            .app(client)
+            .world()
+            .contains_resource::<RegistryVerified>()
+        {
             break;
         }
         frames_unverified += 1;
@@ -118,7 +123,9 @@ fn no_snapshot_is_applied_before_the_registry_handshake_matches() {
         );
     }
     assert!(
-        net.app(client).world().contains_resource::<RegistryVerified>(),
+        net.app(client)
+            .world()
+            .contains_resource::<RegistryVerified>(),
         "the handshake never matched in {SETTLE} frames"
     );
     assert!(
@@ -126,13 +133,19 @@ fn no_snapshot_is_applied_before_the_registry_handshake_matches() {
         "the client was verified on its first frame, so nothing above was checked"
     );
 
-    assert!(net.settle(SETTLE), "the session did not settle after the handshake");
+    assert!(
+        net.settle(SETTLE),
+        "the session did not settle after the handshake"
+    );
     let stats = replays(net.app(client));
     assert!(
         stats.dropped_before_handshake >= 1,
         "the snapshot delivered before the handshake was not counted as dropped: {stats:?}"
     );
-    assert!(stats.snapshots_applied > 0, "and snapshots do flow once verified");
+    assert!(
+        stats.snapshots_applied > 0,
+        "and snapshots do flow once verified"
+    );
 }
 
 /// A client built from a commit with one registration fewer joins, is told the difference, and
@@ -196,11 +209,7 @@ fn a_mismatched_client_is_told_which_registration_differs() {
         "the mismatch was never found"
     );
 
-    let mismatch = net
-        .app(bad)
-        .world()
-        .resource::<RegistryMismatch>()
-        .clone();
+    let mismatch = net.app(bad).world().resource::<RegistryMismatch>().clone();
     assert_eq!(
         mismatch.difference,
         "the peer registers component \"Pos\" which this build does not"
@@ -208,12 +217,12 @@ fn a_mismatched_client_is_told_which_registration_differs() {
     assert_eq!(mismatch.peer, net.uuid(net.host()));
     assert_eq!(
         mismatch.theirs.component_names,
-        ["EntityKind", "Pos", "Vel", "bevy_ticked::Owner"],
+        ["EntityKind", "Fuse", "PlayerSlot", "Pos", "Vel", "bevy_ticked::Owner"],
         "the host's sorted names travel with the handshake"
     );
     assert_eq!(
         mismatch.ours.component_names,
-        ["EntityKind", "Vel", "bevy_ticked::Owner"]
+        ["EntityKind", "Fuse", "PlayerSlot", "Vel", "bevy_ticked::Owner"]
     );
 
     // The host's side of the same story names the same registration.
@@ -248,7 +257,9 @@ fn a_client_that_never_completes_the_handshake_is_refused_after_the_timeout() {
         "a quarter of a second in, the client is still waiting"
     );
     assert!(
-        !net.app(client).world().contains_resource::<HandshakeTimedOut>(),
+        !net.app(client)
+            .world()
+            .contains_resource::<HandshakeTimedOut>(),
         "the timeout fired early"
     );
 
@@ -259,8 +270,15 @@ fn a_client_that_never_completes_the_handshake_is_refused_after_the_timeout() {
         .get_resource::<HandshakeTimedOut>()
         .expect("a second in, the client has given up");
     assert!(timed_out.waited >= Duration::from_millis(500));
-    assert_eq!(role(app), Role::Solo, "the role is dropped and not taken back");
-    assert!(!paused(app), "and the clock is released, not left on AwaitingSync");
+    assert_eq!(
+        role(app),
+        Role::Solo,
+        "the role is dropped and not taken back"
+    );
+    assert!(
+        !paused(app),
+        "and the clock is released, not left on AwaitingSync"
+    );
     assert!(!app.world().contains_resource::<RegistryVerified>());
     assert_eq!(applied_tick(app), None);
 }
@@ -291,7 +309,10 @@ fn each_client_sees_only_its_own_margin() {
 
     let to_near = net.decode_snapshots(host, near);
     let to_far = net.decode_snapshots(host, far);
-    assert!(to_near.len() > 100 && to_far.len() > 100, "few snapshots were traced");
+    assert!(
+        to_near.len() > 100 && to_far.len() > 100,
+        "few snapshots were traced"
+    );
 
     // What the host holds now is what the last packet of the frame carried, because margins
     // move in PreUpdate and the snapshot is built after the tick.
@@ -353,7 +374,10 @@ fn a_departed_players_margin_is_removed() {
         .hold(0, 64, stayer_uuid, Input::LEFT);
     net.run_input_script(&both, 0);
     assert_eq!(
-        host_margins(&net).iter().map(|(uuid, _)| *uuid).collect::<Vec<_>>(),
+        host_margins(&net)
+            .iter()
+            .map(|(uuid, _)| *uuid)
+            .collect::<Vec<_>>(),
         [leaver_uuid, stayer_uuid]
     );
     assert_eq!(recipients(&net), [leaver_uuid, stayer_uuid]);
@@ -375,7 +399,10 @@ fn a_departed_players_margin_is_removed() {
     );
 
     let to_stayer = net.decode_snapshots(host, stayer);
-    assert!(to_stayer.len() >= 60, "the stayer stopped getting snapshots");
+    assert!(
+        to_stayer.len() >= 60,
+        "the stayer stopped getting snapshots"
+    );
     let stayer_margin = host_margin_for(&net, stayer_uuid).expect("the stayer is still heard");
     assert_eq!(
         i64::from(to_stayer.last().unwrap().your_margin),
@@ -403,9 +430,16 @@ fn a_verified_client_gets_a_welcome_with_a_slot() {
 
     let first_slot = slot_on(&net, first).expect("the first client was welcomed");
     let second_slot = slot_on(&net, second).expect("the second client was welcomed");
-    assert_ne!(first_slot, second_slot, "two clients were given the same slot");
+    assert_ne!(
+        first_slot, second_slot,
+        "two clients were given the same slot"
+    );
     assert!((1..=255).contains(&first_slot) && (1..=255).contains(&second_slot));
-    assert_eq!(slot_on(&net, host), None, "the host is not welcomed by itself");
+    assert_eq!(
+        slot_on(&net, host),
+        Some(0),
+        "the host mints as the authority"
+    );
 
     let slots = net.app(host).world().resource::<SpawnerSlots>().clone();
     assert_eq!(slots.slot_of(first_uuid), Some(first_slot));
@@ -416,7 +450,10 @@ fn a_verified_client_gets_a_welcome_with_a_slot() {
     net.leave(first);
     net.run(10);
     assert_eq!(
-        net.app(host).world().resource::<SpawnerSlots>().slot_of(first_uuid),
+        net.app(host)
+            .world()
+            .resource::<SpawnerSlots>()
+            .slot_of(first_uuid),
         None,
         "the slot was not freed when the client left"
     );
@@ -433,7 +470,10 @@ fn a_verified_client_gets_a_welcome_with_a_slot() {
     );
     let again = slot_on(&net, first).unwrap();
     assert_eq!(
-        net.app(host).world().resource::<SpawnerSlots>().slot_of(first_uuid),
+        net.app(host)
+            .world()
+            .resource::<SpawnerSlots>()
+            .slot_of(first_uuid),
         Some(again)
     );
     assert_ne!(again, second_slot);

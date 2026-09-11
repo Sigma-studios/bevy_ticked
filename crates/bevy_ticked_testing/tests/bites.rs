@@ -7,7 +7,7 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use bevy::prelude::*;
-use bevy_ticked::tracked_entity::TickTrackedEntityCounter;
+use bevy_ticked::tracked_entity::{SpawnerSlot, TickTrackedEntity, TrackedIdAllocator};
 use bevy_ticked_networking::networked_registry::NetworkedTickedAppExt;
 use bevy_ticked_testing::fixtures::minimal::{
     self, EntityKind, Input, MinimalHash, Pos, Vel, seat_everyone, spawn_player,
@@ -108,7 +108,9 @@ fn dropping_a_component_from_the_registry_fails_convergence() {
     net.add_client_built(|app| {
         minimal::install_systems(app);
         app.register_networked_ticked_component::<Vel>("Vel")
-            .register_networked_ticked_component::<EntityKind>("EntityKind");
+            .register_networked_ticked_component::<EntityKind>("EntityKind")
+            .register_networked_ticked_component::<minimal::PlayerSlot>("PlayerSlot")
+            .register_networked_ticked_component::<minimal::Fuse>("Fuse");
     });
     // The join handshake may end the session over the mismatch; whether or not it does, `Pos`
     // cannot converge on a peer that has no `Pos`.
@@ -200,13 +202,17 @@ fn assert_no_id_unissued_fails_when_a_client_mints() {
 
     let client = net.client();
     let world = net.world_mut(client);
-    world.resource_mut::<TickTrackedEntityCounter>().0 = 10_000;
+    // A client minting under the authority's slot, far past anything the host issued.
+    world
+        .resource_mut::<TrackedIdAllocator>()
+        .raise_to(TickTrackedEntity::new(SpawnerSlot::AUTHORITY, 10_000));
     spawn_player(world, 99);
+    let minted = TickTrackedEntity::new(SpawnerSlot::AUTHORITY, 10_001).0;
 
     let outcome = catch_unwind(AssertUnwindSafe(|| assert_no_id_unissued(&mut net)));
     let message = panic_message(outcome);
     assert!(
-        message.contains("10001"),
+        message.contains(&minted.to_string()),
         "the panic did not name the minted id: {message}"
     );
 }

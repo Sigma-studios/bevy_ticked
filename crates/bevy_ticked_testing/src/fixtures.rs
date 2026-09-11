@@ -16,7 +16,10 @@ pub mod minimal {
     use bevy_ticked::interpolation::{TickedInterpolation, TickedInterpolationPlugin};
     use bevy_ticked::registry::TickedAppExt;
     use bevy_ticked::tick::CurrentTick;
-    use bevy_ticked::tracked_entity::{TickTrackedEntity, TickTrackedEntityCounter};
+    use bevy_ticked::lifetimes::TickedEntityCommandsExt;
+    use bevy_ticked::tracked_entity::{
+        LocalSpawnerSlot, SpawnerSlot, TickTrackedEntity, TrackedIdAllocator, TrackedSpawner,
+    };
     use bevy_ticked::TickedSimulation;
     use bevy_ticked_networking::input::InputQueue;
     use bevy_ticked_networking::networked_registry::NetworkedTickedAppExt;
@@ -39,23 +42,39 @@ pub mod minimal {
 
     impl EntityKind {
         pub const PLAYER: Self = Self(1);
+        pub const PELLET: Self = Self(2);
     }
 
     /// Which player drives this body: the stack's own, so a client predicts its body and
     /// interpolates everybody else's.
     pub use bevy_ticked_networking::replication::Owner;
 
-    /// What a player presses: a direction, or nothing.
+    /// What a player presses: a direction, or nothing, and whether they fire.
     #[derive(Clone, Copy, Default, Serialize, Deserialize, Debug, PartialEq, Eq)]
     pub struct Input {
         pub dx: i8,
+        pub fire: bool,
     }
 
     impl Input {
-        pub const RIGHT: Self = Self { dx: 1 };
-        pub const LEFT: Self = Self { dx: -1 };
-        pub const NONE: Self = Self { dx: 0 };
+        pub const RIGHT: Self = Self { dx: 1, fire: false };
+        pub const LEFT: Self = Self { dx: -1, fire: false };
+        pub const NONE: Self = Self { dx: 0, fire: false };
+        pub const FIRE: Self = Self { dx: 0, fire: true };
     }
+
+    /// The slot a player's peer mints under, on their body, so every peer spawns that
+    /// player's pellets under the same ids. Networked; the host sets it when it seats a
+    /// player (0 for itself, the welcomed slot for a client).
+    #[derive(Component, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Debug)]
+    pub struct PlayerSlot(pub u8);
+
+    /// A pellet's remaining life in ticks; it is `despawn_ticked` at zero.
+    #[derive(Component, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Debug)]
+    pub struct Fuse(pub u8);
+
+    /// How long a pellet lives.
+    pub const PELLET_LIFE: u8 = 96;
 
     /// Local-only view state, attached to every tracked entity by an observer.
     ///
@@ -99,6 +118,43 @@ pub mod minimal {
         }
     }
 
+    /// A pellet for every player who fired this tick, minted under that player's slot so the
+    /// host and every client mint the same id: the spawn a client predicts and the host
+    /// confirms. Runs on every peer, from the same relayed inputs.
+    pub fn fire_pellets(
+        tick: Res<CurrentTick>,
+        queue: Res<InputQueue<Input>>,
+        players: Query<(&Owner, &Pos, &PlayerSlot)>,
+        mut spawner: TrackedSpawner,
+    ) {
+        let Some(inputs) = queue.at_tick(tick.0) else {
+            return;
+        };
+        let mut shooters: Vec<(u8, i64)> = players
+            .iter()
+            .filter(|(owner, _, _)| inputs.get(&owner.0).is_some_and(|input| input.fire))
+            .map(|(_, pos, slot)| (slot.0, pos.0))
+            .collect();
+        shooters.sort_unstable();
+        for (slot, pos) in shooters {
+            spawner.spawn_by(
+                SpawnerSlot(slot),
+                (Pos(pos), Vel(1), EntityKind::PELLET, Fuse(PELLET_LIFE)),
+            );
+        }
+    }
+
+    /// Pellets burn down and are tombstoned, never destroyed.
+    pub fn burn_fuses(mut pellets: Query<(Entity, &mut Fuse)>, mut commands: Commands) {
+        for (entity, mut fuse) in &mut pellets {
+            if fuse.0 == 0 {
+                commands.entity(entity).despawn_ticked();
+            } else {
+                fuse.0 -= 1;
+            }
+        }
+    }
+
     /// `Pos += Vel`, once per tick.
     ///
     /// Reads `Time` only to check that the tick clock is installed: inside a tick `delta` is
@@ -115,10 +171,10 @@ pub mod minimal {
         }
     }
 
-    /// Mint a body for `uuid` from this world's counter. On a host, or on a solo peer; a client
-    /// doing this is the bug `assert_no_id_unissued` exists to catch.
+    /// Mint a body for `uuid` under the authority's slot. On a host, or on a solo peer; a
+    /// client doing this is the bug `assert_no_id_unissued` exists to catch.
     pub fn spawn_player(world: &mut World, uuid: u128) -> Entity {
-        let id = world.resource_mut::<TickTrackedEntityCounter>().next();
+        let id = world.resource_mut::<TrackedIdAllocator>().next_authority();
         world
             .spawn((Pos(0), Vel(0), EntityKind::PLAYER, Owner(uuid), id))
             .id()
@@ -131,7 +187,9 @@ pub mod minimal {
     pub fn register_components(app: &mut App) {
         app.register_networked_ticked_component::<Pos>("Pos")
             .register_networked_ticked_component::<Vel>("Vel")
-            .register_networked_ticked_component::<EntityKind>("EntityKind");
+            .register_networked_ticked_component::<EntityKind>("EntityKind")
+            .register_networked_ticked_component::<PlayerSlot>("PlayerSlot")
+            .register_networked_ticked_component::<Fuse>("Fuse");
         // `Owner` is the stack's own and is registered by the role plugins.
     }
 
@@ -143,7 +201,7 @@ pub mod minimal {
         )
         .add_systems(
             TickedSimulation,
-            (apply_inputs, integrate)
+            (apply_inputs, integrate, fire_pellets, burn_fuses)
                 .chain()
                 .in_set(MinimalSet::Simulate),
         )
@@ -237,7 +295,7 @@ pub mod minimal {
     /// tick-0 capture holds a real transform rather than the observer's deferred one. Only
     /// meaningful under [`install_with_transform`]; elsewhere the transform is dead weight.
     pub fn spawn_player_with_transform(world: &mut World, uuid: u128) -> Entity {
-        let id = world.resource_mut::<TickTrackedEntityCounter>().next();
+        let id = world.resource_mut::<TrackedIdAllocator>().next_authority();
         world
             .spawn((
                 Pos(0),
@@ -259,12 +317,24 @@ pub mod minimal {
     /// anyone looks for it.
     pub fn seat_everyone(net: &mut TickedNetwork) -> Vec<(u128, u64)> {
         let host = net.host();
-        let uuids: Vec<u128> = net.peers().into_iter().map(|peer| net.uuid(peer)).collect();
-        let world = net.world_mut(host);
-        uuids
+        let seats: Vec<(u128, u8)> = net
+            .peers()
             .into_iter()
-            .map(|uuid| {
+            .map(|peer| {
+                let slot = net
+                    .app(peer)
+                    .world()
+                    .get_resource::<LocalSpawnerSlot>()
+                    .map_or(0, |slot| slot.0.0);
+                (net.uuid(peer), slot)
+            })
+            .collect();
+        let world = net.world_mut(host);
+        seats
+            .into_iter()
+            .map(|(uuid, slot)| {
                 let entity = spawn_player(world, uuid);
+                world.entity_mut(entity).insert(PlayerSlot(slot));
                 let id = world.get::<TickTrackedEntity>(entity).expect("just spawned").0;
                 (uuid, id)
             })

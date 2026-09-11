@@ -184,9 +184,7 @@ pub struct HandshakeTimeout(pub Duration);
 #[derive(Resource, Clone, Copy, Debug, Default)]
 pub struct RegistryVerified;
 
-/// On a client: the spawner slot the host's [`TickedSessionWelcome`] assigned.
-#[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
-pub struct LocalSpawnerSlot(pub u8);
+pub use bevy_ticked::tracked_entity::{LocalSpawnerSlot, SpawnerSlot};
 
 /// On a host's `LobbyClient`: that client's registries match, so it is told the world.
 #[derive(Component, Clone, Copy, Debug, Default)]
@@ -287,11 +285,13 @@ fn announce_registry(
     let ours = TickedRegistryHandshake::from_registries(&components, resources.as_deref());
     let entity = verified.entity;
     if clients.contains(entity) {
-        commands.entity(entity).trigger(move |entity| LobbyClientMessage {
-            entity,
-            message: ours,
-            send_mode: SendMode::Reliable,
-        });
+        commands
+            .entity(entity)
+            .trigger(move |entity| LobbyClientMessage {
+                entity,
+                message: ours,
+                send_mode: SendMode::Reliable,
+            });
     } else {
         commands.entity(entity).trigger(move |entity| LobbyMessage {
             entity,
@@ -325,7 +325,8 @@ fn check_registry(world: &mut World) {
         return;
     };
     let hosting = {
-        let mut hosts = world.query_filtered::<(), (With<Host>, Or<(With<Lobby>, With<PendingLobby>)>)>();
+        let mut hosts =
+            world.query_filtered::<(), (With<Host>, Or<(With<Lobby>, With<PendingLobby>)>)>();
         hosts.iter(world).next().is_some()
     };
 
@@ -367,7 +368,8 @@ fn check_registry(world: &mut World) {
 /// The host's side of a match: mark the client, give it a slot, tell it where the clock is.
 fn verify_client(world: &mut World, uuid: u128) {
     let client = {
-        let mut clients = world.query_filtered::<(Entity, &LobbyClientPlayerUuid), With<LobbyClient>>();
+        let mut clients =
+            world.query_filtered::<(Entity, &LobbyClientPlayerUuid), With<LobbyClient>>();
         clients
             .iter(world)
             .find(|(_, client)| client.0 == uuid)
@@ -404,7 +406,7 @@ fn receive_welcome(
     mut commands: Commands,
 ) {
     for welcome in welcomes.read() {
-        commands.insert_resource(LocalSpawnerSlot(welcome.message.slot));
+        commands.insert_resource(LocalSpawnerSlot(SpawnerSlot(welcome.message.slot)));
         commands.insert_resource(bevy_ticked_networking::replication::InterpolationDelay(
             (2 * welcome.message.send_every).max(2),
         ));
@@ -617,7 +619,11 @@ mod tests {
         assert_eq!(slots.assign(11), Some(2));
         assert_eq!(slots.assign(10), Some(1), "asking twice is the same slot");
         slots.free(10);
-        assert_eq!(slots.assign(12), Some(1), "a freed slot is reused before a new one");
+        assert_eq!(
+            slots.assign(12),
+            Some(1),
+            "a freed slot is reused before a new one"
+        );
         assert_eq!(slots.slot_of(11), Some(2));
         assert_eq!(slots.slot_of(10), None);
     }

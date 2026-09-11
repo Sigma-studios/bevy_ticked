@@ -15,7 +15,7 @@ use bevy::prelude::*;
 use bevy_ticked::prelude::TickedAppExt;
 use bevy_ticked::registry::TickedComponentRegistry;
 use bevy_ticked::tick::CurrentTick;
-use bevy_ticked::tracked_entity::{TickTrackedEntity, TickTrackedEntityCounter};
+use bevy_ticked::tracked_entity::{TickTrackedEntity, TrackedIdAllocator};
 use bevy_ticked_networking::prelude::*;
 use bevy_ticked_networking::snapshot::{apply_full_body, build_full_body};
 use serde::{Deserialize, Serialize};
@@ -39,7 +39,7 @@ fn peer() -> App {
     app.add_plugins(MinimalPlugins)
         .init_resource::<TickedComponentRegistry>()
         .init_resource::<CurrentTick>()
-        .init_resource::<TickTrackedEntityCounter>()
+        .init_resource::<TrackedIdAllocator>()
         .register_networked_ticked_component::<Pos>("Pos")
         .register_networked_ticked_component::<Ride>("Ride")
         .register_ticked_component::<LocalOnly>();

@@ -293,11 +293,11 @@ impl TickedNetwork {
             self.net.step_with(|peer, app| {
                 let updates = match cadence.iter().find(|(who, _, _)| *who == peer) {
                     // `every` frames, this peer runs once.
-                    Some((_, every, 1)) => u32::from(frame % u64::from(*every) == 0),
+                    Some((_, every, 1)) => u32::from(frame.is_multiple_of(u64::from(*every))),
                     // Every frame, this peer runs `times` times.
                     Some((_, 1, times)) => *times,
                     Some((_, every, times)) => {
-                        if frame % u64::from(*every) == 0 { *times } else { 0 }
+                        if frame.is_multiple_of(u64::from(*every)) { *times } else { 0 }
                     }
                     None => 1,
                 };

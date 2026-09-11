@@ -21,7 +21,7 @@ use bevy_ensemble::{
 use bevy_ensemble_webrtc::{BevyEnsembleWebrtcPlugin, JoinWebrtcLobby, RefreshLobbyList};
 use bevy_ticked::prelude::*;
 use bevy_ticked_networking::prelude::*;
-use bevy_ticked_networking_ensemble::TickedNetworkingEnsemblePlugin;
+use bevy_ticked_networking_ensemble::{SpawnerSlots, TickedEnsembleSessionPlugin, TickedNetworkingEnsemblePlugin};
 use serde::{Deserialize, Serialize};
 
 // --- Constants ---
@@ -90,6 +90,12 @@ struct SpawnPoint(Vec3);
 #[derive(Component, PartialEq, Clone, Debug, Serialize, Deserialize, Default)]
 struct ShootCooldown(u64);
 
+/// The slot the player's peer mints ids under. On the body, networked, so every peer spawns
+/// this player's bullets under the same ids: the shooter predicts the bullet, the host mints
+/// the same id from the relayed input and confirms it.
+#[derive(Component, PartialEq, Clone, Copy, Debug, Serialize, Deserialize)]
+struct PlayerSlot(u8);
+
 // --- Local-only marker components ---
 
 #[derive(Component)]
@@ -146,6 +152,9 @@ fn main() {
         .add_plugins(TickedServerPlugin::<PlayerInput>::new())
         .add_plugins(TickedClientPlugin::<PlayerInput>::new())
         .add_plugins(TickedNetworkingEnsemblePlugin::<PlayerInput>::new())
+        // The session plugin adopts the roles, runs the registry handshake and hands each
+        // client a spawner slot; the example used to do the first by hand and the rest not at all.
+        .add_plugins(TickedEnsembleSessionPlugin::default())
         // The renderer blends each body between its last two tick states, and a correction
         // to a predicted body slides into place instead of blinking there. Neither touches
         // what the simulation reads.
@@ -162,6 +171,7 @@ fn main() {
         .register_networked_ticked_component::<EntityKind>("EntityKind")
         .register_networked_ticked_component::<SpawnPoint>("SpawnPoint")
         .register_networked_ticked_component::<ShootCooldown>("ShootCooldown")
+        .register_networked_ticked_component::<PlayerSlot>("PlayerSlot")
         // elan's persistent jump timers: rolling these back keeps the local
         // player's predicted jump from mispredicting and snapping on correction.
         .register_networked_ticked_component::<LastGrounded>("elan::LastGrounded")
@@ -177,7 +187,6 @@ fn main() {
                 lobby_refresh_key,
                 lobby_escape_key,
                 cleanup_on_lobby_gone,
-                on_lobby_ready,
                 server_spawn_players,
                 capture_local_input,
                 attach_local_camera,
@@ -196,7 +205,10 @@ fn main() {
                 .chain()
                 .before(ControllerSet),
         )
-        .configure_sets(TickedSimulation, ControllerSet.before(PhysicsSystems::Prepare))
+        .configure_sets(
+            TickedSimulation,
+            ControllerSet.before(PhysicsSystems::Prepare),
+        )
         .add_systems(
             TickedSimulation,
             (move_bullets, bullet_collision, sync_bullet_transforms)
@@ -244,7 +256,11 @@ fn setup(
             MeshMaterial3d(pillar_mat.clone()),
             Transform::from_xyz(p.x, PILLAR_HALF.y, p.y),
             RigidBody::Static,
-            Collider::cuboid(PILLAR_HALF.x * 2.0, PILLAR_HALF.y * 2.0, PILLAR_HALF.z * 2.0),
+            Collider::cuboid(
+                PILLAR_HALF.x * 2.0,
+                PILLAR_HALF.y * 2.0,
+                PILLAR_HALF.z * 2.0,
+            ),
         ));
     }
 
@@ -366,25 +382,6 @@ fn cleanup_on_lobby_gone(
     commands.remove_resource::<LocalClientPlayer>();
 }
 
-fn on_lobby_ready(
-    mut commands: Commands,
-    local_player: Option<Res<LocalMultiplayerPlayerId>>,
-    server_player: Option<Res<LocalServerPlayer>>,
-    client_player: Option<Res<LocalClientPlayer>>,
-    host_lobbies: Query<(), (With<Lobby>, With<Host>)>,
-    client_lobbies: Query<(), (With<Lobby>, Without<Host>)>,
-) {
-    let Some(local_player) = local_player else {
-        return;
-    };
-
-    if !host_lobbies.is_empty() && server_player.is_none() {
-        commands.insert_resource(LocalServerPlayer(local_player.0));
-    }
-    if !client_lobbies.is_empty() && client_player.is_none() {
-        commands.insert_resource(LocalClientPlayer(local_player.0));
-    }
-}
 
 // --- Server: spawn player entities when participants join ---
 
@@ -396,7 +393,9 @@ fn server_spawn_players(
         Without<PlayerOwnedEntities>,
     >,
     existing_players: Query<(), (With<EntityKind>, With<PlayerOwned>)>,
-    mut counter: ResMut<TickTrackedEntityCounter>,
+    mut counter: ResMut<TrackedIdAllocator>,
+    slots: Option<Res<SpawnerSlots>>,
+    local_player: Option<Res<LocalMultiplayerPlayerId>>,
 ) {
     let Some(lobby_entity) = host_lobbies.iter().next() else {
         return;
@@ -408,6 +407,16 @@ fn server_spawn_players(
         if participant_of.0 != lobby_entity {
             continue;
         }
+        // A body carries its player's spawner slot, so it waits for the slot: the host's own
+        // is 0, a client's arrives with the registry handshake.
+        let slot = if local_player.as_ref().is_some_and(|me| me.0 == participant.player_uuid) {
+            0
+        } else {
+            match slots.as_ref().and_then(|slots| slots.slot_of(participant.player_uuid)) {
+                Some(slot) => slot,
+                None => continue,
+            }
+        };
 
         // Spread players around a ring; they drop onto the floor and hover.
         let angle = player_index as f32 * std::f32::consts::TAU / 6.0;
@@ -418,7 +427,7 @@ fn server_spawn_players(
         );
         // Face roughly toward the arena centre.
         let yaw = angle + std::f32::consts::PI;
-        let tracked_id = counter.next();
+        let tracked_id = counter.next_authority();
 
         commands.spawn((
             tracked_id,
@@ -429,6 +438,7 @@ fn server_spawn_players(
             SpawnPoint(spawn_pos),
             ShootCooldown::default(),
             Owner(participant.player_uuid),
+            PlayerSlot(slot),
             PlayerOwned(participant_entity),
         ));
 
@@ -461,7 +471,8 @@ fn capture_local_input(
     // so replaying the same input is deterministic.
     let delta: Vec2 = motion.read().map(|m| m.delta).sum();
     local_look.yaw -= delta.x * MOUSE_SENSITIVITY;
-    local_look.pitch = (local_look.pitch - delta.y * MOUSE_SENSITIVITY).clamp(-MAX_PITCH, MAX_PITCH);
+    local_look.pitch =
+        (local_look.pitch - delta.y * MOUSE_SENSITIVITY).clamp(-MAX_PITCH, MAX_PITCH);
 
     // Movement: x = strafe (right positive), y = forward (forward positive).
     let mut move_dir = Vec2::ZERO;
@@ -562,7 +573,6 @@ fn move_bullets(world: &mut World) {
     // player's input, a client only its own), so a host bullet's id would
     // collide with a client's predicted bullet and never replicate. Clients
     // still ADVANCE existing bullets below for smooth motion between snapshots.
-    let is_host = world.get_resource::<LocalServerPlayer>().is_some();
 
     // Collect this tick's shooting requests.
     let mut shoot_requests: Vec<u128> = Vec::new();
@@ -598,42 +608,39 @@ fn move_bullets(world: &mut World) {
         }
     }
     for entity in bullets_to_despawn {
-        world.despawn(entity);
+        world.entity_mut(entity).despawn_ticked();
     }
 
-    // Gather player state for spawning bullets.
-    let mut players: Vec<(u128, Vec3, Aim, u64)> = Vec::new();
+    // Gather player state for spawning bullets. Every peer spawns, under the shooter's slot,
+    // in uuid order, so every peer mints the same ids.
+    let mut players: Vec<(u128, Vec3, Aim, u64, u8)> = Vec::new();
     {
-        let mut query = world.query::<(&Owner, &Position, &Aim, &ShootCooldown, &EntityKind)>();
-        for (uuid, pos, aim, cooldown, kind) in query.iter(world) {
+        let mut query =
+            world.query::<(&Owner, &Position, &Aim, &ShootCooldown, &PlayerSlot, &EntityKind)>();
+        for (uuid, pos, aim, cooldown, slot, kind) in query.iter(world) {
             if *kind == EntityKind::Player {
-                players.push((uuid.0, pos.0, *aim, cooldown.0));
+                players.push((uuid.0, pos.0, *aim, cooldown.0, slot.0));
             }
         }
     }
+    shoot_requests.sort_unstable();
 
-    let mut spawns: Vec<(u128, TickTrackedEntity, Vec3, Aim)> = Vec::new();
-    if is_host {
-        let mut counter = world.resource_mut::<TickTrackedEntityCounter>();
-        for uuid in &shoot_requests {
-            if let Some((_, pos, aim, cooldown)) = players.iter().find(|(u, ..)| u == uuid) {
-                if *cooldown > 0 {
-                    continue;
-                }
-                let muzzle = *pos + Vec3::Y * EYE_HEIGHT + aim.forward() * (PLAYER_HIT_RADIUS + 0.2);
-                spawns.push((*uuid, counter.next(), muzzle, *aim));
+    let mut spawns: Vec<(u128, u8, Vec3, Aim)> = Vec::new();
+    for uuid in &shoot_requests {
+        if let Some((_, pos, aim, cooldown, slot)) = players.iter().find(|(u, ..)| u == uuid) {
+            if *cooldown > 0 {
+                continue;
             }
+            let muzzle = *pos + Vec3::Y * EYE_HEIGHT + aim.forward() * (PLAYER_HIT_RADIUS + 0.2);
+            spawns.push((*uuid, *slot, muzzle, *aim));
         }
     }
 
-    for (owner_uuid, tracked_id, bullet_pos, aim) in spawns {
-        world.spawn((
-            tracked_id,
-            EntityKind::Bullet,
-            Position(bullet_pos),
-            aim,
-            Owner(owner_uuid),
-        ));
+    for (owner_uuid, slot, bullet_pos, aim) in spawns {
+        world.spawn_tracked_by(
+            SpawnerSlot(slot),
+            (EntityKind::Bullet, Position(bullet_pos), aim, Owner(owner_uuid)),
+        );
 
         // Reset the shooter's cooldown.
         let mut query = world.query::<(&Owner, &mut ShootCooldown, &EntityKind)>();
@@ -702,7 +709,7 @@ fn bullet_collision(world: &mut World) {
     }
 
     for entity in bullets_to_despawn {
-        world.despawn(entity);
+        world.entity_mut(entity).despawn_ticked();
     }
 
     for (entity, spawn_pos) in players_to_respawn {
@@ -842,7 +849,10 @@ fn sync_bullet_transforms(
 /// Pitch the local first-person camera from the locally-accumulated look. Yaw
 /// comes from the parent body (avian `Rotation`), so the camera child only needs
 /// the view pitch. Done per-frame for a smooth view, independent of tick rate.
-fn sync_camera_pitch(local_look: Res<LocalLook>, mut cameras: Query<&mut Transform, With<FpsCamera>>) {
+fn sync_camera_pitch(
+    local_look: Res<LocalLook>,
+    mut cameras: Query<&mut Transform, With<FpsCamera>>,
+) {
     for mut transform in cameras.iter_mut() {
         transform.rotation = Quat::from_rotation_x(local_look.pitch);
     }
@@ -872,7 +882,10 @@ fn attach_local_camera(
                 .entity(entity)
                 .insert(CameraAttached)
                 .with_children(|parent| {
-                    parent.spawn((FpsCamera::new(0.1), Transform::from_xyz(0.0, EYE_HEIGHT, 0.0)));
+                    parent.spawn((
+                        FpsCamera::new(0.1),
+                        Transform::from_xyz(0.0, EYE_HEIGHT, 0.0),
+                    ));
                 });
         }
     }
