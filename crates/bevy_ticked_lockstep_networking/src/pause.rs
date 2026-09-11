@@ -4,14 +4,18 @@ use crate::{
 };
 use bevy::prelude::*;
 use bevy_ensemble::{Host, Lobby, LobbyParticipant, LobbyParticipantOf};
-use bevy_ticked::tick::{CurrentTick, TicksPaused};
+use bevy_ticked::tick::{CurrentTick, TickHoldReason, TickHolds};
 
 /// Exclusive system that runs in `FixedUpdate::PreTick` every iteration.
 ///
-/// Because it directly inserts/removes `TicksPaused` on the world (not via
+/// Because it holds and releases `WaitingForPeers` on the world directly (not via
 /// deferred commands), `advance_tick_system` in the subsequent `Tick` phase
 /// sees the change immediately. This prevents the client from overshooting
 /// past available authoritative ticks during catch-up bursts.
+///
+/// Only its own reason. A game's pause menu and a joining client's wait are other reasons on
+/// the same [`TickHolds`], and this system neither sets nor lifts them: a lockstep client used
+/// to un-pause the whole world the moment the next authoritative tick arrived.
 pub fn sync_lockstep_pause_state<A: LockstepAction, S: JoinSnapshot>(world: &mut World) {
     let mut lobby_query = world.query_filtered::<(Entity, Option<&Host>), With<Lobby>>();
     let mut host_lobby = None;
@@ -33,7 +37,9 @@ pub fn sync_lockstep_pause_state<A: LockstepAction, S: JoinSnapshot>(world: &mut
     if client_lobby.is_some() {
         let snapshot_ready = world.resource::<ClientSnapshotState<S>>().ready;
         if !snapshot_ready {
-            world.insert_resource(TicksPaused);
+            world
+                .resource_mut::<TickHolds>()
+                .hold(TickHoldReason::WaitingForPeers);
             return;
         }
     }
@@ -92,9 +98,7 @@ pub fn sync_lockstep_pause_state<A: LockstepAction, S: JoinSnapshot>(world: &mut
         !has_any_participant || !tracker.ticks.contains_key(&next_tick)
     };
 
-    if should_pause {
-        world.insert_resource(TicksPaused);
-    } else {
-        world.remove_resource::<TicksPaused>();
-    }
+    world
+        .resource_mut::<TickHolds>()
+        .set(TickHoldReason::WaitingForPeers, should_pause);
 }

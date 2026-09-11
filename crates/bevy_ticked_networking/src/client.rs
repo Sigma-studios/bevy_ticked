@@ -7,7 +7,7 @@ use bevy_ticked::{
     events::TickedEventRegistry,
     registry::TickedComponentRegistry,
     resource_registry::TickedResourceRegistry,
-    tick::{CurrentTick, HistoryBufferTicks, TicksPaused},
+    tick::{CurrentTick, HistoryBufferTicks, TickHoldReason, TickHolds},
     time::{run_tick_schedule, TickRateDilation},
     tracked_entity::{TickTrackedEntity, TickTrackedEntityCounter},
 };
@@ -300,7 +300,11 @@ fn reset_on_join<T: TickedInput>(world: &mut World) {
     }
 
     world.insert_resource(CurrentTick(0));
-    world.insert_resource(TicksPaused);
+    // Held until the host's world arrives; released by the first snapshot. A game's own pause
+    // is a different reason and is neither set nor lifted here.
+    world
+        .resource_mut::<TickHolds>()
+        .hold(TickHoldReason::AwaitingSync);
     world.insert_resource(TickTrackedEntityCounter::default());
     world.insert_resource(AppliedSnapshotTick::default());
     world.resource_mut::<InputQueue<T>>().inputs.clear();
@@ -353,7 +357,10 @@ fn handle_server_snapshot(world: &mut World) {
         return;
     }
 
-    let was_paused = world.get_resource::<TicksPaused>().is_some();
+    // "This is the initial sync": the client is still waiting for the world it joined.
+    let was_paused = world
+        .resource::<TickHolds>()
+        .holds(TickHoldReason::AwaitingSync);
     let current_tick = world.resource::<CurrentTick>().0;
     let snapshot_tick = snapshot.tick;
 
@@ -453,7 +460,9 @@ fn handle_server_snapshot(world: &mut World) {
             stats.rollbacks += 1;
             stats.ticks_replayed += target;
         }
-        world.remove_resource::<TicksPaused>();
+        world
+            .resource_mut::<TickHolds>()
+            .release(TickHoldReason::AwaitingSync);
         // The lead was just set outright, so there is no error left for the rate
         // trim to work on. Leaving a stale value here is not harmless: a client
         // that was shedding lead at 0.98 when it fell behind would keep running
@@ -469,7 +478,9 @@ fn handle_server_snapshot(world: &mut World) {
     // replaying while paused is not a thing to start doing if it ever is.
     if was_paused {
         registry.capture_all(world, snapshot_tick);
-        world.remove_resource::<TicksPaused>();
+        world
+            .resource_mut::<TickHolds>()
+            .release(TickHoldReason::AwaitingSync);
         return;
     }
 
@@ -627,12 +638,12 @@ const INPUT_REDUNDANCY: u64 = 3;
 /// PostTick: send the local player's recent inputs to the server.
 fn send_local_input<T: TickedInput>(
     tick: Res<CurrentTick>,
-    ticks_paused: Option<Res<TicksPaused>>,
+    holds: Res<TickHolds>,
     local_player: Option<Res<LocalClientPlayer>>,
     queue: Res<InputQueue<T>>,
     mut commands: Commands,
 ) {
-    if ticks_paused.is_some() {
+    if holds.is_held() {
         return;
     }
     let Some(local_player) = local_player else {

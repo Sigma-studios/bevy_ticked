@@ -12,7 +12,7 @@ use bevy::prelude::*;
 use bevy_ticked::{
     registry::TickedComponentRegistry,
     resource_registry::TickedResourceRegistry,
-    tick::{CurrentTick, TicksPaused},
+    tick::{CurrentTick, TickHoldReason, TickHolds},
     tracked_entity::{TickTrackedEntity, TickTrackedEntityCounter},
 };
 
@@ -38,7 +38,7 @@ use crate::input::{InputQueue, TickedInput};
 /// queue, clear the history, zero the tick, and un-pause.
 ///
 /// The un-pause is the one that is not symmetric with anything, and it is the one that bites:
-/// `reset_on_join` *sets* `TicksPaused` and leaves the client waiting for a first snapshot. A peer
+/// `reset_on_join` holds `AwaitingSync` and leaves the client waiting for a first snapshot. A peer
 /// that leaves before that snapshot arrives — a refused join, a host that quits during the
 /// handshake — would otherwise sit paused for ever, waiting on a session it is no longer in, in a
 /// world whose clock has stopped for no reason it can see.
@@ -64,9 +64,13 @@ pub fn reset_on_leave<T: TickedInput>(world: &mut World) {
         resources.reset_all(world);
     }
 
-    // A peer that leaves mid-sync would otherwise stay paused for ever, waiting for a snapshot
-    // from a session it is no longer in.
-    world.remove_resource::<TicksPaused>();
+    // A peer that leaves mid-sync would otherwise stay held for ever, waiting for a snapshot
+    // from a session it is no longer in. Only the session's own reasons: a game's pause menu
+    // is still open.
+    let mut holds = world.resource_mut::<TickHolds>();
+    holds.release(TickHoldReason::AwaitingSync);
+    holds.release(TickHoldReason::SoftHold);
+    holds.release(TickHoldReason::SessionPause);
 
     // The clock restarts at zero, so anything remembering *which tick* it last saw from a peer
     // has to forget it too — otherwise the next session's first inputs all read as older than

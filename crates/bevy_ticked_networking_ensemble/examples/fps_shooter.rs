@@ -834,7 +834,7 @@ fn manage_cameras(
 
 fn update_ui(
     tick: Res<CurrentTick>,
-    ticks_paused: Option<Res<TicksPaused>>,
+    holds: Res<TickHolds>,
     host_lobbies: Query<(), (With<Lobby>, With<Host>)>,
     client_lobbies: Query<(), (With<Lobby>, Without<Host>)>,
     pending_lobbies: Query<(), With<PendingLobby>>,
@@ -885,7 +885,7 @@ fn update_ui(
         }
     }
 
-    let status = if ticks_paused.is_some() { "PAUSED" } else { "PLAYING" };
+    let status = if holds.is_held() { "PAUSED" } else { "PLAYING" };
     **text = format!(
         "[{}] Tick: {} [{}] | Players: {} | WASD: Move | Mouse: Look | Space: Jump | LMB: Shoot | Esc: Leave",
         role, tick.0, status, player_count
