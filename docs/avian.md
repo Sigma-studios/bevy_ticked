@@ -10,7 +10,7 @@ replays bit-identically from any tick in its history.
 | Setting | Value | Why |
 |---|---|---|
 | `Position`, `Rotation`, `LinearVelocity`, `AngularVelocity` | networked, names `avian::*` | The body's state on the wire, under names both peers share. |
-| `SolverConfig::warm_start_coefficient` | as the game set it (avian's default) | Warm starting seeds the solver with the previous step's impulses, and those are in the rolled-back `ContactGraph`, so a replay seeds from the same ones. Zeroing it held a body driven into a wall in place for seconds; `zero_warm_starting()` opts back in. |
+| `SolverConfig` | untouched | Warm starting seeds the solver with the previous step's impulses, and those are in the rolled-back `ContactGraph`, so a replay seeds from the same ones. The bundle used to zero it, which held a body driven into a wall in place for seconds. |
 | Sleeping | off (`SleepingDisabled` required on every `RigidBody`, `TimeToSleep` infinite) | The sleep state is not restored by a rollback; a body asleep here and awake there diverges at the first replayed tick. |
 | `PhysicsTransformConfig::transform_to_position` | `false` | avian would adopt a blended or camera-moved `Transform` as the body's place. A body spawned with a `Transform` is placed once, when its `RigidBody` is added. |
 | `ContactGraph`, `ConstraintGraph`, `PhysicsIslands`, `JointGraph` | rollback-only ticked resources, kept on leave | The solver reads last step's manifolds and the constraint colouring before it reads any body. Without them the replay diverged in every body at its first tick. |
@@ -18,7 +18,7 @@ replays bit-identically from any tick in its history.
 | `TickedSimulationSet::{Input, BeforePhysics, Physics, AfterPhysics}` | chained; avian's sets inside `Physics` | Where a game's systems go. |
 
 Opt-outs, each for a solo game that never rolls back: `allow_sleeping()`,
-`positions_from_transforms()`; `zero_warm_starting()` for a game with its own reason. `physics_added_by_the_game()` when
+`positions_from_transforms()`. `physics_added_by_the_game()` when
 `PhysicsPlugins` carry a length unit or collision hooks.
 
 ## What the tests found
