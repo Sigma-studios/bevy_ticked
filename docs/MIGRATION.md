@@ -45,8 +45,8 @@ it did cost was found in bevy_kart: a kart driven into a wall under a constant f
 there, and two seconds of reverse moved it nothing at all, where the same build with warm
 starting pulled away at once. Stacked contacts never accumulated the impulse to separate.
 
-**After** warm starting is left as the game set it (avian's default). `keep_warm_starting()`
-still compiles and is the default; `zero_warm_starting()` is the new opt-in. **Delete** a
+**After** the plugin does not touch `SolverConfig`; `keep_warm_starting()` is gone with the
+field, and a game that wants another solver setting writes the resource itself. **Delete** a
 `.keep_warm_starting()` a game added to work around it. **Watch** a golden trace recorded
 under the bundle: the solver's numbers change, re-record with `UPDATE_GOLDEN=1`.
 
