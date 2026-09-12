@@ -14,8 +14,8 @@
 //! boxes replays bit-identically either way (`tests/determinism.rs`). It used to be zeroed,
 //! and a body driven into a wall under a constant force was then held there for seconds --
 //! the solver never accumulated the impulse to separate stacked contacts, and reversing did
-//! nothing (measured in bevy_kart: two seconds of reverse at exactly zero speed).
-//! `zero_warm_starting()` if a game has its own reason.
+//! nothing (measured in bevy_kart: two seconds of reverse at exactly zero speed). The plugin
+//! does not touch `SolverConfig` at all; a game that wants another solver setting writes it.
 //!
 //! **Sleeping** takes a body out of the solver once it has rested long enough. The sleep state
 //! is not a registered component, so a rollback restores a body's position and velocity but
@@ -87,7 +87,6 @@ pub enum TickedSimulationSet {
 macro_rules! ticked_avian {
     ($avian:ident, $place_from:item) => {
     use $avian::collision::contact_types::ContactGraph;
-    use $avian::dynamics::solver::SolverConfig;
     use $avian::dynamics::solver::constraint_graph::ConstraintGraph;
     use $avian::dynamics::solver::islands::{BodyIslandNode, PhysicsIslands};
     use $avian::dynamics::solver::joint_graph::JointGraph;
@@ -110,9 +109,6 @@ macro_rules! ticked_avian {
     /// avian on the tick, replay-safe by default. See the crate docs.
     #[derive(Clone, Copy, Debug)]
     pub struct TickedAvianPlugin {
-        /// Set `SolverConfig::warm_start_coefficient` to zero. Off by default: the contact
-        /// graph is rolled back, impulses included, so warm starting replays cleanly.
-        pub zero_warm_starting: bool,
         /// Let bodies sleep. A rollback cannot wake them; solo games only.
         pub allow_sleeping: bool,
         /// Do not add `PhysicsPlugins` even if none are present.
@@ -124,7 +120,6 @@ macro_rules! ticked_avian {
     impl Default for TickedAvianPlugin {
         fn default() -> Self {
             Self {
-                zero_warm_starting: false,
                 allow_sleeping: false,
                 physics_added_by_the_game: false,
                 positions_from_transforms: false,
@@ -133,20 +128,6 @@ macro_rules! ticked_avian {
     }
 
     impl TickedAvianPlugin {
-        /// Zero `SolverConfig::warm_start_coefficient` every run. Not needed for a replay to
-        /// agree, and a body pressed into a wall is then held there; see the crate docs.
-        pub fn zero_warm_starting(mut self) -> Self {
-            self.zero_warm_starting = true;
-            self
-        }
-
-        /// The default since warm starting was found replay-safe; kept so a game that opted
-        /// in keeps compiling.
-        pub fn keep_warm_starting(mut self) -> Self {
-            self.zero_warm_starting = false;
-            self
-        }
-
         pub fn allow_sleeping(mut self) -> Self {
             self.allow_sleeping = true;
             self
@@ -234,14 +215,8 @@ macro_rules! ticked_avian {
                  `PhysicsPlugins::new(TickedSimulation)` before this plugin, or drop \
                  `.physics_added_by_the_game()`"
             );
-            let world = app.world_mut();
-            if self.zero_warm_starting {
-                world
-                    .get_resource_or_insert_with(SolverConfig::default)
-                    .warm_start_coefficient = 0.0;
-            }
             if !self.allow_sleeping {
-                world.insert_resource(TimeToSleep(f32::INFINITY));
+                app.world_mut().insert_resource(TimeToSleep(f32::INFINITY));
             }
         }
     }
