@@ -62,7 +62,7 @@ losing any local-only state on it.
 
 avian keeps state between steps that no body component holds — the contact manifolds, the
 constraint colouring, the islands. `TickedAvianPlugin` (`bevy_ticked_avian`, T14) rolls it
-back with the bodies, zeroes warm starting, disables sleeping and turns the `Transform` →
+back with the bodies, disables sleeping and turns the `Transform` →
 `Position` sync off; `docs/avian.md` has the table and what each setting was found to cost.
 
 ## Catching a plain `despawn` (clippy)

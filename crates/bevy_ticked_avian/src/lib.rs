@@ -2,16 +2,20 @@
 //!
 //! Every game that put avian on the tick wrote the same five lines and forgot one of them:
 //! register the four body components under stable names, run physics inside
-//! `TickedSimulation`, turn warm starting off, keep bodies from sleeping, and order the game's
-//! systems around the physics step. [`TickedAvianPlugin`] is those five lines, with the two
-//! that matter for determinism on by default and an opt-out each.
+//! `TickedSimulation`, roll the solver's own state back, keep bodies from sleeping, and order
+//! the game's systems around the physics step. [`TickedAvianPlugin`] is those five lines, with
+//! the ones that matter for determinism on by default and an opt-out each.
 //!
 //! # Why each setting
 //!
-//! **Warm starting** seeds the solver with the previous step's contact impulses. A replayed
-//! tick has a different previous step (the one the rollback restored), so with warm starting
-//! the same inputs from the same state produce a different stack of boxes. Zeroed by default;
-//! `keep_warm_starting()` if the extra stability is worth a correction now and then.
+//! **Warm starting** seeds the solver with the previous step's contact impulses. Those impulses
+//! live in the contact graph, which this plugin rolls back with the bodies, so a replayed tick
+//! seeds from the same impulses the first run did and warm starting is left on: the stack of
+//! boxes replays bit-identically either way (`tests/determinism.rs`). It used to be zeroed,
+//! and a body driven into a wall under a constant force was then held there for seconds --
+//! the solver never accumulated the impulse to separate stacked contacts, and reversing did
+//! nothing (measured in bevy_kart: two seconds of reverse at exactly zero speed).
+//! `zero_warm_starting()` if a game has its own reason.
 //!
 //! **Sleeping** takes a body out of the solver once it has rested long enough. The sleep state
 //! is not a registered component, so a rollback restores a body's position and velocity but
@@ -106,8 +110,9 @@ macro_rules! ticked_avian {
     /// avian on the tick, replay-safe by default. See the crate docs.
     #[derive(Clone, Copy, Debug)]
     pub struct TickedAvianPlugin {
-        /// Leave `SolverConfig::warm_start_coefficient` as the game set it.
-        pub keep_warm_starting: bool,
+        /// Set `SolverConfig::warm_start_coefficient` to zero. Off by default: the contact
+        /// graph is rolled back, impulses included, so warm starting replays cleanly.
+        pub zero_warm_starting: bool,
         /// Let bodies sleep. A rollback cannot wake them; solo games only.
         pub allow_sleeping: bool,
         /// Do not add `PhysicsPlugins` even if none are present.
@@ -119,7 +124,7 @@ macro_rules! ticked_avian {
     impl Default for TickedAvianPlugin {
         fn default() -> Self {
             Self {
-                keep_warm_starting: false,
+                zero_warm_starting: false,
                 allow_sleeping: false,
                 physics_added_by_the_game: false,
                 positions_from_transforms: false,
@@ -128,8 +133,17 @@ macro_rules! ticked_avian {
     }
 
     impl TickedAvianPlugin {
+        /// Zero `SolverConfig::warm_start_coefficient` every run. Not needed for a replay to
+        /// agree, and a body pressed into a wall is then held there; see the crate docs.
+        pub fn zero_warm_starting(mut self) -> Self {
+            self.zero_warm_starting = true;
+            self
+        }
+
+        /// The default since warm starting was found replay-safe; kept so a game that opted
+        /// in keeps compiling.
         pub fn keep_warm_starting(mut self) -> Self {
-            self.keep_warm_starting = true;
+            self.zero_warm_starting = false;
             self
         }
 
@@ -221,7 +235,7 @@ macro_rules! ticked_avian {
                  `.physics_added_by_the_game()`"
             );
             let world = app.world_mut();
-            if !self.keep_warm_starting {
+            if self.zero_warm_starting {
                 world
                     .get_resource_or_insert_with(SolverConfig::default)
                     .warm_start_coefficient = 0.0;
