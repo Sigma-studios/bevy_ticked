@@ -36,8 +36,10 @@ fn sleeping_is_disabled_for_tracked_bodies_or_the_replay_diverges() {
     }
     let slept_at = tick(&app);
     println!("first body asleep at tick {slept_at}");
-    // The replay spans the sleep: from before it, through it, past it.
-    let from = slept_at.saturating_sub(64);
+    // The replay spans the sleep: from before it, through it, past it. Not from tick 0,
+    // which the harness cannot start a replay at: with warm starting the stack settles
+    // early enough that 64 ticks before the first sleep would be.
+    let from = slept_at.saturating_sub(64).max(1);
     // A second app run to the same point, so the check starts at `from`.
     let mut fresh = peer_app(HOST_UUID, avian::install_sleepy);
     spawn_stack(fresh.world_mut(), BOXES);

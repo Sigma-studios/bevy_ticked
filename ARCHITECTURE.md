@@ -59,8 +59,7 @@ copies of the executable as clients and hosts.
 
 ## `bevy_ticked_avian`
 
-`TickedAvianPlugin` per dimension: registrations under `avian::*`, warm starting zeroed,
-sleeping disabled, `Transform` → `Position` sync off (bodies placed once from their spawn
+`TickedAvianPlugin` per dimension: registrations under `avian::*`, sleeping disabled, `Transform` → `Position` sync off (bodies placed once from their spawn
 transform), and avian's persistent solver state — contact graph, constraint graph, islands,
 joint graph — rolled back with the bodies. `docs/avian.md` has what each setting was found to
 cost.

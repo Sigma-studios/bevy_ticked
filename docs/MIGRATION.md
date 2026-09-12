@@ -33,6 +33,23 @@ obeys; `docs/avian.md` the physics bundle.
 | `LockstepConfig::host_tick_buffer` default 4 | 1 | T12 |
 | `TickedPlugin::default()` for a networked game | `TickedPlugin { source: TickSource::Hz(64.0), .. }` | T4 |
 
+## T16 — warm starting is kept
+
+No API or wire change. `TickedAvianPlugin` no longer zeroes `SolverConfig::warm_start_coefficient`.
+
+**Before** the bundle zeroed warm starting on the reasoning that a replayed tick has a
+different previous step to seed from. But the bundle also rolls the contact graph back, and
+the previous step's impulses are in it: the stack of boxes replays bit-identically with warm
+starting on (`crates/bevy_ticked_avian/tests/determinism.rs`, now run that way). What zeroing
+it did cost was found in bevy_kart: a kart driven into a wall under a constant force was held
+there, and two seconds of reverse moved it nothing at all, where the same build with warm
+starting pulled away at once. Stacked contacts never accumulated the impulse to separate.
+
+**After** warm starting is left as the game set it (avian's default). `keep_warm_starting()`
+still compiles and is the default; `zero_warm_starting()` is the new opt-in. **Delete** a
+`.keep_warm_starting()` a game added to work around it. **Watch** a golden trace recorded
+under the bundle: the solver's numbers change, re-record with `UPDATE_GOLDEN=1`.
+
 ## T15 — documentation, `netpeer`, multi-process tests, CI
 
 No API change in this repository. `bevy_ensemble` is pinned at `9f7f245` (E4): the first
@@ -70,7 +87,8 @@ No wire change. Rebuild every peer anyway: `TickedSystems` gained a set.
 `PhysicsPlugins::new(TickedSimulation)`, and either turned warm starting and sleeping off or
 did not know it had to. **After** `TickedAvianPlugin` (one per dimension:
 `bevy_ticked_avian::avian3d::TickedAvianPlugin`, `::avian2d::TickedAvianPlugin`) does the
-registrations under `avian::*`, zeroes warm starting, disables sleeping, turns avian's
+registrations under `avian::*`, keeps warm starting (T16; it zeroed it at first), disables
+sleeping, turns avian's
 `Transform` → `Position` sync off (placing a body spawned with a `Transform` once), and
 rolls back the solver's own state — `ContactGraph`, `ConstraintGraph`, `PhysicsIslands`,
 `JointGraph`, `BodyIslandNode` — which a replay read before it read any body and which
