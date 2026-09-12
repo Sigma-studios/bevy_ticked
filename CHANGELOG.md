@@ -6,7 +6,7 @@ pull requests #1–#14 on this repository are the phases.
 ## Unreleased
 
 - **T16** — `bevy_ticked_avian` keeps warm starting: the rolled-back contact graph carries its
-  impulses, and zeroing it held a kart driven into a wall in place. `zero_warm_starting()` opts in.
+  impulses, and zeroing it held a kart driven into a wall in place. The knob is gone.
 - **T15** — documentation consolidation, `netpeer` examples, multi-process WebRTC tests,
   `scripts/netpeers.sh`, CI.
 - **T14** — `bevy_ticked_avian` (replay-safe avian: registrations, warm start off, sleeping
