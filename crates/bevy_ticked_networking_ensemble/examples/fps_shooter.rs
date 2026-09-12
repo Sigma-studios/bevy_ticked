@@ -145,7 +145,7 @@ fn main() {
             ..default()
         })
         // avian on the tick, replay-safe: the four body components registered under
-        // `avian::*`, warm starting off, sleeping off, the contact graph rolled back, bodies
+        // `avian::*`, sleeping off, the contact graph rolled back, bodies
         // placed by `Position` (the plugin places a body spawned with a `Transform` once).
         .add_plugins(PhysicsPlugins::new(TickedSimulation))
         .add_plugins(TickedAvianPlugin::default())
