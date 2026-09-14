@@ -5,6 +5,10 @@ pull requests #1–#14 on this repository are the phases.
 
 ## Unreleased
 
+- **Fix** — `run_tick_schedule` times the tick with `bevy::platform`'s clock rather than
+  `std`'s. `std::time::Instant::now()` is a panicking stub on `wasm32-unknown-unknown`, and
+  every tick goes through this function, so a web build died on its first one. The crate now
+  asks `bevy` for `web` itself instead of inheriting it from whatever the consumer enabled.
 - **T16** — `bevy_ticked_avian` keeps warm starting: the rolled-back contact graph carries its
   impulses, and zeroing it held a kart driven into a wall in place. The knob is gone.
 - **T15** — documentation consolidation, `netpeer` examples, multi-process WebRTC tests,
