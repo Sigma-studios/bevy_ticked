@@ -232,7 +232,12 @@ pub fn run_tick_schedule(world: &mut World, tick: u64, schedule: impl ScheduleLa
     *world.resource_mut::<Time>() = clock.as_generic();
     let frame_clocks = swap_frame_clocks(world, &clock);
 
-    let started = std::time::Instant::now();
+    // `bevy::platform`'s clock, not `std`'s: on `wasm32-unknown-unknown` there is no system
+    // clock behind `std::time::Instant::now()`, and it is a stub that panics with "time not
+    // implemented on this platform". Every tick goes through here, so a `std` clock takes the
+    // first tick of every web build down with it. The platform clock is `web_time` on wasm,
+    // which reads `performance.now()`, and `std` everywhere else.
+    let started = bevy::platform::time::Instant::now();
     world.run_schedule(schedule);
     let elapsed = started.elapsed();
 

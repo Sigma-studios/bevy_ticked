@@ -23,7 +23,15 @@ bevy_ensemble_steam = { git = "https://github.com/Sigma-studios/bevy_ensemble", 
 bevy_ensemble_loopback = { git = "https://github.com/Sigma-studios/bevy_ensemble", rev = "9f7f245" }
 
 [dependencies]
-bevy = { version = "0.19", default-features = false, features = ["std", "bevy_log"] }
+# `web` is what points `bevy::platform`'s `Instant` at `web_time` on wasm; without it that
+# clock falls back to `std`, whose wasm implementation panics. It costs nothing off wasm —
+# both the dependency and the `cfg` behind it are `target_arch = "wasm32"` only — and
+# relying on a consumer to enable it means the crate builds a broken web binary on its own.
+bevy = { version = "0.19", default-features = false, features = [
+    "std",
+    "bevy_log",
+    "web",
+] }
 serde = { version = "1", features = ["derive"] }
 log = { version = "0.4", features = [
     "max_level_debug",
