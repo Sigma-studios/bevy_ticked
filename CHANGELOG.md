@@ -5,6 +5,13 @@ pull requests #1–#14 on this repository are the phases.
 
 ## Unreleased
 
+- **Fix** — `bevy_ticked_avian` leaves avian's islands out when sleeping is off. Islands exist
+  to sleep bodies, and under rollback their bookkeeping panicked: avian attaches a body's
+  `BodyIslandNode` through deferred observers, the history restored the historic one directly,
+  and a body left without a node died on its next contact with `Neither body A nor B is in an
+  island` (run-2d, every few rounds). The bundle now adds `PhysicsPlugins` without
+  `IslandPlugin` and `IslandSleepingPlugin`, registers `PhysicsIslands` and `BodyIslandNode`
+  only under `allow_sleeping()`, and refuses at `finish` a game that added the islands itself.
 - **Fix** — `run_tick_schedule` times the tick with `bevy::platform`'s clock rather than
   `std`'s. `std::time::Instant::now()` is a panicking stub on `wasm32-unknown-unknown`, and
   every tick goes through this function, so a web build died on its first one. The crate now

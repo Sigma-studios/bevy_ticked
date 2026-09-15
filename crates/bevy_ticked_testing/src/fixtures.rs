@@ -486,7 +486,8 @@ pub mod avian {
         install_with(app, TickedAvianPlugin::default().allow_sleeping());
     }
 
-    fn install_with(app: &mut App, plugin: TickedAvianPlugin) {
+    /// The bundle with the plugin as given: for a test that configures it itself.
+    pub fn install_with(app: &mut App, plugin: TickedAvianPlugin) {
         app.add_plugins((AssetPlugin::default(), bevy::scene::ScenePlugin))
             .init_asset::<Mesh>()
             .add_plugins(plugin)
