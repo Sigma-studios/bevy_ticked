@@ -24,6 +24,18 @@
 //! `SleepingDisabled`, and `TimeToSleep` is infinite); `allow_sleeping()` for a solo game that
 //! never rolls back.
 //!
+//! **Islands** go with sleeping. avian groups touching bodies into islands so it can put a
+//! whole resting group to sleep at once, and with sleeping off that is all the bookkeeping is
+//! for. Under rollback it was also wrong: avian attaches a body's `BodyIslandNode` through
+//! deferred observers (on spawn, and again when a tombstone is revived), the history restores
+//! the historic one directly, and a body that came out of that dance without a node panicked the
+//! next time it touched anything — `Neither body A nor B is in an island`, in `merge_islands`,
+//! seen in run-2d every few rounds. So with sleeping off the plugin leaves avian's `IslandPlugin`
+//! and `IslandSleepingPlugin` out: there is no `PhysicsIslands` resource, the narrow phase skips
+//! the merge, and nothing is rolled back that avian is not also maintaining. A game that adds
+//! `PhysicsPlugins` itself has to leave them out the same way (`.build().disable::<IslandPlugin>()
+//! .disable::<IslandSleepingPlugin>()`), and `finish` refuses to start if it did not.
+//!
 //! **Transform → Position** is off. avian copies a changed `Transform` into `Position` before
 //! each step; the renderer's blended transform, or one the game moved for a camera, would be
 //! adopted by the simulation as the body's place (the audit's probe: 75 units in 99 ticks at
@@ -40,10 +52,11 @@
 //! (`tests/determinism.rs` found it; no per-body component was enough). The plugin
 //! registers `ContactGraph` as a rollback-only ticked resource, and with it the state that
 //! must agree with it: `ConstraintGraph` (which contacts are constraints, in which colour —
-//! the solve order), `PhysicsIslands` and each body's `BodyIslandNode`, and `JointGraph`.
-//! Cloned once per tick into the history, restored with everything else, kept rather than
-//! emptied when the session ends. Spawn and despawn bodies through the tracked paths
-//! (`despawn_ticked`) so the entities a restored graph names still exist.
+//! the solve order) and `JointGraph`, plus `PhysicsIslands` and each body's `BodyIslandNode`
+//! when sleeping is allowed and islands therefore exist. Cloned once per tick into the history,
+//! restored with everything else, kept rather than emptied when the session ends. Spawn and
+//! despawn bodies through the tracked paths (`despawn_ticked`) so the entities a restored graph
+//! names still exist.
 //!
 //! # Sets
 //!
@@ -88,7 +101,9 @@ macro_rules! ticked_avian {
     ($avian:ident, $place_from:item) => {
     use $avian::collision::contact_types::ContactGraph;
     use $avian::dynamics::solver::constraint_graph::ConstraintGraph;
-    use $avian::dynamics::solver::islands::{BodyIslandNode, PhysicsIslands};
+    use $avian::dynamics::solver::islands::{
+        BodyIslandNode, IslandPlugin, IslandSleepingPlugin, PhysicsIslands,
+    };
     use $avian::dynamics::solver::joint_graph::JointGraph;
     use $avian::physics_transform::PhysicsTransformConfig;
     use $avian::prelude::*;
@@ -109,7 +124,8 @@ macro_rules! ticked_avian {
     /// avian on the tick, replay-safe by default. See the crate docs.
     #[derive(Clone, Copy, Debug)]
     pub struct TickedAvianPlugin {
-        /// Let bodies sleep. A rollback cannot wake them; solo games only.
+        /// Let bodies sleep, and keep avian's islands, which exist to sleep them. A rollback
+        /// cannot wake a sleeping body; solo games only.
         pub allow_sleeping: bool,
         /// Do not add `PhysicsPlugins` even if none are present.
         pub physics_added_by_the_game: bool,
@@ -152,7 +168,18 @@ macro_rules! ticked_avian {
             if !self.physics_added_by_the_game
                 && !app.is_plugin_added::<$avian::schedule::PhysicsSchedulePlugin>()
             {
-                app.add_plugins(PhysicsPlugins::new(TickedSimulation));
+                if self.allow_sleeping {
+                    app.add_plugins(PhysicsPlugins::new(TickedSimulation));
+                } else {
+                    // No islands: see the crate docs. Without the plugin there is no
+                    // `PhysicsIslands`, and the narrow phase never merges one.
+                    app.add_plugins(
+                        PhysicsPlugins::new(TickedSimulation)
+                            .build()
+                            .disable::<IslandPlugin>()
+                            .disable::<IslandSleepingPlugin>(),
+                    );
+                }
             }
 
             register_if_missing::<Position>(app, POSITION_WIRE_NAME);
@@ -164,14 +191,19 @@ macro_rules! ticked_avian {
             // under standing bodies is what would break it.
             register_resource_if_missing::<ContactGraph>(app);
             register_resource_if_missing::<ConstraintGraph>(app);
-            register_resource_if_missing::<PhysicsIslands>(app);
             register_resource_if_missing::<JointGraph>(app);
-            let node_registered = app
-                .world()
-                .get_resource::<TickedComponentRegistry>()
-                .is_some_and(|registry| registry.index_of::<BodyIslandNode>().is_some());
-            if !node_registered {
-                app.register_ticked_component::<BodyIslandNode>();
+            // Islands only exist when sleeping does. Registering them without the plugin would
+            // be harmless (a missing resource is skipped) but would document a promise the
+            // bundle no longer makes.
+            if self.allow_sleeping {
+                register_resource_if_missing::<PhysicsIslands>(app);
+                let node_registered = app
+                    .world()
+                    .get_resource::<TickedComponentRegistry>()
+                    .is_some_and(|registry| registry.index_of::<BodyIslandNode>().is_some());
+                if !node_registered {
+                    app.register_ticked_component::<BodyIslandNode>();
+                }
             }
 
             if !self.positions_from_transforms {
@@ -217,6 +249,17 @@ macro_rules! ticked_avian {
             );
             if !self.allow_sleeping {
                 app.world_mut().insert_resource(TimeToSleep(f32::INFINITY));
+                // Loud at startup rather than a panic in `merge_islands` a few rounds in: a
+                // game that added `PhysicsPlugins` itself brought the islands with them.
+                assert!(
+                    !app.is_plugin_added::<IslandPlugin>(),
+                    "TickedAvianPlugin: avian's IslandPlugin is added and sleeping is off. \
+                     Islands exist to sleep bodies, and under rollback their bookkeeping \
+                     panics (`Neither body A nor B is in an island`). Add \
+                     `PhysicsPlugins::new(TickedSimulation).build()\
+                     .disable::<IslandPlugin>().disable::<IslandSleepingPlugin>()` instead, \
+                     or `allow_sleeping()` for a solo game that never rolls back"
+                );
             }
         }
     }
