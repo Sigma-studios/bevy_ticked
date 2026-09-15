@@ -43,7 +43,7 @@ fn host_margins(net: &TickedNetwork) -> Vec<(u128, i64)> {
         .resource::<InputMargins>()
         .0
         .iter()
-        .map(|(uuid, margin)| (*uuid, *margin))
+        .map(|(uuid, margin)| (*uuid, margin.ticks))
         .collect();
     margins.sort_unstable();
     margins
@@ -55,7 +55,7 @@ fn host_margin_for(net: &TickedNetwork, uuid: u128) -> Option<i64> {
         .resource::<InputMargins>()
         .0
         .get(&uuid)
-        .copied()
+        .map(|margin| margin.ticks)
 }
 
 fn recipients(net: &TickedNetwork) -> Vec<u128> {

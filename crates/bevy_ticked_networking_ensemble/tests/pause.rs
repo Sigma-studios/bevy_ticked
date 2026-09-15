@@ -136,10 +136,16 @@ fn a_large_time_real_gap_on_the_host_auto_pauses() {
     let _ = client;
 }
 
+/// The soft hold is opt-in: a game that would rather its players stood still through a
+/// silent host than moved through it sets a limit, and this is what it buys.
 #[test]
 fn a_client_with_no_snapshot_for_n_ms_enters_soft_hold() {
     let mut net = session(1);
     let (host, client) = (net.host(), net.client());
+    net.app_mut(client).insert_resource(PausePolicy {
+        client_soft_hold_after: Some(std::time::Duration::from_millis(250)),
+        ..Default::default()
+    });
     net.freeze(host, 8);
     assert!(
         !holds(net.app(client)).holds(TickHoldReason::SoftHold),
@@ -154,6 +160,26 @@ fn a_client_with_no_snapshot_for_n_ms_enters_soft_hold() {
     assert!(
         !holds(net.app(client)).holds(TickHoldReason::SoftHold),
         "the first snapshot releases it"
+    );
+}
+
+/// By default there is no soft hold: half a second without a snapshot leaves the client
+/// running on its own input, and the excess lead it builds is the rewind's problem, not the
+/// player's.
+#[test]
+fn by_default_a_silent_host_does_not_stop_the_client() {
+    let mut net = session(1);
+    let (host, client) = (net.host(), net.client());
+    let before = tick(net.app(client));
+    net.freeze(host, 32);
+    assert!(
+        !holds(net.app(client)).is_held(),
+        "half a second of silence and the client is still running: {:?}",
+        holds(net.app(client))
+    );
+    assert!(
+        tick(net.app(client)) >= before + 30,
+        "its clock went on through the silence"
     );
 }
 

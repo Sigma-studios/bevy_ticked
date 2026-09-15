@@ -5,6 +5,27 @@ pull requests #1–#14 on this repository are the phases.
 
 ## Unreleased
 
+- **Fix** — an idle client's lead no longer runs away. A snapshot's `your_margin` is
+  `MARGIN_UNMEASURED` when the host has timed no input from that client in the last
+  `MARGIN_STALE_TICKS` (a quarter second), instead of zero; the client leaves its target alone
+  on it. A client that sent nothing used to read the zero as "on time", set its target two
+  ticks past its lead on every snapshot, and climb at the trim's full rate to the 64-tick
+  ceiling in under a minute, where every snapshot cost a second of replay and four frames of
+  holding. `InputMargins` now carries the tick each margin was measured at.
+- **Fix** — a client no longer freezes when its host goes quiet. `client_soft_hold_after`
+  defaults to `None`: at 250 ms it stopped the whole client, local player included, with
+  nothing on screen, on every quarter-second hiccup of a link or a host frame (run-2d, "the
+  game freezes for half a second, on the clients"). The client now runs through the silence,
+  and the lead it piles up against a stalled host — the ticks the host never produced — is
+  given back in one rewind when the host returns, once an excess of eight ticks has held for
+  two applied snapshots (`SNAP_BACK_TICKS`, `SNAP_BACK_STREAK`), instead of shed at two
+  percent a second with a replay that deep on every snapshot in between. Two readings have to
+  agree before it fires — the replay distance and the host's margin report, which is what
+  tells a host that stood still (inputs arriving early by the excess) from a link that slowed
+  (inputs arriving late) — and for one round trip after it the margin reports are ignored,
+  since they still describe the lead just given back. `ReplayStats` counts rewinds as
+  `snapped_back`; a jittery link never triggers one, and a satellite-sized latency step
+  settles in two.
 - **Fix** — `bevy_ticked_avian` leaves avian's islands out when sleeping is off. Islands exist
   to sleep bodies, and under rollback their bookkeeping panicked: avian attaches a body's
   `BodyIslandNode` through deferred observers, the history restored the historic one directly,

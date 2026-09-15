@@ -47,6 +47,9 @@ pub struct ReplayStats {
     pub dropped_unknown_baseline: u64,
     /// Packets that arrived as deltas and were rebuilt into full bodies.
     pub deltas_applied: u64,
+    /// Rewinds: an excess lead given back in one step rather than dilated away, each the
+    /// ticks this client predicted past a host that had stalled.
+    pub snapped_back: u64,
 }
 
 impl ReplayStats {

@@ -428,7 +428,7 @@ fn relayed_inputs_cover_the_first_margin_of_the_replay() {
         .resource::<InputMargins>()
         .0
         .get(&a_uuid)
-        .copied()
+        .map(|margin| margin.ticks)
         .expect("the host has heard from A");
     assert!(
         margin > 0,

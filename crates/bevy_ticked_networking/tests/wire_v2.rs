@@ -15,10 +15,12 @@ use bevy_ticked_networking::messages::{
     ReceivedNetworkSnapshot, SendNetworkInput, SendNetworkSnapshot,
 };
 use bevy_ticked_networking::prelude::*;
-use bevy_ticked_networking::server::{InputMargins, LocalServerPlayer, SnapshotRecipientList};
+use bevy_ticked_networking::server::{
+    InputMargins, LocalServerPlayer, MARGIN_STALE_TICKS, MeasuredMargin, SnapshotRecipientList,
+};
 use bevy_ticked_networking::snapshot::{
-    DeltaBody, EntityRecord, FullBody, RelayedInput, SnapshotBody, SnapshotPacket, apply_full_body,
-    build_full_body, decode_packet, encode_packet,
+    DeltaBody, EntityRecord, FullBody, MARGIN_UNMEASURED, RelayedInput, SnapshotBody,
+    SnapshotPacket, apply_full_body, build_full_body, decode_packet, encode_packet,
 };
 use serde::{Deserialize, Deserializer, Serialize};
 
@@ -371,10 +373,11 @@ fn host_app() -> App {
 fn each_packet_carries_the_recipients_seq_and_margin() {
     let mut app = host_app();
     app.insert_resource(SnapshotRecipientList(vec![2, 3]));
-    app.world_mut()
-        .resource_mut::<InputMargins>()
-        .0
-        .extend([(2u128, 5i64), (3u128, -3i64)]);
+    let at = app.world().resource::<CurrentTick>().0;
+    app.world_mut().resource_mut::<InputMargins>().0.extend([
+        (2u128, MeasuredMargin { ticks: 5, at }),
+        (3u128, MeasuredMargin { ticks: -3, at }),
+    ]);
     for _ in 0..3 {
         app.update();
     }
@@ -401,6 +404,24 @@ fn each_packet_carries_the_recipients_seq_and_margin() {
     assert!(
         sent.iter().all(|(r, _)| r.is_some()),
         "nothing unaddressed when the list is present"
+    );
+
+    // A margin the host measured too long ago is not a margin: past `MARGIN_STALE_TICKS`
+    // the packet says so, and the client leaves its target alone.
+    for _ in 0..(MARGIN_STALE_TICKS + 2) {
+        app.update();
+    }
+    let last = app
+        .world()
+        .resource::<Sent>()
+        .0
+        .iter()
+        .rfind(|(r, _)| *r == Some(2))
+        .map(|(_, p)| p.your_margin)
+        .expect("still sending");
+    assert_eq!(
+        last, MARGIN_UNMEASURED,
+        "a quarter second without input and the margin is unmeasured, not stale"
     );
 }
 

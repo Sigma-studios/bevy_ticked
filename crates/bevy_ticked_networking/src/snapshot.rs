@@ -43,10 +43,19 @@ pub struct SnapshotPacket {
     pub tick: u64,
     /// This recipient's input-arrival margin in ticks, measured by the server: how many ticks
     /// ahead of the server its most recent input arrived (negative is late). The client sizes
-    /// its prediction lead from it.
+    /// its prediction lead from it. [`MARGIN_UNMEASURED`] when the server has no recent
+    /// measurement — the client has sent no input lately — and the client then leaves its
+    /// target where it is rather than steer on a number that means nothing.
     pub your_margin: i16,
     pub body: SnapshotBody,
 }
+
+/// The `your_margin` of a packet whose recipient has sent no input the server could time
+/// lately: nothing to size a lead from. `i16::MIN` rather than zero, because zero is a
+/// measurement — "arrived exactly on time" — and a client that took it for one steered its
+/// target two ticks past wherever its lead was, every snapshot, and ran away to the ceiling at
+/// the trim's full rate.
+pub const MARGIN_UNMEASURED: i16 = i16::MIN;
 
 /// What a packet carries.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -168,7 +177,7 @@ impl SnapshotPacket {
         Self {
             seq: 0,
             tick,
-            your_margin: 0,
+            your_margin: MARGIN_UNMEASURED,
             body: SnapshotBody::Full(body),
         }
     }
