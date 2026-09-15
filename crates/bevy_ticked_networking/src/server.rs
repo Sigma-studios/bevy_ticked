@@ -15,7 +15,10 @@ use crate::{
     diagnostics::{InputStats, SnapshotStats},
     input::{InputQueue, MAX_INPUT_LEAD_TICKS, TickedInput},
     messages::{PeerLeft, ReceivedNetworkInput, ReceivedSnapshotAck, SendNetworkSnapshot},
-    snapshot::{RelayedInput, SnapshotBody, SnapshotPacket, build_full_body, encode_packet_with},
+    snapshot::{
+        MARGIN_UNMEASURED, RelayedInput, SnapshotBody, SnapshotPacket, build_full_body,
+        encode_packet_with,
+    },
 };
 
 /// Resource identifying the local player on the server (for listen-server setups).
@@ -48,7 +51,23 @@ pub struct LastAck(pub HashMap<u128, u32>);
 ///
 /// [`WorldSnapshot`]: crate::snapshot::WorldSnapshot
 #[derive(Resource, Default)]
-pub struct InputMargins(pub HashMap<u128, i64>);
+pub struct InputMargins(pub HashMap<u128, MeasuredMargin>);
+
+/// One client's input-arrival margin and the tick it was measured at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MeasuredMargin {
+    /// How many ticks ahead of the server the input arrived; negative is late.
+    pub ticks: i64,
+    /// The server tick at which it arrived.
+    pub at: u64,
+}
+
+/// A margin older than this, in server ticks, is not reported. Inputs come every tick with
+/// three ticks of redundancy, so a client that has sent nothing for a quarter of a second has
+/// stopped sending — no body to drive, a menu up — and its last margin describes a lead it may
+/// no longer hold. Reporting it as current let the client's target wander; reporting zero
+/// instead was worse (see [`MARGIN_UNMEASURED`]).
+pub const MARGIN_STALE_TICKS: u64 = 16;
 
 /// The highest input tick seen from each client so far.
 ///
@@ -303,7 +322,13 @@ fn collect_network_inputs<T: TickedInput>(
     if margin < 0 {
         stats.late += 1;
     }
-    margins.0.insert(event.sender, margin);
+    margins.0.insert(
+        event.sender,
+        MeasuredMargin {
+            ticks: margin,
+            at: tick.0,
+        },
+    );
     queue.insert(event.tick, event.sender, event.input.clone());
 
     let seen = newest.0.entry(event.sender).or_insert(0);
@@ -437,8 +462,10 @@ impl<T: TickedInput> Command for BroadcastSnapshotCommand<T> {
             };
             let your_margin = recipient
                 .and_then(|uuid| world.resource::<InputMargins>().0.get(&uuid).copied())
-                .map_or(0, |margin| {
-                    margin.clamp(i16::MIN as i64, i16::MAX as i64) as i16
+                .filter(|measured| tick.saturating_sub(measured.at) <= MARGIN_STALE_TICKS)
+                .map_or(MARGIN_UNMEASURED, |measured| {
+                    // One above the sentinel, so a genuinely enormous lateness stays a number.
+                    measured.ticks.clamp(i16::MIN as i64 + 1, i16::MAX as i64) as i16
                 });
 
             // Delta or keyframe. A delta only against a baseline the client acknowledged and

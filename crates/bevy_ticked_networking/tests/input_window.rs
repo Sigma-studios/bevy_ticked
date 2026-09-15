@@ -76,7 +76,11 @@ fn stats(app: &App) -> InputStats {
 }
 
 fn margin(app: &App, uuid: u128) -> Option<i64> {
-    app.world().resource::<InputMargins>().0.get(&uuid).copied()
+    app.world()
+        .resource::<InputMargins>()
+        .0
+        .get(&uuid)
+        .map(|margin| margin.ticks)
 }
 
 fn newest(app: &App, uuid: u128) -> Option<u64> {

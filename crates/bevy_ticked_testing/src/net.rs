@@ -403,6 +403,31 @@ impl TickedNetwork {
         self.clock_restore.push((peer, frame));
     }
 
+    /// [`freeze`](Self::freeze), with `holder` pressing `input` on every frame of it: a
+    /// player who keeps playing while another peer's frames stop. What it keeps flowing is
+    /// their inputs, and with them the host's margin reports — the reading a client needs to
+    /// tell a host that stood still from a link that slowed.
+    pub fn freeze_while_held<I: TickedInput>(
+        &mut self,
+        peer: PeerId,
+        frames: usize,
+        holder: PeerId,
+        input: I,
+    ) {
+        let others: Vec<PeerId> = self.net.peers().filter(|other| *other != peer).collect();
+        let uuid = self.uuid(holder);
+        for _ in 0..frames {
+            crate::input::queue_input(self.app_mut(holder), uuid, input.clone());
+            self.net.step_only(&others);
+            self.after_frame();
+        }
+        let frame = self.frame_of(peer);
+        self.net
+            .app_mut(peer)
+            .insert_resource(TimeUpdateStrategy::ManualDuration(frame * frames as u32));
+        self.clock_restore.push((peer, frame));
+    }
+
     /// One frame that is `ticks` ticks long on every peer, then back to whatever each had.
     ///
     /// A long frame — a shader compile, a collection, a window drag — is what makes a client

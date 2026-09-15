@@ -23,7 +23,11 @@
 //! back from a stall, and the pause tells every client to drop what it predicted in the
 //! meantime. A client that has heard nothing for [`PausePolicy::client_soft_hold_after`]
 //! holds on its own ([`TickHoldReason::SoftHold`]) rather than run ahead of a host that may
-//! be gone; the next snapshot releases it.
+//! be gone; the next snapshot releases it. Off by default: it is a freeze with nothing on
+//! screen to say why, it fired on every quarter-second hiccup of a link or a host frame, and
+//! the thing it guarded against — a lead piled up during the silence — is now given back in
+//! one step when the host returns (`SNAP_BACK_TICKS` in the client). A game that would rather
+//! its players stood still than moved through a stall sets it to a second or more.
 
 use std::time::Duration;
 
@@ -97,6 +101,7 @@ pub struct PausePolicy {
     /// away — and resumes on the next frame, so clients discard what they predicted.
     pub auto_pause_after_real_gap: Option<Duration>,
     /// A client that has applied no snapshot for this long holds its clock until one comes.
+    /// `None` by default; see the module docs for why.
     pub client_soft_hold_after: Option<Duration>,
 }
 
@@ -106,7 +111,7 @@ impl Default for PausePolicy {
             who_may_pause: WhoMayPause::HostOnly,
             auto_pause_on_focus_loss: true,
             auto_pause_after_real_gap: Some(Duration::from_millis(500)),
-            client_soft_hold_after: Some(Duration::from_millis(250)),
+            client_soft_hold_after: None,
         }
     }
 }

@@ -16,7 +16,7 @@ use crate::{
     diagnostics::{HealthWarnings, ReplayStats},
     input::{InputQueue, TickedInput},
     messages::{ReceivedNetworkSnapshot, SendNetworkInput},
-    snapshot::{FullBody, SnapshotBody, SnapshotPacket, apply_full_body},
+    snapshot::{FullBody, MARGIN_UNMEASURED, SnapshotBody, SnapshotPacket, apply_full_body},
 };
 
 /// Resource identifying the local player on the client.
@@ -118,6 +118,15 @@ pub struct ClientTickBuffer {
     /// EWMA accumulator for the target, so per-snapshot margin jitter doesn't
     /// make it wander.
     smoothed: f64,
+    /// Consecutive applied snapshots that showed an excess of [`SNAP_BACK_TICKS`] or more.
+    /// See [`converge_lead`].
+    excess_streak: u32,
+    /// The client tick until which margin reports are ignored: the round trip after a rewind,
+    /// during which every report still describes inputs sent from the lead that was just
+    /// given back. Fed to the target, those reports pulled it down by the whole excess and
+    /// the next snapshots snapped the lead forward again — a two-second oscillation, measured
+    /// on a satellite link, that never settled.
+    settling_until: u64,
 }
 
 impl Default for ClientTickBuffer {
@@ -129,6 +138,8 @@ impl Default for ClientTickBuffer {
             target_replay_distance: 6,
             target_margin: Self::DEFAULT_MARGIN,
             smoothed: 6.0,
+            excess_streak: 0,
+            settling_until: 0,
         }
     }
 }
@@ -620,10 +631,14 @@ fn handle_server_snapshot<T: TickedInput>(world: &mut World) {
     // difference is "however long this peer has been running" rather than a
     // measurement, and no input has been sent for the server to have timed.
     let replay_distance = current_tick as i64 - snapshot_tick as i64;
-    if !was_paused {
+    let margin = (packet.your_margin != MARGIN_UNMEASURED).then_some(i64::from(packet.your_margin));
+    if !was_paused
+        && let Some(margin) = margin
+        && current_tick >= world.resource::<ClientTickBuffer>().settling_until
+    {
         world
             .resource_mut::<ClientTickBuffer>()
-            .observe(replay_distance, i64::from(packet.your_margin));
+            .observe(replay_distance, margin);
     }
 
     if snapshot_tick >= current_tick {
@@ -653,6 +668,9 @@ fn handle_server_snapshot<T: TickedInput>(world: &mut World) {
         registry.capture_all(world, snapshot_tick);
 
         let target = world.resource::<ClientTickBuffer>().target_replay_distance;
+        // Behind is the opposite of the excess the rewind watches for; a streak from before
+        // the stall must not carry across it.
+        world.resource_mut::<ClientTickBuffer>().excess_streak = 0;
         world.resource_mut::<ReplayStats>().rollbacks += 1;
         world
             .resource_mut::<TickHolds>()
@@ -703,10 +721,54 @@ fn handle_server_snapshot<T: TickedInput>(world: &mut World) {
     TickedEventRegistry::truncate_all_after(world, snapshot_tick);
 
     let target = world.resource::<ClientTickBuffer>().target_replay_distance;
-    let end_tick = converge_lead(world, current_tick, replay_distance as u64, target);
-
     world.resource_mut::<ReplayStats>().rollbacks += 1;
-    replay_bounded(world, &registry, end_tick);
+    match converge_lead(world, current_tick, replay_distance as u64, target, margin) {
+        LeadStep::ReplayTo(end_tick) => replay_bounded(world, &registry, end_tick),
+        // The world is already at the snapshot's tick with everything after it forgotten: the
+        // rewind is a shorter replay, and the inputs past its end go with the ticks they were
+        // for.
+        LeadStep::SnapBack(end_tick) => snap_back::<T>(world, &registry, current_tick, end_tick),
+    }
+}
+
+/// Give an excess lead back: replay from the snapshot's tick — which the caller has restored
+/// and truncated after — only as far as `end_tick`, and forget what this client did past it.
+/// The local inputs it queued for those ticks were predicted against a host that never ran
+/// them; the rate trim's leftover was working on an error that no longer exists.
+///
+/// The inputs already *sent* for those ticks are not a problem. The host keeps the newest
+/// input it holds for a tick, the client leads it by the target again the moment this replay
+/// ends, and every one of those ticks is sent afresh, with its redundancy, before the host
+/// reaches it.
+fn snap_back<T: TickedInput>(
+    world: &mut World,
+    registry: &TickedComponentRegistry,
+    from_tick: u64,
+    end_tick: u64,
+) {
+    forget_local_inputs_after::<T>(world, end_tick);
+    if let Some(mut dilation) = world.get_resource_mut::<TickRateDilation>() {
+        dilation.0 = 1.0;
+    }
+    world.resource_mut::<ReplayStats>().snapped_back += 1;
+    bevy::log::info!(
+        "lead excess: rewound from tick {from_tick} to {end_tick}, {} ticks the host never \
+         produced",
+        from_tick.saturating_sub(end_tick)
+    );
+    replay_bounded(world, registry, end_tick);
+}
+
+/// Drop the local player's queued inputs for every tick after `tick`.
+fn forget_local_inputs_after<T: TickedInput>(world: &mut World, tick: u64) {
+    let Some(local) = world.get_resource::<LocalClientPlayer>().map(|p| p.0) else {
+        return;
+    };
+    let mut queue = world.resource_mut::<InputQueue<T>>();
+    for (_, players) in queue.inputs.range_mut(tick + 1..) {
+        players.remove(&local);
+    }
+    queue.inputs.retain(|_, players| !players.is_empty());
 }
 
 /// Whether the authority's body for `tick` is exactly what this client predicted for it.
@@ -797,16 +859,36 @@ fn accept_identical<T: TickedInput>(
         return;
     }
     let replay_distance = current_tick as i64 - snapshot_tick as i64;
-    world
-        .resource_mut::<ClientTickBuffer>()
-        .observe(replay_distance, i64::from(packet.your_margin));
+    // No input timed lately means no measurement, not a margin of zero: the target stays
+    // where the last measurement left it, and the lead is steered to that.
+    let margin = (packet.your_margin != MARGIN_UNMEASURED).then_some(i64::from(packet.your_margin));
+    if let Some(margin) = margin
+        && current_tick >= world.resource::<ClientTickBuffer>().settling_until
+    {
+        world
+            .resource_mut::<ClientTickBuffer>()
+            .observe(replay_distance, margin);
+    }
     let target = world.resource::<ClientTickBuffer>().target_replay_distance;
-    let end_tick = converge_lead(world, current_tick, replay_distance as u64, target);
-    // A lead deficit is taken forward, as a plain simulation of the missing ticks; an excess
-    // is left to the rate trim, since going back would be a rewind of correct ticks.
-    if end_tick > current_tick {
-        let registry = world.resource::<TickedComponentRegistry>().clone();
-        replay_bounded(world, &registry, end_tick);
+    match converge_lead(world, current_tick, replay_distance as u64, target, margin) {
+        // A lead deficit is taken forward, as a plain simulation of the missing ticks; a
+        // small excess is left to the rate trim.
+        LeadStep::ReplayTo(end_tick) if end_tick > current_tick => {
+            let registry = world.resource::<TickedComponentRegistry>().clone();
+            replay_bounded(world, &registry, end_tick);
+        }
+        LeadStep::ReplayTo(_) => {}
+        // A large excess that has held: the world at the snapshot's tick is in history and is
+        // the authority's, since the prediction matched it. Put it back, forget what came
+        // after, and replay to the target — the rewind the slow path makes, from the same tick.
+        LeadStep::SnapBack(end_tick) => {
+            let registry = world.resource::<TickedComponentRegistry>().clone();
+            bevy_ticked::rollback::rollback_to_tick(world, snapshot_tick);
+            registry.truncate_all_after(world, snapshot_tick);
+            TickedEventRegistry::truncate_all_after(world, snapshot_tick);
+            world.resource_mut::<ReplayStats>().rollbacks += 1;
+            snap_back::<T>(world, &registry, current_tick, end_tick);
+        }
     }
 }
 
@@ -854,10 +936,46 @@ const DILATION_GAIN: f64 = 0.01;
 /// create the error, so it never arrives — and every tick spent short of the
 /// target is a tick of input the server may drop.
 ///
-/// Forward only. An *excess* lead costs a deeper replay and nothing else, and
-/// shedding it by rewinding the clock would be a visible jump to fix a problem
-/// nobody can see.
 const SNAP_TICKS: f64 = 4.0;
+/// Excess, in ticks, past which the lead is given back in one step instead of dilated away —
+/// once it has held for [`SNAP_BACK_STREAK`] applied snapshots.
+///
+/// An excess used to be left to the rate trim alone, on the grounds that rewinding is a
+/// visible jump to fix a problem nobody can see. That is true of a few ticks. It is false of
+/// the excess a host stall leaves behind: the host comes back, catches up what
+/// `MaxTicksPerFrame` allows and drops the rest, and every client that kept predicting is now
+/// that many ticks ahead of it for good. At two percent a second an eight-tick excess takes
+/// six seconds to shed, every snapshot in between costs a replay that deep, and past sixteen
+/// ticks the replay no longer fits in a frame and the clock holds — the freeze this removes.
+/// The rewind is one jump, of exactly the ticks the host never produced, and the client is
+/// responsive throughout the stall instead of held for it.
+///
+/// Twice [`SNAP_TICKS`]: the trim closes anything below it in about two seconds, and a
+/// jittery link does not read this high twice running — the client applies only the newest
+/// snapshot it holds each frame, and the one after a late burst is fresh.
+///
+/// Two readings have to agree. The replay distance alone cannot tell a host that stopped from
+/// a link that slowed: both make the snapshot older when it is applied. The host's margin
+/// report tells them apart — a host that stood still sees this client's inputs arrive early by
+/// the whole excess, a link that slowed sees them arrive late — so the rewind needs the margin
+/// to show the same excess over the target margin, and an unmeasured margin is no reading.
+/// Rewinding on the replay distance alone pulled a client back exactly when a longer trip
+/// needed it further ahead, and its inputs arrived late for as long as the two fought.
+const SNAP_BACK_TICKS: f64 = 8.0;
+/// Consecutive applied snapshots that must show the excess before the rewind: one is a late
+/// packet, two in a row is the host's clock.
+const SNAP_BACK_STREAK: u32 = 2;
+
+/// What a snapshot's replay distance says the client should do about its lead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LeadStep {
+    /// Replay, or simulate forward, to this tick: at the current one, past it, or one short
+    /// of it when there is no rate to trim.
+    ReplayTo(u64),
+    /// Rewind. The ticks past this one were predicted against a host that never produced
+    /// them; the world goes back to the snapshot's tick and is replayed to here, no further.
+    SnapBack(u64),
+}
 
 /// Tick-rate multiplier that corrects a lead error of `error` ticks.
 ///
@@ -886,8 +1004,38 @@ fn dilation_for(error: f64) -> f64 {
 ///
 /// [`TickSource::Hz`]: bevy_ticked::TickSource::Hz
 /// [`TickSource::Manual`]: bevy_ticked::TickSource::Manual
-fn converge_lead(world: &mut World, current_tick: u64, replay_distance: u64, target: u64) -> u64 {
+fn converge_lead(
+    world: &mut World,
+    current_tick: u64,
+    replay_distance: u64,
+    target: u64,
+    margin: Option<i64>,
+) -> LeadStep {
     let error = replay_distance as f64 - target as f64;
+
+    // Too far ahead by both readings, and not for the first time: the host's clock is behind
+    // this one and the trim would take seconds. Give the excess back in one step.
+    {
+        let mut buffer = world.resource_mut::<ClientTickBuffer>();
+        let settling = current_tick < buffer.settling_until;
+        let inputs_early_by = margin.map(|m| (m - buffer.target_margin) as f64);
+        if !settling
+            && error >= SNAP_BACK_TICKS
+            && inputs_early_by.is_some_and(|by| by >= SNAP_BACK_TICKS)
+        {
+            buffer.excess_streak += 1;
+        } else {
+            buffer.excess_streak = 0;
+        }
+        if buffer.excess_streak >= SNAP_BACK_STREAK {
+            buffer.excess_streak = 0;
+            // `snapshot_tick + target`: the replay distance is how far the snapshot is behind.
+            let end_tick = current_tick - (replay_distance - target);
+            // One round trip of reports to ignore: the target is about that, in ticks.
+            buffer.settling_until = end_tick + target;
+            return LeadStep::SnapBack(end_tick);
+        }
+    }
 
     // Too far short for the rate trim to close before the next disturbance, or
     // before falling behind entirely. Take it in one step.
@@ -895,23 +1043,23 @@ fn converge_lead(world: &mut World, current_tick: u64, replay_distance: u64, tar
         if let Some(mut dilation) = world.get_resource_mut::<TickRateDilation>() {
             dilation.0 = 1.0;
         }
-        return current_tick + (target - replay_distance);
+        return LeadStep::ReplayTo(current_tick + (target - replay_distance));
     }
 
     if let Some(mut dilation) = world.get_resource_mut::<TickRateDilation>() {
         dilation.0 = dilation_for(error);
-        return current_tick;
+        return LeadStep::ReplayTo(current_tick);
     }
 
     // Deadband [target, target+1]; never drop below target, which would risk
     // inputs arriving after the server has passed their tick.
-    if replay_distance > target + 1 {
+    LeadStep::ReplayTo(if replay_distance > target + 1 {
         current_tick - 1
     } else if replay_distance < target {
         current_tick + 1
     } else {
         current_tick
-    }
+    })
 }
 
 /// The authority's sequence as the last snapshot left it, so a client that mints under slot

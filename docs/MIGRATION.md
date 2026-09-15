@@ -263,14 +263,18 @@ under `AnyParticipant`), `auto_pause_on_focus_loss: true` (`window` feature of
 regained resumes), `auto_pause_after_real_gap: Some(500 ms)` (a frame that long after the
 previous one is a stall the host just came back from: it pauses as `HostStalled` at the tick
 it is still on, so clients drop what they predicted, and resumes next frame),
-`client_soft_hold_after: Some(250 ms)` (a client that has applied no snapshot for that long
-holds `TickHoldReason::SoftHold` rather than run ahead of a host that may be gone; the next
-snapshot releases it).
+`client_soft_hold_after: None` (opt-in: a client that has applied no snapshot for that long
+holds `TickHoldReason::SoftHold` rather than run ahead of a host that may be gone, and the
+next snapshot releases it. It shipped at 250 ms and was the "everything freezes for half a
+second, local player included, no overlay" of run-2d's first week: a freeze on every
+quarter-second hiccup of a link or a host frame. Off, the client runs through the silence on
+its own input; the excess lead it builds — the ticks a stalled host never produced — is given
+back in one rewind when the host returns, `SNAP_BACK_TICKS` in `client.rs`, rather than shed
+at two percent a second).
 
 **Delete** the game's own "host lost focus, tear down the lobby" handling and any
-replicated pause flag. **Watch** a unit test that runs a client for many frames without a
-snapshot stream: it soft-holds after a quarter second; set
-`PausePolicy { client_soft_hold_after: None, .. }` if the test is about something else.
+replicated pause flag. **Watch** a test that asserts a client stops during a silent host: it
+no longer does unless the test sets `PausePolicy { client_soft_hold_after: Some(..), .. }`.
 
 `a_host_alt_tab_auto_pauses_and_no_lead_piles_up` is un-ignored: after a two-second host
 freeze the client is within a tick or two of its target lead one second later.

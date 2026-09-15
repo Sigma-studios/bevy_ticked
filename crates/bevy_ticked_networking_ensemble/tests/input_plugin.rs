@@ -50,7 +50,7 @@ fn a_keypress_reaches_the_server_with_the_configured_margin() {
         "the host's body for the client moved {} over a second of held key",
         after.0 - before.0
     );
-    let margin = net.app(host).world().resource::<InputMargins>().0[&uuid];
+    let margin = net.app(host).world().resource::<InputMargins>().0[&uuid].ticks;
     let lead = -trails_host_by(&net, client);
     println!("client lead {lead} ticks; its inputs arrive {margin} ticks early at the host");
     assert!(margin >= 1, "the input arrived late by {} ticks", -margin);
