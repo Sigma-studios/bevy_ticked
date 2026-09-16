@@ -146,6 +146,8 @@ pub struct TrackedSpawner<'w, 's> {
     allocator: ResMut<'w, TrackedIdAllocator>,
     local: Option<Res<'w, LocalSpawnerSlot>>,
     index: Res<'w, TrackedEntityIndex>,
+    /// To tell a tombstone that is still there from one the reaper has destroyed.
+    entities: &'w bevy::ecs::entity::Entities,
     tick: Res<'w, crate::tick::CurrentTick>,
 }
 
@@ -165,7 +167,14 @@ impl TrackedSpawner<'_, '_> {
     pub fn spawn_by(&mut self, slot: SpawnerSlot, bundle: impl Bundle) -> Entity {
         let id = self.allocator.next(slot);
         let tick = self.tick.0;
-        match self.index.tombstone_of(id.0) {
+        // A handle out of the index is a hint, not a promise. The reaper destroys a tombstone once
+        // the window has passed it, so one that is no longer in the world means this id is being
+        // minted afresh — and commanding the dead handle instead is the crash this guard is for.
+        let tombstone = self
+            .index
+            .tombstone_of(id.0)
+            .filter(|entity| self.entities.contains(*entity));
+        match tombstone {
             Some(entity) => {
                 self.commands
                     .entity(entity)
@@ -202,9 +211,13 @@ impl TrackedWorldExt for World {
         let tick = self
             .get_resource::<crate::tick::CurrentTick>()
             .map_or(0, |t| t.0);
+        // A handle out of the index is a hint, not a promise: the reaper destroys tombstones once
+        // the window has passed them, so one that is no longer in the world means this id is being
+        // minted afresh rather than revived.
         let tombstone = self
             .get_resource::<TrackedEntityIndex>()
-            .and_then(|index| index.tombstone_of(id.0));
+            .and_then(|index| index.tombstone_of(id.0))
+            .filter(|entity| self.get_entity(*entity).is_ok());
         match tombstone {
             Some(entity) => {
                 self.entity_mut(entity).insert(bundle);

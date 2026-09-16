@@ -311,7 +311,11 @@ pub fn apply_full_body(world: &mut World, tick: u64, body: &FullBody) -> Applied
                 // a rewind past a spawn the authority confirms — comes back as itself.
                 let tombstoned = world
                     .get_resource::<TrackedEntityIndex>()
-                    .and_then(|index| index.tombstone_of(record.id));
+                    .and_then(|index| index.tombstone_of(record.id))
+                    // Only if it is still there. A reaped tombstone the index has not let go of
+                    // would be revived into silently, and then decoded onto — which is a panic on
+                    // every client the moment the authority names the id.
+                    .filter(|entity| world.get_entity(*entity).is_ok());
                 let entity = match tombstoned {
                     Some(entity) => {
                         revive(world, entity, record.id, tick);
