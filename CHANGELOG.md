@@ -5,6 +5,13 @@ pull requests #1–#14 on this repository are the phases.
 
 ## Unreleased
 
+- **Fix** — a lockstep joiner no longer runs ticks before it knows the roster. It held only until
+  some participant existed, and the host's announcement of the joiner itself (or of another
+  joiner) could arrive before the roster it sends on acceptance: the joiner ran those ticks with
+  nobody on `LockstepRoster`, so a game spawning from the roster was missing the host's bodies
+  for a tick or two, and a checksum sampled then reported a desync. A client now also waits for
+  its host to be on the roster.
+
 - **Pin** — `bevy_ensemble` at `b71691a`: the WebRTC client (E5d) and Steam (E5e) turn host
   migration on, so T17 and T18 run against real transports. The per-game checklists gain a
   host-change section each.

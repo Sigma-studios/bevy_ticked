@@ -3,7 +3,7 @@ use crate::{
     LockstepLobbyParticipant, participant_is_required_for_tick, tracker_has_actions_for_player,
 };
 use bevy::prelude::*;
-use bevy_ensemble::{Host, Lobby, LobbyParticipant, LobbyParticipantOf};
+use bevy_ensemble::{Host, HostUuid, Lobby, LobbyParticipant, LobbyParticipantOf};
 use bevy_ticked::tick::{CurrentTick, TickHoldReason, TickHolds};
 
 /// Exclusive system that runs in `FixedUpdate::PreTick` every iteration.
@@ -108,9 +108,21 @@ pub fn sync_lockstep_pause_state<A: LockstepAction, S: JoinSnapshot>(world: &mut
             .query::<(&LockstepLobbyParticipant, &LobbyParticipantOf)>()
             .iter(world)
             .any(|(_, pof)| pof.0 == scoped_lobby);
+        // And the host on the roster, not merely somebody. A client learns the roster from the
+        // `ParticipantJoined`s the host sends when it accepts it, but the host also announces
+        // each client it accepts, to that client as well, and to clients it has not accepted
+        // yet. Whichever of those arrived first made this peer a participant-holder, and it ran
+        // ticks with a roster that had nobody on it: a game spawning from the roster left out
+        // every body the host had, which is a desync on each of those ticks.
+        let host_on_roster = world.get_resource::<HostUuid>().is_some_and(|host| {
+            world
+                .resource::<crate::LockstepRoster>()
+                .0
+                .contains(&host.0)
+        });
 
         let tracker = world.resource::<ActionTracker<A>>();
-        !has_any_participant || !tracker.ticks.contains_key(&next_tick)
+        !has_any_participant || !host_on_roster || !tracker.ticks.contains_key(&next_tick)
     };
 
     world
