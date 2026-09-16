@@ -20,7 +20,12 @@ pub fn add_host_participant(
     current_tick: Res<CurrentTick>,
     mut last_broadcast_tick: ResMut<LastBroadcastTick>,
     added_participants: Query<
-        (Entity, &LobbyParticipant, &LobbyParticipantOf),
+        (
+            Entity,
+            &LobbyParticipant,
+            &LobbyParticipantOf,
+            Has<LockstepLobbyParticipant>,
+        ),
         Added<LobbyParticipant>,
     >,
     host_lobbies: Query<Entity, (With<Lobby>, With<Host>)>,
@@ -29,12 +34,14 @@ pub fn add_host_participant(
         return;
     };
 
-    for (participant_entity, participant, participant_of) in added_participants.iter() {
-        if !participant.is_host || participant_of.0 != host_lobby {
+    for (participant_entity, participant, participant_of, established) in added_participants.iter()
+    {
+        // A participant already in the simulation — a host that took over — keeps its tick.
+        if !participant.is_host || participant_of.0 != host_lobby || established {
             continue;
         }
 
-        last_broadcast_tick.0 = current_tick.0;
+        last_broadcast_tick.0 = last_broadcast_tick.0.max(current_tick.0);
         commands
             .entity(participant_entity)
             .insert(LockstepLobbyParticipant {
@@ -105,6 +112,7 @@ pub fn broadcast_participants_to_loaded_clients(
 pub fn activate_loaded_client_participants(
     mut commands: Commands,
     current_tick: Res<CurrentTick>,
+    last_broadcast_tick: Res<LastBroadcastTick>,
     config: Res<LockstepConfig>,
     host_lobby: Option<Single<Entity, (With<Lobby>, With<Host>)>>,
     participants: Query<(
@@ -144,7 +152,9 @@ pub fn activate_loaded_client_participants(
         }
 
         let buffer = config.host_tick_buffer.max(message.message.buffer);
-        let joined_at_tick = current_tick.0 + 1 + buffer;
+        // From the first tick this host rules, which is past its clock while it takes over.
+        let ruled_through = current_tick.0.max(last_broadcast_tick.0);
+        let joined_at_tick = ruled_through + 1 + buffer;
         commands
             .entity(participant_entity)
             .insert(LockstepLobbyParticipant { joined_at_tick });

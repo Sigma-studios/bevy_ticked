@@ -114,6 +114,32 @@ pub fn actions_at<A: LockstepAction>(app: &App, tick: u64) -> Vec<A> {
         .unwrap_or_default()
 }
 
+/// Where this peer is in a host migration.
+pub fn migration_state(app: &App) -> crate::LockstepMigration {
+    app.world().resource::<crate::LockstepMigration>().clone()
+}
+
+/// The last tick this peer ruled or was told was ruled: past its clock on a host that took over
+/// and has not caught up.
+pub fn last_broadcast_tick(app: &App) -> u64 {
+    app.world().resource::<crate::LastBroadcastTick>().0
+}
+
+/// The newest tick this peer holds a ruling for.
+pub fn newest_ruled_tick<A: LockstepAction>(app: &App) -> Option<u64> {
+    app.world().resource::<ActionTracker<A>>().newest_tick()
+}
+
+/// The actions this client scheduled that no ruling has covered yet, by tick.
+pub fn unruled_local_actions<A: LockstepAction>(app: &App) -> Vec<(u64, Vec<A>)> {
+    app.world()
+        .resource::<crate::UnruledLocalActions<A>>()
+        .0
+        .iter()
+        .map(|(tick, actions)| (*tick, actions.clone()))
+        .collect()
+}
+
 /// Queue an action as though this peer's local input had produced it.
 ///
 /// It is scheduled by the next flush — into the next tick on a host, `buffer` ticks ahead on a

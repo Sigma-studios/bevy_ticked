@@ -57,6 +57,7 @@ pub(crate) fn install<A: LockstepAction>(app: &mut App) {
         .init_resource::<LockstepStall>()
         .init_resource::<OwnInputMargin>()
         .init_resource::<ArrivalMargins>()
+        .init_resource::<KeptSessionRequests>()
         .add_message::<PauseLockstep>()
         .add_message::<ResumeLockstep>()
         .add_ticked_event::<RosterChange>()
@@ -100,11 +101,13 @@ fn reset_on_lobby_removed(
     mut stall: ResMut<LockstepStall>,
     mut margin: ResMut<OwnInputMargin>,
     mut margins: ResMut<ArrivalMargins>,
+    mut kept: ResMut<KeptSessionRequests>,
     mut commands: Commands,
 ) {
     if removed.read().next().is_none() {
         return;
     }
+    *kept = KeptSessionRequests::default();
     announced.0.clear();
     pending.0.clear();
     roster.0.clear();
@@ -154,6 +157,10 @@ fn queue_departure(
 
 /// Before the host's tick: whatever the session did since the last one goes into the tick
 /// about to run — joins whose agreed tick this is, departures, a pause or a resume.
+///
+/// Not into a tick that is already ruled. A host that took over is simulating its predecessor's
+/// rulings up to `LastBroadcastTick`, and stages from the first tick after them; a pause or a
+/// resume asked for meanwhile is kept for then.
 fn stage_system_actions(world: &mut World) {
     let hosting = {
         let mut hosts = world.query_filtered::<(), (With<Lobby>, With<Host>)>();
@@ -163,6 +170,25 @@ fn stage_system_actions(world: &mut World) {
         return;
     }
     let next_tick = world.resource::<CurrentTick>().0 + 1;
+    {
+        let pauses: Vec<LockstepPauseReason> = world
+            .resource_mut::<Messages<PauseLockstep>>()
+            .drain()
+            .map(|p| p.0)
+            .collect();
+        let resumes = world
+            .resource_mut::<Messages<ResumeLockstep>>()
+            .drain()
+            .count();
+        let mut kept = world.resource_mut::<KeptSessionRequests>();
+        kept.pauses.extend(pauses);
+        kept.resumes += resumes;
+    }
+    if world.resource::<crate::LockstepMigration>().is_collecting()
+        || next_tick <= world.resource::<crate::LastBroadcastTick>().0
+    {
+        return;
+    }
     let mut actions = std::mem::take(&mut world.resource_mut::<PendingSystemActions>().0);
 
     // Everyone whose agreed tick this is, plus anyone whose agreed tick has already passed
@@ -189,15 +215,8 @@ fn stage_system_actions(world: &mut World) {
         actions.push(SystemAction::ParticipantJoined(uuid));
     }
 
-    let pauses: Vec<LockstepPauseReason> = world
-        .resource_mut::<Messages<PauseLockstep>>()
-        .drain()
-        .map(|p| p.0)
-        .collect();
-    let resumes = world
-        .resource_mut::<Messages<ResumeLockstep>>()
-        .drain()
-        .count();
+    let KeptSessionRequests { pauses, resumes } =
+        std::mem::take(&mut *world.resource_mut::<KeptSessionRequests>());
     let paused = world.resource::<LockstepPaused>().0.is_some();
     if let Some(reason) = pauses.last().copied()
         && !paused
@@ -216,6 +235,13 @@ fn stage_system_actions(world: &mut World) {
     if let Some(stage) = world.get_resource::<StageSystemActions>().copied() {
         (stage.0)(world, next_tick, actions);
     }
+}
+
+/// Pause and resume requests read off their messages and not yet staged.
+#[derive(Resource, Default, Debug)]
+pub(crate) struct KeptSessionRequests {
+    pauses: Vec<LockstepPauseReason>,
+    resumes: usize,
 }
 
 /// Type-erased "push these system actions into the tracker for `tick`".
@@ -240,18 +266,24 @@ pub(crate) fn stage_into_tracker<A: LockstepAction>(
 /// The paused state is what the simulation applied ([`LockstepPaused`]), so the tick carrying
 /// the pause has run before the hold, and the tick carrying the resume is staged before it is
 /// lifted: the next pass finds a resume in the tracker for the tick about to run.
+///
+/// Not while a host that took over is simulating ticks its predecessor ruled: a resume may be
+/// among them, and the pause as of the last of them is what counts.
 fn host_hold_when_paused(
     host: Query<(), (With<Lobby>, With<Host>)>,
     paused: Res<LockstepPaused>,
     stall: Res<LockstepStall>,
     mut holds: ResMut<TickHolds>,
     resume_staged: Option<Res<ResumeStaged>>,
+    tick: Res<CurrentTick>,
+    last_broadcast: Res<crate::LastBroadcastTick>,
 ) {
     if host.is_empty() {
         return;
     }
     let _ = stall;
-    let held = paused.0.is_some() && resume_staged.is_none();
+    let catching_up = tick.0 < last_broadcast.0;
+    let held = paused.0.is_some() && resume_staged.is_none() && !catching_up;
     holds.set(TickHoldReason::SessionPause, held);
 }
 
@@ -310,8 +342,13 @@ fn track_stall<A: LockstepAction>(
     participants: Query<(&LobbyParticipant, &LockstepLobbyParticipant)>,
     mut stall: ResMut<LockstepStall>,
     mut started: Local<std::collections::BTreeMap<u128, Duration>>,
+    migration: Res<crate::LockstepMigration>,
+    last_broadcast: Res<crate::LastBroadcastTick>,
 ) {
-    let waiting = holds.holds(TickHoldReason::WaitingForPeers);
+    // Nobody is late while the survivors of a host change are still agreeing where to resume,
+    // or while a host that took over simulates what its predecessor ruled.
+    let migrating = migration.holds_the_clock() || (!host.is_empty() && tick.0 < last_broadcast.0);
+    let waiting = holds.holds(TickHoldReason::WaitingForPeers) && !migrating;
     if !waiting {
         started.clear();
         if !stall.waiting_on.is_empty() || stall.paused {
@@ -401,26 +438,39 @@ fn kick_stalled_participants(
 const MAX_CATCH_UP: f64 = 0.5;
 
 /// A client with more ticks in hand than its buffer runs fast until it has caught up.
+///
+/// So does a host that took over behind its predecessor's rulings: until it has simulated them,
+/// it rules nothing, and every client waits on it.
 fn catch_up<A: LockstepAction>(
     tick: Res<CurrentTick>,
     config: Res<LockstepConfig>,
     tracker: Res<ActionTracker<A>>,
     client: Query<(), (With<Lobby>, Without<Host>)>,
+    host: Query<(), (With<Lobby>, With<Host>)>,
+    last_broadcast: Res<crate::LastBroadcastTick>,
     dilation: Option<ResMut<TickRateDilation>>,
 ) {
     let Some(mut dilation) = dilation else {
         return;
     };
-    if client.is_empty() {
-        return;
-    }
-    let backlog = tracker
-        .newest_tick()
-        .map_or(0, |newest| newest.saturating_sub(tick.0));
-    let target = if backlog > config.client_tick_buffer + 2 {
-        1.0 + (backlog as f64 / 64.0).min(MAX_CATCH_UP)
+    let target = if !host.is_empty() {
+        let backlog = last_broadcast.0.saturating_sub(tick.0);
+        if backlog > 2 {
+            1.0 + (backlog as f64 / 64.0).min(MAX_CATCH_UP)
+        } else {
+            1.0
+        }
+    } else if !client.is_empty() {
+        let backlog = tracker
+            .newest_tick()
+            .map_or(0, |newest| newest.saturating_sub(tick.0));
+        if backlog > config.client_tick_buffer + 2 {
+            1.0 + (backlog as f64 / 64.0).min(MAX_CATCH_UP)
+        } else {
+            1.0
+        }
     } else {
-        1.0
+        return;
     };
     if (dilation.0 - target).abs() > 1e-9 {
         dilation.0 = target;

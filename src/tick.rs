@@ -65,6 +65,9 @@ pub enum TickHoldReason {
     /// A client in the middle of a replay it could not finish in one frame: the clock waits
     /// for the rest of it rather than running ahead of a world that is not caught up.
     Replaying,
+    /// The session's host is gone and a new one is taking over: a lockstep peer waits until the
+    /// survivors have agreed on the last tick the old host ruled.
+    HostMigration,
     /// A game's own reason, for something not listed.
     Custom(u8),
 }

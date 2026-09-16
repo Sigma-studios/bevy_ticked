@@ -72,7 +72,10 @@ margins }`); every peer runs the same actions on the same tick. Joins, leaves, p
 kicks are system actions on a ruled tick (`LockstepRoster`, `TickedEvents<RosterChange>`);
 `StallPolicy` names who is waited on and kicks after a bound; a joiner catches up at up to
 1.5×; buffers are sized from measured arrival margins. `checksum_exchange` compares hashes
-across peers and latches `Desync` on the host's confirmation.
+across peers and latches `Desync` on the host's confirmation. `migration` resumes a match when
+the lobby changes host: survivors report the rulings they hold, the new host resumes from the
+furthest tick it can assemble without a gap (within a trust window) and rules from the next, and
+the old host leaves on that tick everywhere. Nobody rewinds.
 
 ## `bevy_ticked_testing`
 

@@ -68,7 +68,10 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::marker::PhantomData;
 
 use crate::checksum::{ChecksumLog, Divergence, WorldHash};
-use crate::{JoinSnapshotReceived, LockstepJoinSet, LockstepLobbyParticipant};
+use crate::{
+    JoinSnapshotReceived, LockstepJoinSet, LockstepLobbyParticipant, LockstepMigrationSet,
+    LockstepResumed,
+};
 
 /// What one peer's world hashed to at one tick.
 ///
@@ -160,6 +163,7 @@ where
             // Idempotent with `LockstepPlugin`'s own registration, and needed here so this
             // plugin builds on its own.
             .add_message::<JoinSnapshotReceived>()
+            .add_message::<LockstepResumed>()
             .register_control_message_type::<ChecksumReport<H>>(
                 "bevy_ticked_lockstep/ChecksumReport",
                 bevy_ensemble::MessageAuthority::Any,
@@ -178,6 +182,10 @@ where
                 forget_samples_on_join::<H>
                     .after(LockstepJoinSet::ApplyJoinSnapshot)
                     .before(LockstepJoinSet::FinalizeJoinSnapshot),
+            )
+            .add_systems(
+                PreUpdate,
+                forget_reports_past_resume::<H>.after(LockstepMigrationSet::ApplyVerdict),
             );
     }
 }
@@ -426,6 +434,27 @@ fn forget_samples_on_join<H>(
     log.clear();
     pending.reports.clear();
     last_announced.0 = None;
+}
+
+/// Forget every parked report for a tick past where a host change resumed the session.
+///
+/// Those ticks were ruled by a host that is gone, and the new host rules them again, differently:
+/// a report the old host sent for one of them, still parked on a client that had not reached it,
+/// would be compared against the new ruling and reported as a desync that never happened. In
+/// `PreUpdate`, right after the verdict, because the first tick past it can be sampled in the
+/// same frame.
+fn forget_reports_past_resume<H>(
+    mut resumed: MessageReader<LockstepResumed>,
+    mut pending: ResMut<PendingChecksumReports<H>>,
+) where
+    H: WorldHash,
+{
+    let Some(resume_after) = resumed.read().map(|resumed| resumed.resume_after).min() else {
+        return;
+    };
+    pending
+        .reports
+        .retain(|(_, report)| report.tick <= resume_after);
 }
 
 #[cfg(test)]

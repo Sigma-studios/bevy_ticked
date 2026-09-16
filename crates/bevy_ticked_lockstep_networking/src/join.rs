@@ -39,6 +39,12 @@ pub fn request_join_snapshot_on_client_join<S: JoinSnapshot>(
 /// [`JOIN_SNAPSHOT_REQUEST_INTERVAL`] ago is answered by that capture. A request after the
 /// interval is a genuine retry and is answered afresh; its snapshot tick is the newer one, but
 /// the tracker floor stays at the older, so a client that applies either is caught up from it.
+///
+/// # Not during a host migration
+///
+/// A new host still simulating the ticks its predecessor ruled would capture a world behind
+/// them, and the catch-up that follows a join stops at the host's current tick, short of them.
+/// Requests that arrive then wait in [`DeferredJoinSnapshotRequests`] until the migration is over.
 pub fn receive_join_snapshot_requests<S: JoinSnapshot>(
     mut messages: MessageReader<ReceivedEnsembleMessage<JoinSnapshotRequest>>,
     host_lobby: Option<Single<Entity, (With<Lobby>, With<Host>)>>,
@@ -48,16 +54,20 @@ pub fn receive_join_snapshot_requests<S: JoinSnapshot>(
     time: Res<Time>,
     current_tick: Res<CurrentTick>,
     mut capture_messages: MessageWriter<CaptureJoinSnapshot<S>>,
+    migration: Res<crate::LockstepMigration>,
+    mut deferred: ResMut<crate::DeferredJoinSnapshotRequests>,
 ) {
     let Some(host_lobby) = host_lobby else {
         return;
     };
 
-    for message in messages.read() {
-        let Some(sender) = message.sender else {
-            continue;
-        };
-
+    let arrived = messages.read().filter_map(|message| message.sender);
+    if !migration.is_idle() {
+        deferred.0.extend(arrived);
+        return;
+    }
+    let senders: Vec<u128> = deferred.0.drain(..).chain(arrived).collect();
+    for sender in senders {
         if participants
             .iter()
             .any(|(participant, of)| of.0 == *host_lobby && participant.player_uuid == sender)

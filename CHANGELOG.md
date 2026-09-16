@@ -5,6 +5,11 @@ pull requests #1–#14 on this repository are the phases.
 
 ## Unreleased
 
+- **T18** — a lockstep match survives its host. Survivors report the rulings they hold, the new
+  host resumes from the furthest it can assemble without a gap (bounded by
+  `HostMigrationPolicy::trust_window`) and rules on; nobody rewinds, and the old host leaves on
+  the first tick the new one rules. New wire types: rebuild every peer.
+
 - **T17** — a snapshot session survives its lobby changing host. `HostChanged` ends the ticked
   session on every peer and the roles are taken back in the same lobby once the new host is
   verified. `end_ticked_session` is public; `TickedNetwork` can lose and name hosts. Pins
