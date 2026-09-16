@@ -262,3 +262,79 @@ fn a_tombstone_is_reaped_once_the_window_has_passed() {
         "past the window nothing can ask for it back, so it is destroyed"
     );
 }
+
+/// An app whose history window is short enough that the reaper runs inside a test.
+fn reaping_app() -> App {
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins)
+        .add_plugins(TickedPlugin {
+            source: TickSource::Manual,
+            history_ticks: Some(4),
+            ..default()
+        })
+        .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
+            1.0 / 64.0,
+        )))
+        .register_ticked_component::<Height>();
+    app
+}
+
+/// Reaping a tombstone takes its id out of the index with it.
+///
+/// The reaper destroys a tombstone with a plain despawn and leaves the unindexing to the `Remove`
+/// observer. A tombstone is `Disabled`, though, and a default query skips `Disabled` — so the
+/// observer could not see what it was being told about, and the id went on naming an entity that
+/// had gone. Everything that asks the index for a tombstone got a dead handle back.
+#[test]
+fn a_reaped_tombstone_is_forgotten_by_the_index() {
+    let mut app = reaping_app();
+    let body = app.world_mut().spawn_tracked(Height(1));
+    let id = app.world().get::<TickTrackedEntity>(body).unwrap().0;
+    step(&mut app);
+    app.world_mut().entity_mut(body).despawn_ticked();
+    for _ in 0..8 {
+        step(&mut app);
+    }
+
+    assert!(
+        app.world().get_entity(body).is_err(),
+        "the window has passed it, so it is destroyed"
+    );
+    assert_eq!(
+        app.world().resource::<TrackedEntityIndex>().tombstone_of(id),
+        None,
+        "the index still offers the reaped entity to whoever mints this id next"
+    );
+}
+
+/// Minting a reaped id again spawns something, rather than dressing a corpse.
+///
+/// The allocator is rolled back, so a replay mints ids an earlier pass already burned, and a
+/// session reset zeroes it outright. Either way the spawner asks the index whether it has a
+/// tombstone for the id — and an entry the reaper left behind hands it an entity whose index has
+/// since been reused, which is the panic this test is named for.
+#[test]
+fn a_reaped_id_minted_again_lands_on_a_live_entity() {
+    let mut app = reaping_app();
+    let body = app.world_mut().spawn_tracked(Height(1));
+    let id = app.world().get::<TickTrackedEntity>(body).unwrap().0;
+    step(&mut app);
+    app.world_mut().entity_mut(body).despawn_ticked();
+    for _ in 0..8 {
+        step(&mut app);
+    }
+    assert!(app.world().get_entity(body).is_err());
+
+    app.world_mut().insert_resource(TrackedIdAllocator::default());
+    let again = app.world_mut().spawn_tracked(Height(2));
+
+    assert!(
+        app.world().get_entity(again).is_ok(),
+        "the re-minted id landed on an entity that does not exist"
+    );
+    assert_eq!(
+        app.world().get::<TickTrackedEntity>(again).map(|t| t.0),
+        Some(id),
+        "the same id, on a live entity this time"
+    );
+}

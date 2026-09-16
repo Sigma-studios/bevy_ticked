@@ -35,6 +35,7 @@ use std::collections::BTreeMap;
 
 use bevy::ecs::entity_disabling::Disabled;
 use bevy::ecs::lifecycle::Despawn;
+use bevy::ecs::query::Allow;
 use bevy::ecs::system::EntityCommands;
 use bevy::prelude::*;
 
@@ -340,17 +341,23 @@ pub(crate) fn reap_before(world: &mut World, tick: u64) {
     if index.tombstones().next().is_none() {
         return;
     }
-    let candidates: Vec<Entity> = index.tombstones().map(|(entity, _)| entity).collect();
-    let doomed: Vec<Entity> = candidates
+    let candidates: Vec<(Entity, u64)> = index.tombstones().collect();
+    let doomed: Vec<(Entity, u64)> = candidates
         .into_iter()
-        .filter(|entity| {
+        .filter(|(entity, _)| {
             world
                 .get::<Tombstone>(*entity)
                 .is_some_and(|tombstone| tombstone.died_at < tick)
         })
         .collect();
-    for entity in doomed {
+    for (entity, id) in doomed {
         world.despawn(entity);
+        // Say so rather than leave it to the `Remove` observer. The observer does do it, but it
+        // reads a query, and the entity being destroyed here is `Disabled` — which is precisely
+        // the combination that once left the id naming a freed index.
+        if let Some(mut index) = world.get_resource_mut::<TrackedEntityIndex>() {
+            index.forget(id, entity);
+        }
     }
 }
 
@@ -363,7 +370,9 @@ pub(crate) fn reap_all(world: &mut World) {
 /// so once.
 pub(crate) fn record_plain_despawn(
     despawn: On<Despawn, TickTrackedEntity>,
-    tracked: Query<(&TickTrackedEntity, Has<Tombstone>)>,
+    // `Allow<Disabled>`, or the `tombstoned` arm below is unreachable: a tombstone is `Disabled`,
+    // and a default query filter hides one, so the fetch failed before it could be asked.
+    tracked: Query<(&TickTrackedEntity, Has<Tombstone>), Allow<Disabled>>,
     tick: Res<CurrentTick>,
     mut lifetimes: ResMut<TrackedEntityLifetimes>,
 ) {

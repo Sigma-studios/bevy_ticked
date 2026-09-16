@@ -18,6 +18,8 @@
 //! would then unindex the live entity and leave the map claiming the id does not exist, which
 //! reads as "the host sent me a rocket that belongs to nobody".
 
+use bevy::ecs::entity_disabling::Disabled;
+use bevy::ecs::query::Allow;
 use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
 
@@ -55,6 +57,18 @@ impl TrackedEntityIndex {
             self.by_id.remove(&id);
         }
         self.tombstones.insert(id, entity);
+    }
+
+    /// Forget a tombstone whose entity has been destroyed.
+    ///
+    /// The `Remove` observer does this too, and is what keeps the map honest in the ordinary case.
+    /// The reaper says so itself as well, because it is the one place that destroys a tombstone on
+    /// purpose — and an entry that outlives its entity is handed to the next spawn to mint that id
+    /// as though it were a live handle.
+    pub(crate) fn forget(&mut self, id: u64, entity: Entity) {
+        if self.tombstones.get(&id) == Some(&entity) {
+            self.tombstones.remove(&id);
+        }
     }
 
     pub(crate) fn revive(&mut self, id: u64, entity: Entity) {
@@ -104,7 +118,11 @@ pub(crate) fn index_tracked(
 
 pub(crate) fn unindex_tracked(
     remove: On<Remove, TickTrackedEntity>,
-    tracked: Query<&TickTrackedEntity>,
+    // `Allow<Disabled>`, because the entity this is called about is usually a tombstone, and a
+    // tombstone is `Disabled`. A default query filter hides one, so without this the reaper
+    // destroyed the entity and the id went on naming it — and the next spawn to mint that id was
+    // handed a handle whose index had since been reused.
+    tracked: Query<&TickTrackedEntity, Allow<Disabled>>,
     mut index: ResMut<TrackedEntityIndex>,
 ) {
     let Ok(id) = tracked.get(remove.entity) else {
