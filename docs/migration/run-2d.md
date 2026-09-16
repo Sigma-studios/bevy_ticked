@@ -19,3 +19,25 @@ came upstream as `crates/bevy_ticked_networking_ensemble/tests/lossy_links.rs`.
 **Watch:** the grenade's fuse and blast were written host-only because a client could not
 despawn predictively. They can now (`despawn_ticked`, revived if the host disagrees), so the
 client's grenade and the host's are the same entity id from the throw onward.
+
+## Host changes (T17, E5)
+
+run-2d picks this up when it moves `bevy_ensemble` from `9f7f245` to the rev `bevy_ticked` pins
+(`b71691a`), together with `bevy_ticked` `main`. Over WebRTC nothing migrates until the signalling
+server runs E5b. After that, the lobby survives a host that leaves or crashes. The bridge
+(`TickedEnsembleSessionPlugin`) ends the snapshot session on `HostChanged`, which resets every
+registered ticked resource (`RoundState` included) and the tracked world, then re-adopts roles under
+the new host. `sync_screen` then shows `Screen::Lobby` from the reset `RoundState`, so most of the
+way back to the lobby already happens without game code.
+
+| Where | Today | On a host change | Covered by |
+|---|---|---|---|
+| `session.rs:350` `reset_round_on_leave` | runs when the lobby goes; resets `BuiltArena`, `StartMatchRequest`, `PracticeArena`, `JoinedCode`, `CurrentTick` | also run on `HostChanged`, minus `JoinedCode`, which still names the lobby. `RoundState` is reset by the bridge; the plain resources are not, and a `StartMatchRequest` or `BuiltArena` left over would open the new host's lobby straight into the old match | `a_host_change_ends_the_snapshot_session_for_every_survivor` |
+| `session.rs:89` `is_authority()` | "no `LocalClientPlayer`" | for two frames after `HostChanged` a follower holds neither role and counts as the authority. Test for `LocalServerPlayer`, or for no lobby at all, instead | `the_new_host_and_the_client_that_stays_start_a_fresh_session` |
+| `player.rs:215` `spawn_players` | fills the roster from a `(Lobby, Host)` | nothing: a promotion inserts `Host` on the same lobby, and participants keep their entities | `the_new_host_hands_out_spawner_slots_from_one` |
+| `menu.rs:1379` `show_start_button`, `:1401` `show_lobby_code` | read the lobby every frame | nothing: START follows `Host`, and the WebRTC backend puts the lobby's code on the promoted lobby | — |
+| lobby screen | — | show `AwaitingHost { waited, successor }` while the match is frozen: "the host left, waiting for a new one" / "reaching the new host". Over WebRTC the wait lasts up to about 90 s | `a_client_that_loses_its_host_keeps_its_lobby_and_waits` (ensemble) |
+| `menu.rs:700` LEAVE, `session.rs:402` `leave` | despawns the lobbies | a host's leave now hands the lobby to the earliest-joined player. Add an action that writes `CloseLobby` if the host should end it for everyone | `a_closed_lobby_ends_for_everyone_and_does_not_migrate` (ensemble) |
+
+**Keep:** `sync_screen`'s "no lobby → `Screen::Menu`". It still ends the session after an unanswered
+wait (`LobbyLeft { HostGone }`) and after `CloseLobby`.

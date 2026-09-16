@@ -18,3 +18,20 @@ upstream behaviours now, with the tests named after the sections.
 **Keep:** `net/reconstruct.rs`'s idea — a rope re-dressed by an `On<Add, TickTrackedEntity>`
 observer — is exactly how a rebuilt entity comes back after a rewind past a plain despawn;
 the observer stays, `despawn_ticked` makes it rarely needed.
+
+## Host changes (T17, E5)
+
+shooting_ropes picks this up on its next `cargo update` (ticked `main`, ensemble `master`). Over WebRTC
+nothing migrates until the signalling server runs E5b. It adopts roles itself (`net/lobby.rs`) rather
+than through `TickedEnsembleSessionPlugin`, so the bridge's end-and-re-adopt on `HostChanged` does not
+run for it, and this step is the game's to write.
+
+| Where | Today | On a host change | Covered by |
+|---|---|---|---|
+| `net/lobby.rs:191` `release_lobby` | runs when no lobby is left; despawns the tracked world, removes the roles, sets `Authority::Solo`, zeroes the tick | also run it on `HostChanged`, keeping `LocalMultiplayerPlayerId` (the lobby stands and the id is the same). Calling `bevy_ticked_networking_ensemble::end_ticked_session` does the bridge's share | `a_host_change_ends_the_snapshot_session_for_every_survivor` |
+| `net/lobby.rs:129` `adopt_lobby` | runs only while `Authority::Solo` | nothing once the release above sets `Solo`: a promoted peer's lobby has `Host`, so it becomes `Authority::Host`. A follower should wait for `HandshakeVerified` on its lobby before adopting, as the bridge's `adopt_role` does, or its registry handshake can time out during the reconnect | `a_slow_reconnect_to_the_new_host_does_not_time_out_the_registry_handshake` |
+| `menu/net/room.rs:240` `follow_the_host_into_the_world`, `app/state.rs:90` `end_the_world` | a client enters `InGame` when `WorldInfo` arrives | on `HostChanged`, go to `AppState::Menu` / `MenuScreen::Lobby`; the new host presses Start and picks the world, as for a fresh lobby | — |
+| `saves/apply.rs:271` | saves on `OnExit(InGame)` | check it only writes a world this peer hosted: after a host change a follower leaves `InGame` holding the old host's world | — |
+| `net/checksum.rs:168` `broadcast_checksum` | needs `Authority::Host` and a `(Lobby, Host)` | nothing, once `Authority` follows the promotion | — |
+| lobby / in-game UI | — | show `AwaitingHost { waited, successor }`: "the host left, waiting for a new one" / "reaching the new host" | `a_client_that_loses_its_host_keeps_its_lobby_and_waits` (ensemble) |
+| `menu/net/room.rs:198` Leave, `ui/settings.rs:415` | despawn the lobbies | a host's leave now hands the lobby to the earliest-joined player. Add an action that writes `CloseLobby` if the host should end it for everyone | `a_closed_lobby_ends_for_everyone_and_does_not_migrate` (ensemble) |

@@ -25,3 +25,23 @@ every reach; add `tests/sim_is_deterministic.rs` from the examples in this repos
 `Transform` → `Position` sync off; move a kart by `Position`, or opt back in with
 `positions_from_transforms()` and accept that a rollback then depends on nothing having touched
 `Transform` between ticks.
+
+## Host changes (T17, E5)
+
+bevy_kart picks this up when it moves `bevy_ensemble` from `9f7f245` to the rev `bevy_ticked` pins
+(`b71691a`), together with `bevy_ticked` `main`. Over WebRTC nothing migrates until the signalling
+server runs E5b. After that, the lobby survives a host that leaves or crashes, and the bridge ends
+the race and starts a fresh snapshot session under the new host. The race is not carried over; the
+survivors go back to the lobby screen.
+
+| Where | Today | On a host change | Covered by |
+|---|---|---|---|
+| `lobby.rs:328` `exit_lobby_when_session_ends` | both role resources gone → `OutOfLobby`, `OutOfGame` | **breaks first**: the bridge removes both roles for two frames on `HostChanged` and re-adopts them, so every survivor would drop to the start menu with its lobby still standing. Key it on the lobby entity being gone (or `LobbyLeft`), or skip it while `ReadoptAfterHostChange` exists | `a_host_change_ends_the_snapshot_session_for_every_survivor`, `the_new_host_and_the_client_that_stays_start_a_fresh_session` |
+| `lobby.rs` (new system) | nothing reads `HostChanged` | on `HostChanged`: set `AppState::OutOfGame`, keep `LobbyState::InLobby`, reset `FinishTimes`/`RaceEnded` and `autostart_race`'s `Local` | `every_peer_is_told_who_the_host_became` (ensemble) |
+| `lobby.rs:282` `enter_lobby` | `EnteredLobby` marks the one entry | nothing: the lobby entity is the same, so the marker stays and the screen must be rebuilt by hand (next row) | — |
+| `menu/lobby.rs:275` `spawn_lobby`, `menu/map_picker.rs:53` `spawn_picker(is_host)` | Start button and map picker fixed from `is_host` on `OnEnter(Screen::Lobby)` | respawn the lobby screen on `HostChanged`. A peer already on it gets no `OnEnter`. Clear `ListedTracks` so the new host's `refresh_track_list` fills its list | — |
+| `kart/mod.rs:336,423` | `is_host` cached per `LobbyCar`, kick buttons added at spawn | rebuild the cars' kick buttons on `HostChanged`; participants keep their entities, so no new `LobbyCar` is spawned | `participant_entities_and_player_data_survive_a_host_change` (ensemble) |
+| `map_sync.rs:97` | host announces `MapSelected` when `SelectedMap` changes, and to each `Added<LobbyClient>` | the promoted peer keeps the last map it received; mark `SelectedMap` changed on `HostChanged` so it is announced. Followers are re-seated as `Added<LobbyClient>` on the new host and hear it from there | `the_new_host_and_the_client_that_stays_start_a_fresh_session` |
+| `menu/start.rs:365` `report_join_failure` | exhaustive `match` on `LobbyLeftReason` | nothing: no variant was added. `HostGone` now arrives only after the wait for a new host (about 90 s over WebRTC) | `no_successor_before_the_deadline_ends_the_session_as_host_gone` (ensemble) |
+| lobby screen | — | show `AwaitingHost { waited, successor }`: "the host left, waiting for a new one" / "reaching the new host" | `a_client_that_loses_its_host_keeps_its_lobby_and_waits` (ensemble) |
+| `menu/lobby.rs:310` Leave | despawns the `Lobby` | a host's leave, by despawning or by `LeaveLobby`, now hands the lobby to the earliest-joined player. Give the host a "Close lobby" action that writes `CloseLobby` | `a_closed_lobby_ends_for_everyone_and_does_not_migrate` (ensemble) |
