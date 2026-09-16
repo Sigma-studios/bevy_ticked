@@ -32,6 +32,15 @@
 //!   snapshot rate. [`may_spawn_tracked`] is the guard, and it is strictly stricter than "am I the
 //!   authority".
 //!
+//! # When the host changes
+//!
+//! A lobby that migrates keeps its entity when its host goes, and another member hosts it. The
+//! snapshot model cannot carry a match across that: the authoritative world lived on the old host,
+//! and a client only ever held what it was sent, a little in the past. So a [`HostChanged`] ends the
+//! ticked session on every peer — both roles dropped, `reset_on_leave` clearing the world — and the
+//! roles are taken back afterwards, in the same lobby: a fresh session with the new host, which a
+//! game shows as its lobby screen. See [`end_ticked_session`].
+//!
 //! # Opt in, rather than automatic
 //!
 //! [`TickedEnsembleSessionPlugin`] is separate from
@@ -45,7 +54,9 @@ use bevy::prelude::*;
 use bevy_ensemble::prelude::*;
 // `PeerRtt` / `PeerRttJitter` come in via the prelude above; named here so the reason they are
 // wanted is legible at the import site.
-use bevy_ensemble::{LobbyClientPlayerUuid, PeerRtt, PeerRttJitter};
+use bevy_ensemble::{
+    HandshakeVerified, HostChanged, LobbyClientPlayerUuid, PeerRtt, PeerRttJitter,
+};
 use bevy_ticked::prelude::*;
 use bevy_ticked::time::{Ticked, TickedTime};
 use bevy_ticked_networking::client::{ClientTickBuffer, LocalClientPlayer};
@@ -54,7 +65,7 @@ use bevy_ticked_networking::server::{LocalServerPlayer, SnapshotRecipientList};
 
 use crate::handshake::{
     HandshakeTimedOut, HandshakeTimeout, LocalSpawnerSlot, RegistryMismatch, RegistryVerified,
-    TickedPeerVerified,
+    SpawnerSlots, TickedPeerVerified,
 };
 
 /// Adopt and release the ticked role from the ensemble lobby, run the registry handshake, and
@@ -83,6 +94,10 @@ impl Plugin for TickedEnsembleSessionPlugin {
             .insert_resource(HandshakeTimeout(self.handshake_timeout))
             .add_plugins(crate::handshake::plugin)
             .add_observer(forget_departed_client)
+            .add_systems(
+                PreUpdate,
+                end_session_on_host_change.after(bevy_ensemble::EnsembleSet::ReceivePackets),
+            )
             .add_systems(
                 Update,
                 (
@@ -171,6 +186,62 @@ pub fn may_spawn_tracked(
     lobbies.is_empty()
 }
 
+/// End this peer's ticked session, host or client: both roles dropped, and everything the registry
+/// handshake established about the session forgotten.
+///
+/// Dropping the roles is what does the work — `reset_on_leave` runs on their removal and clears
+/// the queue, the tick and every tracked entity. What this adds is the bookkeeping that belonged
+/// to the session: the verification, the spawner slot this peer was given, the slots it gave out,
+/// and which clients it had verified.
+pub fn end_ticked_session(world: &mut World) {
+    world.remove_resource::<LocalServerPlayer>();
+    world.remove_resource::<LocalClientPlayer>();
+    world.remove_resource::<RegistryVerified>();
+    world.remove_resource::<LocalSpawnerSlot>();
+    if let Some(mut slots) = world.get_resource_mut::<SpawnerSlots>() {
+        *slots = SpawnerSlots::default();
+    }
+    let verified: Vec<Entity> = world
+        .query_filtered::<Entity, With<TickedPeerVerified>>()
+        .iter(world)
+        .collect();
+    for entity in verified {
+        world.entity_mut(entity).remove::<TickedPeerVerified>();
+    }
+}
+
+/// On a peer whose lobby changed host: the ticked session has been ended, and roles are taken back
+/// once it is safe to.
+///
+/// Two conditions, both about order. A whole frame with no role, so that every `reset_on_leave`
+/// keyed on a role's removal has run before a `reset_on_host` or `reset_on_join` keyed on its
+/// addition — in one frame, the two run in no set order, and a leave that runs second undoes the
+/// join. And, on a client, the new host reached: a role taken before then starts the registry
+/// handshake's clock on a link that is still being built, and a reconnect slower than
+/// [`HandshakeTimeout`] would latch [`HandshakeTimedOut`] on a session that was about to work.
+#[derive(Resource, Clone, Copy, Debug)]
+pub struct ReadoptAfterHostChange {
+    frames_left: u8,
+}
+
+/// End the ticked session on every peer the moment its lobby changes host. See the module note.
+fn end_session_on_host_change(mut commands: Commands, mut changes: MessageReader<HostChanged>) {
+    let Some(change) = changes.read().last() else {
+        return;
+    };
+    info!(
+        "the lobby's host changed from {:#x} to {:#x}; the ticked session starts over with it",
+        change.previous, change.new
+    );
+    commands.queue(|world: &mut World| {
+        end_ticked_session(world);
+        // A mismatch or a timeout was about the old host. The new one gets its own chance.
+        world.remove_resource::<RegistryMismatch>();
+        world.remove_resource::<HandshakeTimedOut>();
+        world.insert_resource(ReadoptAfterHostChange { frames_left: 2 });
+    });
+}
+
 /// Take the host or client role as soon as this peer knows which body is its own.
 fn adopt_role(
     mut commands: Commands,
@@ -179,15 +250,27 @@ fn adopt_role(
     client: Option<Res<LocalClientPlayer>>,
     mismatch: Option<Res<RegistryMismatch>>,
     timed_out: Option<Res<HandshakeTimedOut>>,
+    readopt: Option<ResMut<ReadoptAfterHostChange>>,
     tracked: Query<Entity, With<TickTrackedEntity>>,
     hosting: Query<(), (With<Host>, Or<(With<Lobby>, With<PendingLobby>)>)>,
     // A client adopts on the promoted lobby, not the pending one: until the backend's own
     // handshake has run, the data channel may not carry anything, and a role taken then
     // starts the registry handshake's clock on a link that cannot deliver it yet.
-    joined: Query<(), (Without<Host>, With<Lobby>)>,
+    joined: Query<Has<HandshakeVerified>, (Without<Host>, With<Lobby>)>,
 ) {
     if server.is_some() || client.is_some() {
         return;
+    }
+    if let Some(mut readopt) = readopt {
+        if readopt.frames_left > 0 {
+            readopt.frames_left -= 1;
+            return;
+        }
+        let new_host_reached = !hosting.is_empty() || joined.iter().any(|verified| verified);
+        if !new_host_reached {
+            return;
+        }
+        commands.remove_resource::<ReadoptAfterHostChange>();
     }
     // A session this peer cannot speak the language of, or never heard from, does not get
     // retried at frame rate.
@@ -288,7 +371,8 @@ fn seed_tick_buffer(
     );
 }
 
-/// Give the role back when the lobby goes, however it went.
+/// Give the role back when the lobby goes, however it went. A host change ends the session too,
+/// in [`end_session_on_host_change`], with the lobby still standing.
 ///
 /// A state check rather than `RemovedComponents<Lobby>`, because a refused join despawns an entity
 /// that never carried [`Lobby`] at all — the removal never fires, and the peer sits in a session
@@ -305,12 +389,9 @@ fn release_role(
     if !lobbies.is_empty() {
         return;
     }
-    // `reset_on_leave` does the rest, keyed off these being removed.
-    commands.remove_resource::<LocalServerPlayer>();
-    commands.remove_resource::<LocalClientPlayer>();
-    // What the handshake established was about this session.
-    commands.remove_resource::<RegistryVerified>();
-    commands.remove_resource::<LocalSpawnerSlot>();
+    // `reset_on_leave` does the rest, keyed off the roles being removed.
+    commands.queue(end_ticked_session);
+    commands.remove_resource::<ReadoptAfterHostChange>();
 }
 
 /// Forget a registry mismatch or a handshake timeout once the lobby it belonged to is gone.

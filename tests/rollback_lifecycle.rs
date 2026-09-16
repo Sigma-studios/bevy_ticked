@@ -301,7 +301,9 @@ fn a_reaped_tombstone_is_forgotten_by_the_index() {
         "the window has passed it, so it is destroyed"
     );
     assert_eq!(
-        app.world().resource::<TrackedEntityIndex>().tombstone_of(id),
+        app.world()
+            .resource::<TrackedEntityIndex>()
+            .tombstone_of(id),
         None,
         "the index still offers the reaped entity to whoever mints this id next"
     );
@@ -325,7 +327,8 @@ fn a_reaped_id_minted_again_lands_on_a_live_entity() {
     }
     assert!(app.world().get_entity(body).is_err());
 
-    app.world_mut().insert_resource(TrackedIdAllocator::default());
+    app.world_mut()
+        .insert_resource(TrackedIdAllocator::default());
     let again = app.world_mut().spawn_tracked(Height(2));
 
     assert!(

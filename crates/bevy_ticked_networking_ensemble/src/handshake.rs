@@ -53,7 +53,6 @@ use bevy_ensemble::{HandshakeVerified, LobbyClientMessage, LobbyClientPlayerUuid
 use bevy_ticked::prelude::*;
 use bevy_ticked::tick::CurrentTick;
 use bevy_ticked_networking::client::LocalClientPlayer;
-use bevy_ticked_networking::server::LocalServerPlayer;
 use serde::{Deserialize, Serialize};
 
 /// What each peer says about the shape of its registries.
@@ -399,14 +398,26 @@ fn verify_client(world: &mut World, uuid: u128) {
 
 /// A client keeps the slot its host gave it, and draws remote bodies far enough behind the
 /// host's send rate that there is always a next state to blend toward.
+///
+/// Applied only while this peer holds the client role. A welcome can arrive in the gap after a
+/// host change, before the role is taken back; a slot inserted then would be cleared by the
+/// `reset_on_leave` it raced, so the welcome is kept until there is a role to apply it to.
 fn receive_welcome(
     mut welcomes: MessageReader<ReceivedEnsembleMessage<TickedSessionWelcome>>,
+    mut pending: Local<Option<TickedSessionWelcome>>,
+    client: Option<Res<LocalClientPlayer>>,
     mut commands: Commands,
 ) {
-    for welcome in welcomes.read() {
-        commands.insert_resource(LocalSpawnerSlot(SpawnerSlot(welcome.message.slot)));
+    if let Some(welcome) = welcomes.read().last() {
+        *pending = Some(welcome.message);
+    }
+    if client.is_none() {
+        return;
+    }
+    if let Some(welcome) = pending.take() {
+        commands.insert_resource(LocalSpawnerSlot(SpawnerSlot(welcome.slot)));
         commands.insert_resource(bevy_ticked_networking::replication::InterpolationDelay(
-            (2 * welcome.message.send_every).max(2),
+            (2 * welcome.send_every).max(2),
         ));
     }
 }
@@ -456,10 +467,7 @@ fn refuse_after_timeout(world: &mut World, mut waited: Local<Duration>) {
 /// Dropping the roles is what actually ends it: `reset_on_leave` fires on their removal and
 /// clears the queue, the tick and every tracked entity the wrong-shaped snapshots built.
 fn end_client_session(world: &mut World) {
-    world.remove_resource::<LocalServerPlayer>();
-    world.remove_resource::<LocalClientPlayer>();
-    world.remove_resource::<RegistryVerified>();
-    world.remove_resource::<LocalSpawnerSlot>();
+    crate::session::end_ticked_session(world);
 }
 
 #[cfg(test)]

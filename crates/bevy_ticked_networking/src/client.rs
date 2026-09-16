@@ -400,13 +400,10 @@ fn reset_on_join<T: TickedInput>(world: &mut World) {
         // Tombstones go too. A tombstone is `Disabled`, so a default filter would leave it
         // standing — and the allocator is reset to zero a few lines below, which means the first
         // ids minted under the new session land straight on the previous one's graveyard.
-        let mut tracked = world.query_filtered::<
-            Entity,
-            (
-                With<TickTrackedEntity>,
-                bevy::ecs::query::Allow<bevy::ecs::entity_disabling::Disabled>,
-            ),
-        >();
+        let mut tracked = world.query_filtered::<Entity, (
+            With<TickTrackedEntity>,
+            bevy::ecs::query::Allow<bevy::ecs::entity_disabling::Disabled>,
+        )>();
         tracked.iter(world).collect()
     };
     for entity in stale {

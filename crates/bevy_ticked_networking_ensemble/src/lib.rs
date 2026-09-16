@@ -10,7 +10,8 @@ pub use handshake::{
     SpawnerSlots, TickedPeerVerified, TickedRegistryHandshake, TickedSessionWelcome,
 };
 pub use session::{
-    TickedEnsembleSessionPlugin, TickedSessionLobby, is_authoritative, is_solo, may_spawn_tracked,
+    ReadoptAfterHostChange, TickedEnsembleSessionPlugin, TickedSessionLobby, end_ticked_session,
+    is_authoritative, is_solo, may_spawn_tracked,
 };
 
 use std::marker::PhantomData;
@@ -154,11 +155,15 @@ fn forward_received_snapshots(
     mut messages: MessageReader<ReceivedEnsembleMessage<EnsembleSnapshotMessage>>,
     handshake: Option<Res<handshake::HandshakeInstalled>>,
     verified: Option<Res<RegistryVerified>>,
+    client: Option<Res<bevy_ticked_networking::client::LocalClientPlayer>>,
     mut stats: Option<ResMut<ReplayStats>>,
     mut commands: Commands,
 ) {
     for msg in messages.read() {
-        if handshake.is_some() && verified.is_none() {
+        // A verified peer with no client role is between sessions: after a host change the new
+        // host can be verified a frame before the role is taken back, and a snapshot applied then
+        // is applied to a world `reset_on_join` is about to clear.
+        if handshake.is_some() && (verified.is_none() || client.is_none()) {
             if let Some(stats) = stats.as_mut() {
                 stats.dropped_before_handshake += 1;
             }
@@ -428,7 +433,7 @@ mod tests {
     }
 
     /// With the handshake installed, nothing reaches the client until the registries have
-    /// been compared; the drop is counted where a test can read it.
+    /// been compared and it holds the client role; the drop is counted where a test can read it.
     #[test]
     fn a_snapshot_before_verification_is_dropped_and_counted() {
         let mut app = bridged_app();
@@ -450,11 +455,30 @@ mod tests {
             1
         );
 
+        // Verified, but between sessions — a host change ends the role before the new host is
+        // verified, and takes it back after.
         app.insert_resource(RegistryVerified);
         app.world_mut().write_message(ReceivedEnsembleMessage {
             sender: Some(1),
             message: EnsembleSnapshotMessage {
                 bytes: packet_at(4),
+            },
+            received_at: bevy_ensemble::Instant::now(),
+        });
+        app.update();
+        assert!(app.world().resource::<Arrivals>().0.is_empty());
+        assert_eq!(
+            app.world()
+                .resource::<ReplayStats>()
+                .dropped_before_handshake,
+            2
+        );
+
+        app.insert_resource(bevy_ticked_networking::client::LocalClientPlayer(7));
+        app.world_mut().write_message(ReceivedEnsembleMessage {
+            sender: Some(1),
+            message: EnsembleSnapshotMessage {
+                bytes: packet_at(5),
             },
             received_at: bevy_ensemble::Instant::now(),
         });
