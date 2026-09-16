@@ -230,9 +230,11 @@ fn the_buffer_follows_the_reliable_stream_not_the_pings() {
         .client_tick_buffer;
 
     // A far slower link: the client's batches start arriving late and its buffer grows,
-    // from the host's word, with no ping measurement in the loop.
+    // from the host's word, with no ping measurement in the loop. A few ticks at a time, as
+    // each late batch is reported, so the link is given long enough for that to add up rather
+    // than exactly as long as it took on one particular start.
     net.set_link(Link::satellite());
-    net.run(400);
+    net.run(600);
     let buffer_after = net
         .app(A)
         .world()
@@ -407,5 +409,65 @@ fn a_frame_that_runs_several_ticks_does_not_change_the_world() {
             b.at(tick),
             "tick {tick} differs between the two sessions"
         );
+    }
+}
+
+/// The roster each tick ran with, on this peer, as the game's systems saw it.
+#[derive(Resource, Default)]
+struct RosterEachTick(std::collections::BTreeMap<u64, Vec<u128>>);
+
+fn record_roster(
+    tick: Res<bevy_ticked::prelude::CurrentTick>,
+    roster: Res<LockstepRoster>,
+    mut seen: ResMut<RosterEachTick>,
+) {
+    seen.0.insert(tick.0, roster.0.iter().copied().collect());
+}
+
+fn recording_peer(uuid: u128) -> App {
+    let mut app = peer(uuid);
+    app.init_resource::<RosterEachTick>().add_systems(
+        bevy_ticked::prelude::TickedSimulation,
+        record_roster.in_set(bevy_ticked_lockstep_networking::LockstepSimulationSet::Game),
+    );
+    app
+}
+
+#[test]
+fn a_joiner_runs_every_tick_with_the_roster_the_host_ran_it_with() {
+    // A joiner hears that a participant exists -- itself, or another joiner the host accepted
+    // first -- before it hears the roster the host sends when it accepts it, and used to run
+    // ticks in between with nobody on the roster. With a second joiner staggered by a few frames
+    // each time, because which of them lands in that window depends on when it arrives.
+    for stagger in 0..24 {
+        let mut net = LoopbackNetwork::new(TICK);
+        net.add_host(HOST, recording_peer(HOST));
+        net.add_client(2, recording_peer(2));
+        net.run(stagger);
+        net.add_client(3, recording_peer(3));
+        net.run(300);
+
+        let host = net
+            .app(HOST_PEER)
+            .world()
+            .resource::<RosterEachTick>()
+            .0
+            .clone();
+        for p in [A, B] {
+            let ran = &net.app(p).world().resource::<RosterEachTick>().0;
+            assert!(
+                !ran.is_empty(),
+                "peer {p:?} never ran a tick (stagger {stagger})"
+            );
+            for (tick, roster) in ran {
+                if let Some(on_host) = host.get(tick) {
+                    assert_eq!(
+                        roster, on_host,
+                        "peer {p:?} ran tick {tick} with a different roster from the host's \
+                         (stagger {stagger})"
+                    );
+                }
+            }
+        }
     }
 }
