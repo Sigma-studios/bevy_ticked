@@ -32,6 +32,41 @@ obeys; `docs/avian.md` the physics bundle.
 | `AuthoritativeTick { tick, players_actions }` | `+ system: Vec<SystemAction>, margins` | T12 |
 | `LockstepConfig::host_tick_buffer` default 4 | 1 | T12 |
 | `TickedPlugin::default()` for a networked game | `TickedPlugin { source: TickSource::Hz(64.0), .. }` | T4 |
+| a game's own role teardown when its lobby changes host | `end_ticked_session`, done by `TickedEnsembleSessionPlugin` on `HostChanged` | T17 |
+
+## T17 — a snapshot session survives its lobby changing host
+
+`bevy_ensemble` is pinned at `9cb1854`, which adds host migration (its E5a–E5c): a lobby a backend
+marks migratable keeps its entity when the host goes, another member hosts it, and every peer
+reads `HostChanged`. No backend marks lobbies migratable yet, so nothing changes in a running game
+until one does. The wire hash changes (`bevy_ensemble/LobbyClosed`): rebuild every peer.
+
+**Before** the bridge took roles from whether a lobby existed and never gave one back while it did.
+A client promoted to host kept `LocalClientPlayer` for good and sent no snapshots; its clients kept
+waiting on a host that no longer ran the simulation.
+
+**After** a `HostChanged` ends the ticked session on every peer — both roles removed, so
+`reset_on_leave` clears the world, the queue and the tick — and roles are taken back in the same
+lobby once it is safe: after a frame with no role, and on a client only once its new host has been
+verified by `bevy_ensemble`, so a slow reconnect does not run out the registry handshake's clock.
+The new host hands out spawner slots from 1 again. The snapshot model cannot carry a match across
+a host change — the authoritative world was the old host's — so this is a fresh session, which a
+game shows as its lobby screen.
+
+- `end_ticked_session(world)` is public: the roles, `RegistryVerified`, `LocalSpawnerSlot`,
+  `SpawnerSlots` and every `TickedPeerVerified`. The mismatch and timeout paths use it too.
+- `ReadoptAfterHostChange` is present on a peer between the end and the new role.
+- A snapshot is forwarded only to a peer holding the client role, as well as a verified one.
+- A `TickedSessionWelcome` that arrives before the client role waits for it.
+- `bevy_ticked_testing`: `TickedNetwork::{set_host_migration, with_host_migration, lose_host,
+  name_host, migrate}`; `HostDeparture` and `HostMigratable` in the prelude; `clients()` answers
+  while no host is named.
+
+**What to change** On `HostChanged`, send the game back to its lobby screen and reset whatever
+round state is not a registered ticked resource. Stop keying "the session ended" on a
+`(Lobby, Without<Host>)` query going empty: a client promoted to host empties it. Code that holds
+the role resources itself (not through `TickedEnsembleSessionPlugin`) must drop them on
+`HostChanged` and wait a frame before taking one back.
 
 ## T16 — warm starting is kept
 

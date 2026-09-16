@@ -16,7 +16,9 @@ use std::time::Duration;
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
 use bevy_ensemble::{EnsembleMessage, EnsembleMessageRegistry, packet_index, unframe_packet};
-use bevy_ensemble_loopback::{Link, LoopbackNetwork, PacketFate, PeerId, SentPacket};
+use bevy_ensemble_loopback::{
+    HostDeparture, Link, LoopbackNetwork, PacketFate, PeerId, SentPacket,
+};
 use bevy_ticked::tracked_entity::TickTrackedEntity;
 use bevy_ticked_networking::input::TickedInput;
 use bevy_ticked_networking::snapshot::{SnapshotPacket, decode_packet};
@@ -234,6 +236,33 @@ impl TickedNetwork {
         self.net.reconnect(peer);
     }
 
+    /// Make every lobby migratable with these waits, or none of them. See
+    /// [`LoopbackNetwork::set_host_migration`].
+    pub fn set_host_migration(&mut self, migration: Option<bevy_ensemble::HostMigratable>) {
+        self.net.set_host_migration(migration);
+    }
+
+    /// Builder form of [`set_host_migration`](Self::set_host_migration).
+    pub fn with_host_migration(mut self, migration: bevy_ensemble::HostMigratable) -> Self {
+        self.net.set_host_migration(Some(migration));
+        self
+    }
+
+    /// The host becomes unreachable. See [`LoopbackNetwork::lose_host`].
+    pub fn lose_host(&mut self, how: HostDeparture) -> PeerId {
+        self.net.lose_host(how)
+    }
+
+    /// The arbiter names `new_host`. See [`LoopbackNetwork::name_host`].
+    pub fn name_host(&mut self, new_host: PeerId) {
+        self.net.name_host(new_host);
+    }
+
+    /// The host crashes and `new_host` is named in its place.
+    pub fn migrate(&mut self, new_host: PeerId) {
+        self.net.migrate(new_host);
+    }
+
     // ---- looking around --------------------------------------------------------------------
 
     pub fn host(&self) -> PeerId {
@@ -252,10 +281,13 @@ impl TickedNetwork {
             .expect("this network has no client")
     }
 
-    /// Every peer that is not the host, in peer order.
+    /// Every peer that is not the host, in peer order. Every peer, while no host is named.
     pub fn clients(&self) -> Vec<PeerId> {
-        let host = self.net.host();
-        self.net.peers().filter(|peer| *peer != host).collect()
+        let host = self.net.try_host();
+        self.net
+            .peers()
+            .filter(|peer| Some(*peer) != host)
+            .collect()
     }
 
     pub fn peers(&self) -> Vec<PeerId> {

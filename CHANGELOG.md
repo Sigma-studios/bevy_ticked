@@ -5,6 +5,11 @@ pull requests #1–#14 on this repository are the phases.
 
 ## Unreleased
 
+- **T17** — a snapshot session survives its lobby changing host. `HostChanged` ends the ticked
+  session on every peer and the roles are taken back in the same lobby once the new host is
+  verified. `end_ticked_session` is public; `TickedNetwork` can lose and name hosts. Pins
+  `bevy_ensemble` at `9cb1854` (host migration, E5a–E5c).
+
 - **Fix** — an idle client's lead no longer runs away. A snapshot's `your_margin` is
   `MARGIN_UNMEASURED` when the host has timed no input from that client in the last
   `MARGIN_STALE_TICKS` (a quarter second), instead of zero; the client leaves its target alone
