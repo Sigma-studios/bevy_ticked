@@ -21,6 +21,11 @@ Apply order, the same for every game:
 8. **Physics**: `TickedAvianPlugin`; delete the `avian::*` registrations and the solver tweaks.
 9. **Diagnostics and tests**: replace the game's counters with `bevy_ticked_networking::diagnostics`
    and its harness with `bevy_ticked_testing`.
+10. **Host changes** (T17, T18, E5): a lobby now survives its host. `TickedEnsembleSessionPlugin` ends
+    the snapshot session on `HostChanged` and re-adopts roles under the new host two frames later;
+    a lockstep match resumes (T18). Reset what the old host owned and return to the lobby screen,
+    and do not treat "no role resource" as the end of the session. Show `AwaitingHost`, and give
+    the host a `CloseLobby` action. Tests: `TickedNetwork::with_host_migration`, `lose_host`, `migrate`.
 
 Each game's file lists what it deletes at each step and which upstream test now covers the
 behaviour the deleted code was protecting.

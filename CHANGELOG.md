@@ -5,6 +5,10 @@ pull requests #1–#14 on this repository are the phases.
 
 ## Unreleased
 
+- **Pin** — `bevy_ensemble` at `b71691a`: the WebRTC client (E5d) and Steam (E5e) turn host
+  migration on, so T17 and T18 run against real transports. The per-game checklists gain a
+  host-change section each.
+
 - **T18** — a lockstep match survives its host. Survivors report the rulings they hold, the new
   host resumes from the furthest it can assemble without a gap (bounded by
   `HostMigrationPolicy::trust_window`) and rules on; nobody rewinds, and the old host leaves on
