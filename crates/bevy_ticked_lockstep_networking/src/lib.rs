@@ -8,6 +8,7 @@ pub mod checksum_exchange;
 pub mod checksum_log;
 pub mod join;
 pub mod messages;
+pub mod migration;
 pub mod participants;
 pub mod pause;
 pub mod plugin;
@@ -43,6 +44,11 @@ pub use messages::{
     ClientScheduledActions, JoinSnapshotApplied, JoinSnapshotReceived, JoinSnapshotRequest,
     JoinSnapshotResponse, LockstepPauseReason, ParticipantJoined, PauseLockstep,
     ProvideJoinSnapshot, ResumeLockstep, RosterChange, SystemAction,
+};
+pub use migration::{
+    DeferredJoinSnapshotRequests, HostMigrationPolicy, LastMigration, LockstepMigration,
+    LockstepMigrationFailed, LockstepMigrationSet, LockstepResumed, MigrationReport,
+    MigrationResume, MigrationRuling, ResumeVerdict, UnruledLocalActions,
 };
 pub use participants::{
     LockstepLobbyParticipant, PendingLockstepParticipantJoins, activate_loaded_client_participants,

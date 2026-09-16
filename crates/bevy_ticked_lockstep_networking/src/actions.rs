@@ -96,6 +96,9 @@ pub fn flush_pending_actions<A: LockstepAction, S: JoinSnapshot>(
     current_tick: Res<CurrentTick>,
     mut tracker: ResMut<ActionTracker<A>>,
     mut last_scheduled: ResMut<LastScheduledTick>,
+    mut unruled: ResMut<crate::UnruledLocalActions<A>>,
+    last_broadcast: Res<crate::LastBroadcastTick>,
+    migration: Res<crate::LockstepMigration>,
     local_player_id: Option<Res<LocalMultiplayerPlayerId>>,
     client_lobby: Option<Single<Entity, (With<Lobby>, Without<Host>)>>,
     mut commands: Commands,
@@ -130,14 +133,30 @@ pub fn flush_pending_actions<A: LockstepAction, S: JoinSnapshot>(
     let Some(client_lobby) = client_lobby else {
         // Host or solo: into the tick about to run. Recorded only when there is something to
         // record; an absent entry is an empty one, and the broadcast never waits on the host.
-        last_scheduled.0 = Some(next_tick);
+        //
+        // Unless that tick is already ruled: a host that took over from another is simulating
+        // its predecessor's rulings up to `LastBroadcastTick`, and its own actions go into the
+        // first tick it rules.
+        let target = next_tick.max(last_broadcast.0 + 1);
+        last_scheduled.0 = Some(target);
         if !actions.is_empty() {
-            insert_actions_into_tracker(&mut tracker, next_tick, local_player_uuid, actions);
+            insert_actions_into_tracker(&mut tracker, target, local_player_uuid, actions);
         }
         return;
     };
 
-    let scheduled_tick = next_tick + config.client_tick_buffer;
+    // After a host change, never into a tick the old host ruled: a survivor catching up to where
+    // the session resumed would otherwise schedule into ticks that are final, and the new host
+    // would drop the batch as late.
+    //
+    // Not "past the newest ruling this peer holds" in general: under latency the rulings a
+    // client holds lag the host, scheduling past them lands every batch on a tick the host has
+    // already ruled, and the session crawls at the rate rulings echo back.
+    let resume_floor = match *migration {
+        crate::LockstepMigration::Resuming { resume_after, .. } => resume_after + 1,
+        _ => 0,
+    };
+    let scheduled_tick = (next_tick + config.client_tick_buffer).max(resume_floor);
     // Everything between the last flush and this one, so the sequence has no holes. Usually
     // empty: in the steady state `scheduled_tick` is exactly one past the last.
     let filler = match last_scheduled.0 {
@@ -159,6 +178,15 @@ pub fn flush_pending_actions<A: LockstepAction, S: JoinSnapshot>(
         commands
             .entity(*client_lobby)
             .trigger(move |entity| LobbyMessage::new_no_delay(entity, message));
+    }
+    // Kept until a ruling covers its tick: if the host goes before then, the next one is sent
+    // it again.
+    if !actions.is_empty() {
+        unruled
+            .0
+            .entry(scheduled_tick)
+            .or_default()
+            .extend(actions.iter().cloned());
     }
     let message = ClientScheduledActions {
         tick: scheduled_tick,
@@ -187,6 +215,10 @@ pub fn flush_pending_actions<A: LockstepAction, S: JoinSnapshot>(
 ///   is a tracker entry the host keeps until it simulates that tick. A client naming
 ///   `u64::MAX` kept one for ever; a client naming a million of them kept a million.
 ///   [`LockstepConfig::action_horizon`] bounds what any one message can reserve.
+///
+/// "Already simulated" means already *ruled*: a host that took over from another holds its
+/// predecessor's rulings up to `LastBroadcastTick` before it has simulated them, and none of
+/// those ticks may change. While it is still hearing from the survivors, nothing is recorded.
 pub fn receive_client_actions<A: LockstepAction>(
     mut messages: MessageReader<ReceivedEnsembleMessage<ClientScheduledActions<A>>>,
     mut tracker: ResMut<ActionTracker<A>>,
@@ -195,12 +227,20 @@ pub fn receive_client_actions<A: LockstepAction>(
     host_lobby: Option<Single<Entity, (With<Lobby>, With<Host>)>>,
     participants: Query<(&LobbyParticipant, &LobbyParticipantOf), With<LockstepLobbyParticipant>>,
     mut margins: ResMut<crate::ArrivalMargins>,
+    last_broadcast: Res<crate::LastBroadcastTick>,
+    migration: Res<crate::LockstepMigration>,
 ) {
     let Some(host_lobby) = host_lobby else {
         return;
     };
+    if migration.is_collecting() {
+        messages.clear();
+        return;
+    }
 
-    let horizon = current_tick.0.saturating_add(config.action_horizon);
+    let ruled_through = current_tick.0.max(last_broadcast.0);
+    let catching_up = current_tick.0 < last_broadcast.0;
+    let horizon = ruled_through.saturating_add(config.action_horizon);
     for message in messages.read() {
         let Some(sender) = message.sender else {
             continue;
@@ -214,10 +254,10 @@ pub fn receive_client_actions<A: LockstepAction>(
             debug!("dropping actions for tick {tick} from {sender}, which is not a participant");
             continue;
         }
-        if tick <= current_tick.0 {
+        if tick <= ruled_through {
             debug!(
-                "dropping actions from {sender} for tick {tick}: already simulated (at {})",
-                current_tick.0
+                "dropping actions from {sender} for tick {tick}: already ruled (through \
+                 {ruled_through})"
             );
             continue;
         }
@@ -225,9 +265,14 @@ pub fn receive_client_actions<A: LockstepAction>(
             debug!("dropping actions from {sender} for tick {tick}: past the horizon ({horizon})");
             continue;
         }
-        // How early this batch was: the number the client sizes its buffer from.
-        let margin = (tick as i64 - current_tick.0 as i64).clamp(i16::MIN as i64, i16::MAX as i64);
-        margins.0.insert(sender, margin as i16);
+        // How early this batch was: the number the client sizes its buffer from. Not measured
+        // while this host is still simulating ticks it did not rule, when its clock says nothing
+        // about the link.
+        if !catching_up {
+            let margin =
+                (tick as i64 - current_tick.0 as i64).clamp(i16::MIN as i64, i16::MAX as i64);
+            margins.0.insert(sender, margin as i16);
+        }
 
         insert_actions_into_tracker(&mut tracker, tick, sender, message.message.actions.clone());
     }

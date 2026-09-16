@@ -32,9 +32,9 @@ pub fn sync_lockstep_pause_state<A: LockstepAction, S: JoinSnapshot>(world: &mut
     let Some(scoped_lobby) = scoped_lobby else {
         // Its own reason, let go of: a client that left while waiting on the next
         // authoritative tick was still waiting on it, alone, for ever.
-        world
-            .resource_mut::<TickHolds>()
-            .release(TickHoldReason::WaitingForPeers);
+        let mut holds = world.resource_mut::<TickHolds>();
+        holds.release(TickHoldReason::WaitingForPeers);
+        holds.release(TickHoldReason::HostMigration);
         return;
     };
 
@@ -52,7 +52,15 @@ pub fn sync_lockstep_pause_state<A: LockstepAction, S: JoinSnapshot>(world: &mut
     let current_tick = world.resource::<CurrentTick>().0;
     let next_tick = current_tick + 1;
 
-    let should_pause = if host_lobby.is_some() {
+    let last_broadcast = world.resource::<crate::LastBroadcastTick>().0;
+    let should_pause = if host_lobby.is_some() && next_tick <= last_broadcast {
+        // A host that took over, simulating what its predecessor ruled: like a client, it needs
+        // the ruling and nothing else.
+        !world
+            .resource::<ActionTracker<A>>()
+            .ticks
+            .contains_key(&next_tick)
+    } else if host_lobby.is_some() {
         // Host: wait for every required *client* whose initial buffer window has elapsed.
         // During the first `buffer` ticks after joining, a client's flush has not yet produced
         // actions for `next_tick` — this is expected and should not block.

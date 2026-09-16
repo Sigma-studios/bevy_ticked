@@ -33,6 +33,45 @@ obeys; `docs/avian.md` the physics bundle.
 | `LockstepConfig::host_tick_buffer` default 4 | 1 | T12 |
 | `TickedPlugin::default()` for a networked game | `TickedPlugin { source: TickSource::Hz(64.0), .. }` | T4 |
 | a game's own role teardown when its lobby changes host | `end_ticked_session`, done by `TickedEnsembleSessionPlugin` on `HostChanged` | T17 |
+| an exhaustive `match` on `TickHoldReason` | `+ HostMigration` | T18 |
+
+## T18 — a lockstep match survives its host
+
+No change to `bevy_ensemble`'s pin (`9cb1854`). The lockstep wire hash changes (three messages are
+registered): rebuild every peer.
+
+**Before** a lobby that changed host left a lockstep session on the old host's last ruling for
+good: nobody ruled the next tick, and the new host did not know it was supposed to.
+
+**After** a `HostChanged` starts a migration, and the match resumes without anybody rewinding.
+Every peer holds `TickHoldReason::HostMigration`. Each survivor, once it has reached the new host,
+sends every ruling it holds (`MigrationRuling`) and where it is (`MigrationReport`). The new host
+resumes from the furthest ruled tick it can assemble without a gap — its own rulings, then a
+survivor's copy of a tick it lacks, never more than `HostMigrationPolicy::trust_window` past its own
+— sends each survivor the rulings it is missing and a `MigrationResume`, and rules from the next
+tick. The old host, and anyone who did not report, leave on that tick on every peer. A survivor that
+had not finished joining, reported late, or had simulated past what could be assembled joins again
+from a snapshot; a new host that had not finished joining leaves the lobby
+(`LockstepMigrationFailed`) so another member is named.
+
+- `LockstepMigration` says where a peer is (`Idle`, `Reporting`, `Collecting`, `Resuming`);
+  `LockstepResumed { previous_host, resume_after, verdict }` is written when it is decided;
+  `LastMigration` keeps the last one.
+- A client keeps `trust_window` (128) ticks of rulings it has simulated, and
+  `UnruledLocalActions<A>` — what it scheduled that no ruling has covered — so a new host can be
+  sent both. A host that took over holds rulings ahead of its clock: `LastBroadcastTick` may be
+  greater than `CurrentTick` while it catches up, and nothing is ruled, staged, recorded or
+  measured into those ticks. A pause asked for meanwhile is kept for the first tick it rules.
+- A parked checksum report for a tick past the resume is forgotten.
+- Join snapshot requests that arrive during a migration wait for its end
+  (`DeferredJoinSnapshotRequests`).
+- `testing`: `migration_state`, `last_broadcast_tick`, `newest_ruled_tick`, `unruled_local_actions`.
+
+**What to change** Handle `TickHoldReason::HostMigration` in an exhaustive match. Spawn and despawn
+players from `TickedEvents<RosterChange>` rather than from participant entities, which a host change
+removes at different moments on different peers. Show `LockstepMigration` or `AwaitingHost` while the
+clock is held for it: on a transport that notices a silently dead host only on its idle timeout, the
+wait is long.
 
 ## T17 — a snapshot session survives its lobby changing host
 

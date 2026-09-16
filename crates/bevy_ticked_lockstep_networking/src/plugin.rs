@@ -150,6 +150,13 @@ where
             .init_resource::<LastScheduledTick>()
             .insert_resource(ClientSnapshotState::<S>::default())
             .init_resource::<PendingJoinSnapshotFlushes<S>>()
+            .init_resource::<crate::HostMigrationPolicy>()
+            .init_resource::<crate::LockstepMigration>()
+            .init_resource::<crate::UnruledLocalActions<A>>()
+            .init_resource::<crate::migration::MigrationCollection<A>>()
+            .init_resource::<crate::DeferredJoinSnapshotRequests>()
+            .add_message::<crate::LockstepResumed>()
+            .add_message::<crate::LockstepMigrationFailed>()
             .add_message::<crate::CaptureJoinSnapshot<S>>()
             .add_message::<crate::ApplyJoinSnapshot<S>>()
             .add_message::<crate::JoinSnapshotApplied<S>>()
@@ -192,6 +199,57 @@ where
             .register_control_message_type::<crate::ParticipantJoined>(
                 "bevy_ticked_lockstep/ParticipantJoined",
                 MessageAuthority::HostOnly,
+            )
+            // A host change: what a survivor holds goes to its new host, and where to resume
+            // comes back from nobody else.
+            .register_control_message_type::<crate::MigrationReport>(
+                "bevy_ticked_lockstep/MigrationReport",
+                MessageAuthority::Any,
+            )
+            .register_control_message_type::<crate::MigrationRuling<A>>(
+                "bevy_ticked_lockstep/MigrationRuling",
+                MessageAuthority::Any,
+            )
+            .register_control_message_type::<crate::MigrationResume>(
+                "bevy_ticked_lockstep/MigrationResume",
+                MessageAuthority::HostOnly,
+            )
+            .configure_sets(
+                PreUpdate,
+                (
+                    crate::LockstepMigrationSet::Begin,
+                    crate::LockstepMigrationSet::ApplyVerdict,
+                )
+                    .chain()
+                    .after(EnsembleSet::ReceivePackets),
+            )
+            .add_systems(
+                PreUpdate,
+                (
+                    crate::migration::begin_migration::<A, S>,
+                    crate::migration::hold_during_migration,
+                )
+                    .chain()
+                    .in_set(crate::LockstepMigrationSet::Begin),
+            )
+            .add_systems(
+                PreUpdate,
+                (
+                    crate::migration::collect_migration_reports::<A>
+                        .after(EnsembleSet::ReceivePackets),
+                    crate::migration::apply_migration_verdict::<A, S>
+                        .in_set(crate::LockstepMigrationSet::ApplyVerdict)
+                        .after(receive_authoritative_actions::<A, S>),
+                ),
+            )
+            .add_systems(
+                Update,
+                (
+                    crate::migration::report_to_new_host::<A, S>,
+                    crate::migration::decide_resume_tick::<A>,
+                    crate::migration::end_resume,
+                    crate::migration::forget_migration_on_lobby_removed::<A>,
+                ),
             )
             .add_systems(
                 TickedLoop,

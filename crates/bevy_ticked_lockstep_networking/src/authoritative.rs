@@ -131,7 +131,8 @@ pub fn broadcast_authoritative_actions<A: LockstepAction>(
     // No connected clients — nothing to broadcast. Keep last_broadcast_tick
     // current so cleanup doesn't create a gap for future broadcasts.
     if lobby_clients.is_empty() {
-        last_broadcast_tick.0 = current_tick.0;
+        // Never lowered: a host that took over holds rulings ahead of its own clock.
+        last_broadcast_tick.0 = last_broadcast_tick.0.max(current_tick.0);
         return;
     }
 
@@ -307,11 +308,33 @@ pub fn apply_authoritative_tick<A: Clone>(
 /// Remove tracker entries for ticks that have already been simulated and broadcast, but
 /// preserve any ticks still needed by pending client joins — for at most
 /// [`PENDING_JOIN_WINDOW_TICKS`], after which the join is given up on and the floor released.
+///
+/// A client keeps the last [`HostMigrationPolicy::trust_window`](crate::HostMigrationPolicy)
+/// ticks it simulated, and so does a host that has just taken over: a survivor behind them after
+/// a host change is filled in from those. A client's [`UnruledLocalActions`](crate::UnruledLocalActions)
+/// go once a ruling for their tick is here.
 pub fn cleanup_old_tracker_entries<A: LockstepAction>(
     mut tracker: ResMut<ActionTracker<A>>,
     current_tick: Res<CurrentTick>,
     mut pending_client_joins: ResMut<PendingClientJoins>,
+    host_lobby: Query<(), (With<Lobby>, With<Host>)>,
+    migration: Res<crate::LockstepMigration>,
+    policy: Option<Res<crate::HostMigrationPolicy>>,
+    mut unruled: ResMut<crate::UnruledLocalActions<A>>,
 ) {
+    let hosting = !host_lobby.is_empty();
+    if !hosting && let Some(newest) = tracker.newest_tick() {
+        unruled.0.retain(|tick, _| *tick > newest);
+    }
+    let retained = if !hosting || !migration.is_idle() {
+        policy.map_or(
+            crate::HostMigrationPolicy::default().trust_window,
+            |policy| policy.trust_window,
+        )
+    } else {
+        0
+    };
+    let floor = current_tick.0.saturating_sub(retained);
     let oldest_kept = current_tick.0.saturating_sub(PENDING_JOIN_WINDOW_TICKS);
     pending_client_joins.0.retain(|uuid, snapshot_tick| {
         let kept = *snapshot_tick >= oldest_kept;
@@ -330,8 +353,8 @@ pub fn cleanup_old_tracker_entries<A: LockstepAction>(
         .copied()
         .min()
         .map(|snapshot_tick| snapshot_tick + 1)
-        .unwrap_or(current_tick.0)
-        .min(current_tick.0);
+        .unwrap_or(floor)
+        .min(floor);
     tracker.ticks.retain(|tick, _| *tick >= min_keep);
     tracker.system.retain(|tick, _| *tick >= min_keep);
 }
