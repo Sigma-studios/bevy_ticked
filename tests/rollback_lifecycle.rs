@@ -150,6 +150,37 @@ fn a_tombstone_reused_by_a_replayed_spawn_keeps_the_entity_id() {
 }
 
 #[test]
+fn a_tombstone_handed_to_a_different_spawn_is_dressed_again() {
+    let mut app = app();
+    app.world_mut().spawn_tracked(Height(1));
+    step(&mut app);
+    let bullet = app.world_mut().spawn_tracked(Height(5));
+    step(&mut app);
+
+    // What the game's observer put on at the first spawn. Taken off here so that a second run
+    // of that observer is the only thing that could put it back.
+    app.world_mut().entity_mut(bullet).remove::<Dressed>();
+
+    // Rewind past the spawn, then spawn something else: the allocator was rolled back too, so
+    // the id the bullet had is handed to the next thing minted, and its tombstone is reused.
+    // `Tag` is what makes it a different thing rather than the same spawn replayed -- a pellet's
+    // id going to a piece of a ragdoll, which carries components a pellet never had.
+    rollback_to_tick(app.world_mut(), 1);
+    let again = app.world_mut().spawn_tracked((Height(6), Tag));
+
+    assert_eq!(
+        again, bullet,
+        "the tombstone is reused, which is what makes the entity handle stable"
+    );
+    assert!(
+        app.world().get::<Dressed>(again).is_some(),
+        "an id handed to a different spawn has to fire `Add<TickTrackedEntity>` again, or the \
+         entity keeps the previous occupant's local-only state -- its sprite, its mesh, its \
+         animation -- while carrying the new one's replicated components"
+    );
+}
+
+#[test]
 fn restoring_a_tick_where_an_entity_was_alive_rebuilds_it_through_the_spawn_path() {
     let mut app = app();
     let body = app.world_mut().spawn_tracked((Height(10), Tag));
