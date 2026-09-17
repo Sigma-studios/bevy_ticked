@@ -16,11 +16,13 @@
 //! with the same `Entity`. Registering it on the wire (the networking crate does) lets the
 //! authority's snapshot correct a client's counters for slot 0.
 
+use std::any::TypeId;
+
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::lifetimes::revive;
+use crate::lifetimes::{redress, revive};
 use crate::tracked_index::TrackedEntityIndex;
 
 /// How many low bits of an id name the spawner slot.
@@ -45,6 +47,23 @@ impl TickTrackedEntity {
         self.0 >> SLOT_BITS
     }
 }
+
+/// What a tracked id was last minted as: the type of the bundle it was spawned with.
+///
+/// The discriminator between the two things a revived tombstone can be. A replay re-running the
+/// spawn it ran before passes the very same bundle type; an id that has been handed to something
+/// else — the corrected timeline spawning a piece of a ragdoll where the mispredicted one spawned
+/// a pellet — passes a different one. Only the second is a reason to dress the entity again.
+///
+/// The obvious alternative, comparing the entity's shape before and after the bundle goes on,
+/// does not work and is worth saying why: a tombstone's components are mutated by things that
+/// have nothing to do with who owns the id. A predicted spawn the authority has not seen loses
+/// its networked types to `finish_wire_tick`'s absence rule while it waits, so the replayed
+/// spawn puts them back and the shape "changes" on every single rollback.
+///
+/// Local-only and unregistered, so nothing captures, restores or strips it.
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SpawnedAs(pub TypeId);
 
 /// Who mints an id: the authority, or a client's seat.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -139,7 +158,9 @@ impl TrackedIdAllocator {
 /// from a slot the caller names — a bullet spawned on every peer by the player who fired it,
 /// under that player's slot, so every peer mints the same id. If the id has a tombstone (a
 /// rewind undid this very spawn a moment ago), the tombstone is revived with the new bundle
-/// on it, so the `Entity` is the one the game already held.
+/// on it, so the `Entity` is the one the game already held — and [`redress`] fires the game's
+/// `On<Add, TickTrackedEntity>` observer again, because an id handed back is not a promise that
+/// it has come back as the same thing.
 #[derive(SystemParam)]
 pub struct TrackedSpawner<'w, 's> {
     commands: Commands<'w, 's>,
@@ -158,15 +179,16 @@ impl TrackedSpawner<'_, '_> {
     }
 
     /// Spawn `bundle` as a tracked entity minted by this peer.
-    pub fn spawn(&mut self, bundle: impl Bundle) -> Entity {
+    pub fn spawn<B: Bundle>(&mut self, bundle: B) -> Entity {
         let slot = self.local_slot();
         self.spawn_by(slot, bundle)
     }
 
     /// Spawn `bundle` as a tracked entity minted by `slot`.
-    pub fn spawn_by(&mut self, slot: SpawnerSlot, bundle: impl Bundle) -> Entity {
+    pub fn spawn_by<B: Bundle>(&mut self, slot: SpawnerSlot, bundle: B) -> Entity {
         let id = self.allocator.next(slot);
         let tick = self.tick.0;
+        let minted_as = SpawnedAs(TypeId::of::<B>());
         // A handle out of the index is a hint, not a promise. The reaper destroys a tombstone once
         // the window has passed it, so one that is no longer in the world means this id is being
         // minted afresh — and commanding the dead handle instead is the crash this guard is for.
@@ -179,13 +201,23 @@ impl TrackedSpawner<'_, '_> {
                 self.commands
                     .entity(entity)
                     .queue(move |mut entity: EntityWorldMut| {
-                        entity.insert(bundle);
+                        // See [`SpawnedAs`]: the same bundle type is the replay re-running a
+                        // spawn it has run before, and dressing that again would fire the game's
+                        // observer once per rollback.
+                        let changed_hands = entity.get::<SpawnedAs>().copied() != Some(minted_as);
+                        entity.insert((bundle, minted_as));
                         let e = entity.id();
-                        entity.world_scope(|world| revive(world, e, id.0, tick));
+                        entity.world_scope(|world| {
+                            revive(world, e, id.0, tick);
+                            if changed_hands {
+                                // After the bundle, so the observer sees what it is now.
+                                redress(world, e, id.0);
+                            }
+                        });
                     });
                 entity
             }
-            None => self.commands.spawn((bundle, id)).id(),
+            None => self.commands.spawn((bundle, id, minted_as)).id(),
         }
     }
 }
@@ -193,20 +225,20 @@ impl TrackedSpawner<'_, '_> {
 /// [`TrackedSpawner`] for code that holds a `&mut World`.
 pub trait TrackedWorldExt {
     /// Spawn `bundle` as a tracked entity minted by this peer's slot.
-    fn spawn_tracked(&mut self, bundle: impl Bundle) -> Entity;
+    fn spawn_tracked<B: Bundle>(&mut self, bundle: B) -> Entity;
     /// Spawn `bundle` as a tracked entity minted by `slot`.
-    fn spawn_tracked_by(&mut self, slot: SpawnerSlot, bundle: impl Bundle) -> Entity;
+    fn spawn_tracked_by<B: Bundle>(&mut self, slot: SpawnerSlot, bundle: B) -> Entity;
 }
 
 impl TrackedWorldExt for World {
-    fn spawn_tracked(&mut self, bundle: impl Bundle) -> Entity {
+    fn spawn_tracked<B: Bundle>(&mut self, bundle: B) -> Entity {
         let slot = self
             .get_resource::<LocalSpawnerSlot>()
             .map_or(SpawnerSlot::AUTHORITY, |l| l.0);
         self.spawn_tracked_by(slot, bundle)
     }
 
-    fn spawn_tracked_by(&mut self, slot: SpawnerSlot, bundle: impl Bundle) -> Entity {
+    fn spawn_tracked_by<B: Bundle>(&mut self, slot: SpawnerSlot, bundle: B) -> Entity {
         let id = self.resource_mut::<TrackedIdAllocator>().next(slot);
         let tick = self
             .get_resource::<crate::tick::CurrentTick>()
@@ -220,8 +252,15 @@ impl TrackedWorldExt for World {
             .filter(|entity| self.get_entity(*entity).is_ok());
         match tombstone {
             Some(entity) => {
-                self.entity_mut(entity).insert(bundle);
+                // See the note in `TrackedSpawner::spawn_by`: the same bundle type is the same
+                // spawn coming round again, and must not be dressed a second time.
+                let minted_as = SpawnedAs(TypeId::of::<B>());
+                let changed_hands = self.get::<SpawnedAs>(entity).copied() != Some(minted_as);
+                self.entity_mut(entity).insert((bundle, minted_as));
                 revive(self, entity, id.0, tick);
+                if changed_hands {
+                    redress(self, entity, id.0);
+                }
                 entity
             }
             None => self.spawn((bundle, id)).id(),

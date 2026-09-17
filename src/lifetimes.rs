@@ -331,6 +331,40 @@ pub fn revive(world: &mut World, entity: Entity, id: u64, tick: u64) {
     }
 }
 
+/// Fire `Add<TickTrackedEntity>` again, so the game's spawn observer dresses this entity for
+/// what it has just become.
+///
+/// A revive brings an *entity* back; it does not promise it is the same *thing*. Ids are minted
+/// from an allocator that is rolled back with everything else, so a replay that spawns something
+/// different at the tick a pellet used to be spawned mints the pellet's id for it, finds the
+/// pellet's tombstone and reuses it. The game's presentation is local-only and hangs off
+/// `On<Add, TickTrackedEntity>`, which never runs again — and what is left is the new entity
+/// wearing the old one's clothes: a ragdoll's head drawn as a torso, a blast's mesh still on
+/// screen at the radius it had when its id was handed on.
+///
+/// Taking the marker off and putting it straight back is what re-fires those observers. The
+/// index follows it — `unindex_tracked`, then `index_tracked` — and lands where it started.
+///
+/// Call it **after** the entity's new state is on it, or the observer dresses it for what it
+/// was. [`revive`] deliberately does not do this itself: a rewind that undoes a despawn is the
+/// same thing coming back, and re-dressing that would hand the game a second copy of whatever
+/// its observer spawns.
+///
+/// For the same reason the callers redress only when the id has actually **changed hands**,
+/// which they judge by the type of the bundle it was minted with — see
+/// [`SpawnedAs`](crate::tracked_entity::SpawnedAs), which also records why the entity's *shape*
+/// cannot answer that question. A replay that re-runs the very same spawn must not redress: a
+/// client rolls back several times a second, and a game whose observer spawns a nameplate would
+/// get one per rollback. That rule is pinned by
+/// `on_add_fires_once_for_a_predicted_spawn_confirmed_by_the_host`.
+pub fn redress(world: &mut World, entity: Entity, id: u64) {
+    let Ok(mut entity_mut) = world.get_entity_mut(entity) else {
+        return;
+    };
+    entity_mut.remove::<TickTrackedEntity>();
+    entity_mut.insert(TickTrackedEntity(id));
+}
+
 /// Every tombstone that died before `tick`: the window has passed it and nothing will ask for
 /// it back.
 pub(crate) fn reap_before(world: &mut World, tick: u64) {
