@@ -26,7 +26,7 @@ use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use bevy_ticked::{
-    lifetimes::{TrackedEntityLifetimes, revive, tombstone_at},
+    lifetimes::{TrackedEntityLifetimes, redress, reset, revive, tombstone_at},
     registry::{TickedComponentRegistry, TypeMask},
     resource_registry::TickedResourceRegistry,
     tick::CurrentTick,
@@ -79,6 +79,19 @@ pub struct FullBody {
     /// Other players' inputs the server already holds for ticks after `tick`, so a client's
     /// replay can use what those players actually pressed rather than nothing.
     pub inputs_ahead: Vec<RelayedInput>,
+    /// Ids that have been handed to a **different thing** since the world this recipient last
+    /// acknowledged — not despawned, replaced.
+    ///
+    /// Identity on the wire is an id, and an id outlives whatever first held it: a replay hands a
+    /// dead pellet's id to whatever the corrected timeline spawns instead. A recipient that
+    /// tombstoned the id learns that for itself when the record revives it, but one still holding
+    /// it *alive* cannot — a record is only components, and comparing its type mask against the
+    /// entity's shape is what [`SpawnedAs`](bevy_ticked::tracked_entity::SpawnedAs) documents as
+    /// unreliable. So the authority names them, and [`apply_full_body`] resets and redresses each.
+    ///
+    /// Per recipient and relative to their baseline, because a reset throws away local-only
+    /// state: resetting an id that did not change hands re-dresses something already right.
+    pub reborn: Vec<u64>,
 }
 
 /// The change since a baseline. Reserved for the delta phase.
@@ -90,6 +103,8 @@ pub struct DeltaBody {
     /// Components removed from entities that still exist.
     pub removed: Vec<(u64, TypeMask)>,
     pub despawned: Vec<u64>,
+    /// Ids handed to a different thing since the baseline. See [`FullBody::reborn`].
+    pub reborn: Vec<u64>,
     pub resources: Vec<(u16, Vec<u8>)>,
     pub inputs_ahead: Vec<RelayedInput>,
 }
@@ -230,6 +245,8 @@ pub fn build_full_body(world: &mut World, tick: u64) -> FullBody {
         entities,
         resources,
         inputs_ahead: Vec::new(),
+        // Per recipient, so the broadcast fills it in: see `BroadcastSnapshotCommand`.
+        reborn: Vec::new(),
     }
 }
 
@@ -299,16 +316,32 @@ pub fn apply_full_body(world: &mut World, tick: u64, body: &FullBody) -> Applied
         .collect();
 
     registry.begin_wire_tick(world, tick);
+    let reborn: HashSet<u64> = body.reborn.iter().copied().collect();
     for record in &body.entities {
         if !seen.insert(record.id) {
             applied.duplicate_ids.push(record.id);
             continue;
         }
-        let (entity, fresh) = match by_id.get(&record.id) {
-            Some(entity) => (*entity, false),
+        let (entity, fresh, redress_after) = match by_id.get(&record.id) {
+            Some(entity) => {
+                // Still held, and still held as whatever it was before. The third way an id
+                // changes hands, and the only one with no local sign of it at all — so the
+                // authority names it in `reborn` and the entity starts from nothing, exactly as
+                // it would on either spawn path.
+                let renamed = reborn.contains(&record.id);
+                if renamed {
+                    reset(world, *entity);
+                }
+                (*entity, false, renamed)
+            }
             None => {
-                // A tombstone this peer left — a predicted despawn the authority contradicts,
-                // a rewind past a spawn the authority confirms — comes back as itself.
+                // A tombstone this peer left — a predicted despawn the authority contradicts, a
+                // rewind past a spawn the authority confirms — comes back. Not necessarily as
+                // itself: the replay that ran while this peer was out of step may have handed the
+                // id to something else entirely, and this path has no bundle type to tell the two
+                // apart the way the spawn paths do. So it comes back *empty* and is rebuilt from
+                // the record below — the rule a change of hands follows everywhere else, and one
+                // that costs an id revived as itself nothing but being dressed a second time.
                 let tombstoned = world
                     .get_resource::<TrackedEntityIndex>()
                     .and_then(|index| index.tombstone_of(record.id))
@@ -318,13 +351,14 @@ pub fn apply_full_body(world: &mut World, tick: u64, body: &FullBody) -> Applied
                     .filter(|entity| world.get_entity(*entity).is_ok());
                 let entity = match tombstoned {
                     Some(entity) => {
+                        reset(world, entity);
                         revive(world, entity, record.id, tick);
                         entity
                     }
                     None => world.spawn_empty().id(),
                 };
                 by_id.insert(record.id, entity);
-                (entity, tombstoned.is_none())
+                (entity, tombstoned.is_none(), tombstoned.is_some())
             }
         };
         let mut rest: &[u8] = &record.bytes;
@@ -343,6 +377,13 @@ pub fn apply_full_body(world: &mut World, tick: u64, body: &FullBody) -> Applied
                 .entity_mut(entity)
                 .insert(TickTrackedEntity(record.id));
             applied.spawned.push(record.id);
+        } else if redress_after {
+            // Revived from a tombstone, or renamed while still alive. Either way the marker never
+            // left, so `Add` does not fire of its own accord and the game's spawn observer would
+            // never run — on an entity `reset` has just emptied and this record has just rebuilt,
+            // which would leave it with nothing drawn at all. Neither case is visible to the
+            // callers of `redress` in `tracked_entity`: there is no bundle here, only a record.
+            redress(world, entity, record.id);
         }
     }
     registry.finish_wire_tick(world, tick);

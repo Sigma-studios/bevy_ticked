@@ -190,7 +190,7 @@ pub mod minimal {
     pub fn register_components(app: &mut App) {
         app.register_networked_ticked_component::<Pos>("Pos")
             .register_networked_ticked_component::<Vel>("Vel")
-            .register_networked_ticked_component_once::<EntityKind>("EntityKind")
+            .register_networked_ticked_component::<EntityKind>("EntityKind")
             .register_networked_ticked_component::<PlayerSlot>("PlayerSlot")
             .register_networked_ticked_component::<Fuse>("Fuse");
         // `Owner` is the stack's own and is registered by the role plugins.

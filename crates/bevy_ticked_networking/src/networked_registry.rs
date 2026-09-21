@@ -49,15 +49,6 @@ pub trait NetworkedTickedAppExt {
         self.register_networked_ticked_component_as::<T>(wire_name, ReplicationClass::Changed)
     }
 
-    /// A networked component sent with its entity's first record and never again: a kind, a
-    /// spawn point, an owner. Full bodies (a join, a keyframe) still carry it.
-    fn register_networked_ticked_component_once<T: NetworkedTickedComponent>(
-        &mut self,
-        wire_name: &'static str,
-    ) -> &mut Self {
-        self.register_networked_ticked_component_as::<T>(wire_name, ReplicationClass::Once)
-    }
-
     /// A networked component with an explicit [`ReplicationClass`].
     fn register_networked_ticked_component_as<T: NetworkedTickedComponent>(
         &mut self,

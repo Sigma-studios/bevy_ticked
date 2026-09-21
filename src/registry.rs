@@ -143,9 +143,22 @@ pub enum ReplicationClass {
     /// On every delta, differing or not: for a type whose encoding is not canonical, so that
     /// equal values may encode differently and "unchanged" cannot be told from the bytes.
     Always,
-    /// Once per entity: with the entity's first record, never again. For what never changes
-    /// after the spawn — a kind, a spawn point, an owner.
-    Once,
+    // There is deliberately no `Once` — "with the entity's first record, never again". It was
+    // recommended for "a kind, a spawn point, an owner", and a kind is the one thing it could
+    // never safely be: an id is not a thing. The allocator is rolled back with everything else,
+    // so a replay hands a dead pellet's id to whatever the corrected timeline spawns in its
+    // place, and the kind and owner on that id change with it. "Once per entity" is once per
+    // **id**, so a recipient that learned the id as a pellet was never told otherwise, and went
+    // on drawing a pellet and running a pellet's systems against it for the rest of the session.
+    // `lifetimes::reset` puts right what such an entity *carries*; nothing can put right what was
+    // never sent.
+    //
+    // It also bought almost nothing, which is what settles it rather than merely condemns it:
+    // `Changed` sends nothing when the encoded bytes match the baseline, so for genuinely
+    // immutable data the two produce identical wire traffic and `Once` saved only the byte
+    // comparison. The two differed in exactly one case — when the value did change after the
+    // spawn, which is to say when the promise was false — and there `Once` was silently wrong
+    // where `Changed` is simply correct.
 }
 
 impl TickedComponentRegistry {

@@ -228,14 +228,25 @@ from host to a client at rest, 47.5 with two walking players (the audit measured
 Keyframes over 256 bytes are LZ4-compressed (`Compression::Lz4`, feature `lz4`, on by
 default); a compressed packet that would not shrink is sent raw.
 
-### Replicate once
+### Replicate once — removed
 
-`register_networked_ticked_component_once::<T>("name")` (or `_as(name, ReplicationClass)`)
-marks a component that never changes after spawn: it travels in the record that
-introduces the entity and in keyframes, never in a delta after that. `bevy_ticked::Owner`
-is registered this way; **do** the same for your kind markers, spawn points and colours.
-`ReplicationClass::Always` carries a component on every delta, changed or not, and is what
-`SendRates::every::<T>(n)` divides.
+`register_networked_ticked_component_once::<T>("name")` and `ReplicationClass::Once` are gone.
+Use `register_networked_ticked_component::<T>("name")`: the migration is deleting `_once` from
+the call. This section used to say "**do** the same for your kind markers, spawn points and
+colours", and that advice was wrong.
+
+"With the entity's first record, never again" is once per **id**, and an id is not a thing. The
+allocator is rolled back with everything else, so a replay hands a dead pellet's id to whatever
+the corrected timeline spawns in its place, and the kind and the owner on that id change with
+it — while the recipient, having been told once, goes on drawing a pellet and running a pellet's
+systems against it for the rest of the session. `bevy_ticked::Owner` was registered this way and
+had the bug itself.
+
+Nothing is lost by the change. `Changed` sends nothing when the encoded bytes match the baseline,
+so genuinely immutable data costs exactly what it cost under `Once`; the difference was only ever
+a byte comparison, and being silently wrong when the value turned out to change after all.
+`ReplicationClass::Always` is unaffected — it carries a component on every delta, changed or not,
+for an encoding that is not canonical, and is what `SendRates::every::<T>(n)` divides.
 
 ### A drawn body drops what its authority dropped
 

@@ -18,11 +18,20 @@
 //!
 //! # Classes and rates
 //!
-//! A [`ReplicationClass::Once`] type travels with an entity's first record and never again;
-//! [`Always`](ReplicationClass::Always) travels on every delta. [`SendRates`] carries a type
-//! only every nth delta: what it did not carry is what the client last had, which for a
-//! slowly-changing type is the point and for anything else is a stale value — set it on what
-//! can afford it.
+//! A [`Changed`](ReplicationClass::Changed) type travels when its encoded bytes differ from the
+//! baseline; [`Always`](ReplicationClass::Always) travels on every delta, for an encoding that is
+//! not canonical and whose equal values may not compare equal.
+//!
+//! There used to be a third, `Once` — with an entity's first record and never again — and it is
+//! gone. A tracked *id* outlives whatever first held it, so a replay can hand it to a different
+//! thing, and "never again" meant the recipient was never told the new occupant's kind or its
+//! owner: it went on drawing the dead one and running its systems for the rest of the session.
+//! It bought a byte comparison, because `Changed` already sends nothing when the bytes match, and
+//! it cost that. Immutable data is `Changed` now and costs exactly the same on the wire.
+//!
+//! [`SendRates`] carries a type only every nth delta: what it did not carry is what the client
+//! last had, which for a slowly-changing type is the point and for anything else is a stale value
+//! — set it on what can afford it.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::ops::Range;
@@ -176,7 +185,6 @@ pub fn build_delta(
             let class = registry.class_of(*index).unwrap_or_default();
             let carry = match (base_parts.get(index), class) {
                 (None, _) => true,
-                (Some(_), ReplicationClass::Once) => false,
                 (Some(_), ReplicationClass::Always) => rates.carries(*index, seq),
                 (Some(before), ReplicationClass::Changed) => {
                     *before != bytes && rates.carries(*index, seq)
@@ -232,6 +240,9 @@ pub fn build_delta(
         changed,
         removed,
         despawned,
+        // Per recipient and not derivable from the two bodies — an id that changed hands is in
+        // both of them, with a record either side. The broadcast fills it in.
+        reborn: Vec::new(),
         resources,
         inputs_ahead: current.inputs_ahead.clone(),
     }
@@ -259,6 +270,8 @@ pub fn apply_delta(
         entities: Vec::with_capacity(baseline.entities.len() + delta.changed.len()),
         resources: Vec::new(),
         inputs_ahead: delta.inputs_ahead.clone(),
+        // Carried through: it is about the ids, not about this packet's shape.
+        reborn: delta.reborn.clone(),
     };
     let wire_len = registry.wire_len();
     for base in &baseline.entities {

@@ -189,7 +189,7 @@ pub(crate) fn install_owner(app: &mut App) {
         .get_resource::<TickedComponentRegistry>()
         .is_some_and(|registry| registry.index_of::<Owner>().is_some());
     if !registered {
-        app.register_networked_ticked_component_once::<Owner>("bevy_ticked::Owner");
+        app.register_networked_ticked_component::<Owner>("bevy_ticked::Owner");
     }
     // The allocator is rolled back by the core; on the wire, the authority's snapshot corrects
     // a client's counters (slot 0 above all: the ids the host has handed out).
