@@ -340,7 +340,10 @@ through the "at or behind" path, no replay burst. The lead-taking jump now disca
 frame accumulator's backlog, so a two-second frame after a tab switch does not put the lead
 sixteen ticks past target.
 
-`PausePolicy` (resource, installed by both role plugins): `who_may_pause: HostOnly |
+`PausePolicy` (resource, installed by both role plugins, and a game may insert its own before
+them — `install` guards its idempotence on a private marker, not on the policy, which it used
+to, silently leaving a game that configured pausing with no pause systems and no `SessionPause`
+at all): `who_may_pause: HostOnly |
 AnyParticipant` (a client's `PauseSession` becomes a `SendPauseRequest` the bridge carries as
 `bevy_ticked/PauseRequest`; the host applies it as `PauseReason::Participant(uuid)` only
 under `AnyParticipant`), `auto_pause_on_focus_loss: true` (`window` feature of
@@ -348,6 +351,18 @@ under `AnyParticipant`), `auto_pause_on_focus_loss: true` (`window` feature of
 regained resumes), `auto_pause_after_real_gap: Some(500 ms)` (a frame that long after the
 previous one is a stall the host just came back from: it pauses as `HostStalled` at the tick
 it is still on, so clients drop what they predicted, and resumes next frame),
+`auto_pause_when_behind_for: Some(3)` (three consecutive frames each longer than the whole
+catch-up budget — `MaxTicksPerFrame` ticks, 250 ms at the defaults — pause as `HostTooSlow`, and
+the first frame back inside it resumes. The other two automatic pauses are *edges*: a window
+event, and one long frame. Neither can see a host that is merely too slow, and that is the case
+between them — at three frames a second the delta is 333 ms, under the gap, while 21 ticks are
+needed per frame against a budget of 16, so the host discards the remainder every frame and its
+clock falls behind real time for good while every client piles up lead that each snapshot takes
+back. Measured as frame time against the budget rather than by counting discarded backlogs: once
+paused the clock is held and nothing is discarded, so a discard-counting guard would read
+"recovered" on its first paused frame and oscillate. A host *inside* the budget is never paused —
+10 FPS needs 6.4 ticks of 16 and is genuinely fine. `HealthWarnings::host_behind_real_time`
+counts it and `pause::HostBehind` carries the frame counter for a readout),
 `client_soft_hold_after: None` (opt-in: a client that has applied no snapshot for that long
 holds `TickHoldReason::SoftHold` rather than run ahead of a host that may be gone, and the
 next snapshot releases it. It shipped at 250 ms and was the "everything freezes for half a

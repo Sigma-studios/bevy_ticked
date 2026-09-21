@@ -134,7 +134,7 @@ impl InputStats {
 
 /// Things that should not happen, counted when they do.
 ///
-/// Each warns once, then counts. The three here are the ones a consumer's diagnostics document
+/// Each warns once, then counts. The first three are the ones a consumer's diagnostics document
 /// asked for by name, because each had cost them a session to find by hand.
 #[derive(Resource, Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct HealthWarnings {
@@ -146,6 +146,11 @@ pub struct HealthWarnings {
     /// A snapshot arrived for a tick older than the oldest tick the client still has history
     /// for, so the replay from it could not restore rollback-only state.
     pub snapshot_older_than_history: u32,
+    /// The host could not keep up with real time for long enough to pause the session: frames
+    /// longer than the backlog `MaxTicksPerFrame` lets it run, one after another. Counted rather
+    /// than only curtained, because the cause is the host's frame cost and not the network, and
+    /// the symptom everybody else sees — a lead that keeps being taken back — names neither.
+    pub host_behind_real_time: u32,
 }
 
 impl HealthWarnings {

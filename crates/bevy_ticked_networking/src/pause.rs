@@ -21,7 +21,15 @@
 //! The host pauses itself when its window loses focus (`window` feature) and when it notices
 //! a gap in real time longer than [`PausePolicy::auto_pause_after_real_gap`]: it just came
 //! back from a stall, and the pause tells every client to drop what it predicted in the
-//! meantime. A client that has heard nothing for [`PausePolicy::client_soft_hold_after`]
+//! meantime.
+//!
+//! Those two are *edges* — a window event, and one long frame. Neither can see a host that is
+//! simply too slow to keep up, which is the case between them:
+//! [`PausePolicy::auto_pause_when_behind_for`] counts consecutive frames longer than the tick
+//! loop's whole catch-up budget and pauses on that instead. A host at three frames a second
+//! trips neither edge and is nonetheless shedding a quarter of every second's ticks.
+//!
+//! A client that has heard nothing for [`PausePolicy::client_soft_hold_after`]
 //! holds on its own ([`TickHoldReason::SoftHold`]) rather than run ahead of a host that may
 //! be gone; the next snapshot releases it. Off by default: it is a freeze with nothing on
 //! screen to say why, it fired on every quarter-second hiccup of a link or a host frame, and
@@ -33,12 +41,14 @@ use std::time::Duration;
 
 use bevy::prelude::*;
 use bevy_ticked::{
-    TickedLoop, TickedSystems,
+    MaxTicksPerFrame, TickedLoop, TickedSystems,
     tick::{CurrentTick, TickHoldReason, TickHolds},
+    time::{Ticked, TickedTime},
 };
 use serde::{Deserialize, Serialize};
 
 use crate::client::{ClientSet, LocalClientPlayer, SnapshotApplied};
+use crate::diagnostics::HealthWarnings;
 use crate::server::LocalServerPlayer;
 
 /// Why the session is paused.
@@ -57,6 +67,12 @@ pub enum PauseReason {
     Participant(u128),
     /// A game's own reason.
     Custom(u8),
+    /// The host cannot keep up: frame after frame too long to run its own backlog.
+    ///
+    /// Last in the enum rather than beside [`HostStalled`](Self::HostStalled), where it belongs
+    /// by meaning, because the discriminant is on the wire and appending is what leaves every
+    /// other variant's where it was.
+    HostTooSlow,
 }
 
 /// The pause, as the authority states it.
@@ -100,6 +116,20 @@ pub struct PausePolicy {
     /// The host pauses when a frame arrives this long after the previous one — it has been
     /// away — and resumes on the next frame, so clients discard what they predicted.
     pub auto_pause_after_real_gap: Option<Duration>,
+    /// The host pauses after this many consecutive frames it could not run the backlog of, and
+    /// resumes on the first frame it can. `None` disables it.
+    ///
+    /// [`auto_pause_after_real_gap`](Self::auto_pause_after_real_gap) asks "did the host just
+    /// come back from a stall?", which is an *edge*. It cannot answer "is the host able to keep
+    /// up?", and the two are not the same question: a host at three frames a second has 333 ms
+    /// between frames, so it never trips a 500 ms gap, and yet it needs 21 ticks a frame against
+    /// a [`MaxTicksPerFrame`] budget of 16. It discards the remainder every single frame and its
+    /// clock falls behind real time for good, while every client keeps its own 64 Hz clock and
+    /// piles up lead that each snapshot then takes back. Silently, and for as long as it lasts.
+    ///
+    /// Between `MaxTicksPerFrame` ticks per frame and the gap threshold there was no guard at
+    /// all. This is it.
+    pub auto_pause_when_behind_for: Option<u32>,
     /// A client that has applied no snapshot for this long holds its clock until one comes.
     /// `None` by default; see the module docs for why.
     pub client_soft_hold_after: Option<Duration>,
@@ -111,6 +141,9 @@ impl Default for PausePolicy {
             who_may_pause: WhoMayPause::HostOnly,
             auto_pause_on_focus_loss: true,
             auto_pause_after_real_gap: Some(Duration::from_millis(500)),
+            // Three, so a single heavy frame is not a pause and a host that genuinely cannot
+            // keep up is one within a second at any frame rate low enough to matter.
+            auto_pause_when_behind_for: Some(3),
             client_soft_hold_after: None,
         }
     }
@@ -132,14 +165,26 @@ pub struct ReceivedPauseRequest {
     pub pause: Option<PauseReason>,
 }
 
+/// That [`install`] has run. Private, so nothing but double-installation can produce it.
+#[derive(Resource, Default)]
+struct PauseInstalled;
+
 pub(crate) fn install(app: &mut App) {
-    if app.world().contains_resource::<PausePolicy>() {
+    // Both role plugins call this and a listen server adds both, so it has to be idempotent —
+    // but the marker is what makes it so, *not* the policy. Guarding on `PausePolicy` meant a
+    // game that inserted its own before the role plugins, which is the documented way to keep a
+    // policy of one's own, got no pause machinery at all: no systems, and no `SessionPause` for
+    // anything to read. Silently, and only on the games that configured it.
+    if app.world().contains_resource::<PauseInstalled>() {
         return;
     }
-    app.init_resource::<PausePolicy>()
+    // `init_resource`, so a policy the game has already inserted is left exactly as it set it.
+    app.init_resource::<PauseInstalled>()
+        .init_resource::<PausePolicy>()
         .init_resource::<SessionPause>()
         .init_resource::<LastSnapshotHeard>()
         .init_resource::<AutoPaused>()
+        .init_resource::<HostBehind>()
         .add_message::<PauseSession>()
         .add_message::<ResumeSession>()
         // Read by the soft hold; the client plugin adds it too, and a host-only app does not.
@@ -147,7 +192,12 @@ pub(crate) fn install(app: &mut App) {
         .add_observer(honour_client_request)
         .add_systems(
             PreUpdate,
-            (detect_real_gap, client_soft_hold, forward_client_requests),
+            (
+                detect_real_gap,
+                pause_when_behind,
+                client_soft_hold,
+                forward_client_requests,
+            ),
         )
         .add_systems(
             TickedLoop,
@@ -249,6 +299,85 @@ fn detect_real_gap(
         && pause
             .0
             .is_some_and(|p| p.reason == PauseReason::HostStalled)
+    {
+        resumes.write(ResumeSession);
+        auto.0 = None;
+    }
+}
+
+/// How far behind real time the host is, in frames. Read it for a readout; the pause policy acts
+/// on it.
+#[derive(Resource, Default, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HostBehind {
+    /// Consecutive frames longer than the tick loop's whole catch-up budget. Zero when keeping up.
+    pub consecutive_frames: u32,
+    /// Every such frame this session, for a diagnostic readout.
+    pub frames: u64,
+}
+
+/// The host cannot keep up: frame after frame longer than the backlog it is allowed to run.
+///
+/// Measured as *frame time against the budget* rather than by counting the backlogs the loop
+/// actually threw away, and the difference matters: once this pauses, the clock is held and no
+/// backlog is discarded at all, so a discard-counting version would read "caught up" on its first
+/// paused frame and resume into the same condition, over and over. Frame time is still frame time
+/// while paused, so the pause holds until the frames genuinely come back.
+///
+/// The budget is exactly what [`MaxTicksPerFrame`] buys — beyond it the loop discards the rest of
+/// the frame's backlog and the host's clock falls behind real time — so this fires when and only
+/// when that is happening, and there is no threshold to tune against the tick rate.
+fn pause_when_behind(
+    time: Res<Time<Real>>,
+    // The tick clock, not `Time<Fixed>`: it is the authority for how long a tick is — the fixed
+    // clock is only mirrored into it — and the source guard bans reading the fixed one from this
+    // crate at all, which is right even here, where the read is outside every tick.
+    ticked: Res<Time<Ticked>>,
+    max: Res<MaxTicksPerFrame>,
+    policy: Res<PausePolicy>,
+    host: Option<Res<LocalServerPlayer>>,
+    pause: Res<SessionPause>,
+    mut behind: ResMut<HostBehind>,
+    mut auto: ResMut<AutoPaused>,
+    mut warnings: Option<ResMut<HealthWarnings>>,
+    mut pauses: MessageWriter<PauseSession>,
+    mut resumes: MessageWriter<ResumeSession>,
+) {
+    let Some(threshold) = policy.auto_pause_when_behind_for.filter(|_| host.is_some()) else {
+        behind.consecutive_frames = 0;
+        return;
+    };
+
+    let budget = ticked.timestep() * max.0.max(1);
+    if time.delta() > budget {
+        behind.consecutive_frames = behind.consecutive_frames.saturating_add(1);
+        behind.frames = behind.frames.saturating_add(1);
+    } else {
+        behind.consecutive_frames = 0;
+    }
+
+    if behind.consecutive_frames >= threshold.max(1) {
+        if pause.0.is_none() {
+            if let Some(warnings) = warnings.as_deref_mut() {
+                let mut count = warnings.host_behind_real_time;
+                let frames = behind.consecutive_frames;
+                HealthWarnings::raise(&mut count, || {
+                    format!(
+                        "the host has been unable to keep up for {frames} frames — each longer \
+                         than the {budget:?} of simulation MaxTicksPerFrame allows — so its \
+                         clock is falling behind real time and every client's lead is piling up. \
+                         Pausing the session. Lower the cost of a frame, or raise \
+                         MaxTicksPerFrame if a frame is allowed to be this long."
+                    )
+                });
+                warnings.host_behind_real_time = count;
+            }
+            pauses.write(PauseSession(PauseReason::HostTooSlow));
+            auto.0 = Some(PauseReason::HostTooSlow);
+        }
+    } else if auto.0 == Some(PauseReason::HostTooSlow)
+        && pause
+            .0
+            .is_some_and(|p| p.reason == PauseReason::HostTooSlow)
     {
         resumes.write(ResumeSession);
         auto.0 = None;
