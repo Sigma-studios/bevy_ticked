@@ -5,6 +5,31 @@ pull requests #1–#14 on this repository are the phases.
 
 ## Unreleased
 
+- **Fix** — a game that inserts its own `PausePolicy` before the role plugins now gets the pause
+  machinery along with its policy. `pause::install` guarded its idempotence on `PausePolicy`
+  itself — it needs one, because both role plugins call it and a listen server adds both — so a
+  game that pre-inserted a policy made it return early: no pause systems registered, and no
+  `SessionPause` for anything to read, on precisely the games that had bothered to configure
+  pausing. It guards on a private marker now and takes the policy with `init_resource`, so one the
+  game has already set survives untouched. Found by `host_behind.rs`'s `the_guard_can_be_turned_off`
+  doing what the migration checklist says and panicking on the missing resource.
+
+- **Fix** — the host pauses when it cannot keep up, which nothing watched for. The two automatic
+  pauses were both *edges*: a window losing focus, and one frame arriving long after the last
+  (`auto_pause_after_real_gap`, 500 ms). Neither can see a host that is merely too slow, and that
+  is the case between them — at three frames a second the delta is 333 ms, under the gap, while
+  21 ticks are needed per frame against a `MaxTicksPerFrame` budget of 16. The host discarded the
+  remainder every frame, its clock fell behind real time for good, and every client kept its own
+  clock and piled up lead that each snapshot took back, silently, for as long as it lasted.
+  `PausePolicy::auto_pause_when_behind_for` (default three frames) pauses on it and resumes on the
+  first frame within budget, `PauseReason::HostTooSlow` says why, and
+  `HealthWarnings::host_behind_real_time` counts it. Measured as frame time against the budget
+  rather than by counting discarded backlogs: once paused the clock is held and nothing is
+  discarded, so a discard-counting guard would read "recovered" on its first paused frame and
+  oscillate. A host inside the budget — 10 FPS needs 6.4 ticks of 16 — is never paused, because it
+  is not behind. `PauseReason` gains its variant at the end, leaving every other discriminant
+  where it was. Pinned by `host_behind.rs`.
+
 - **Fix** — a tracked id handed to a different thing now starts from nothing. `lifetimes::reset`
   strips a reused entity back to what this crate owns — components *and* children — before the
   replay's bundle goes on, because an insert overwrites the types the new bundle names and says
