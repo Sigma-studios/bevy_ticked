@@ -181,6 +181,72 @@ fn a_tombstone_handed_to_a_different_spawn_is_dressed_again() {
 }
 
 #[test]
+fn a_tombstone_handed_to_a_different_spawn_starts_from_nothing() {
+    let mut app = app();
+    app.world_mut().spawn_tracked(Height(1));
+    step(&mut app);
+    // `Tag` is what the next occupant of this id will not have: the component that says what a
+    // thing *is*. A pellet's `BulletState`, a ragdoll piece's `RagdollPart`.
+    let bullet = app.world_mut().spawn_tracked((Height(5), Tag));
+    step(&mut app);
+
+    rollback_to_tick(app.world_mut(), 1);
+    let again = app.world_mut().spawn_tracked(Height(6));
+
+    assert_eq!(
+        again, bullet,
+        "the tombstone is reused, which is the premise"
+    );
+    assert_eq!(
+        app.world().get::<Height>(again),
+        Some(&Height(6)),
+        "what the new bundle names is its own"
+    );
+    assert!(
+        app.world().get::<Tag>(again).is_none(),
+        "an id handed to a different thing must not keep the last occupant's components. An \
+         insert overwrites the types the new bundle names and says nothing about the rest, so \
+         without a reset a `Tag` stays on a thing that is not tagged -- and a game's systems, \
+         which match on components rather than on what the game believes the entity to be, run \
+         against it. The alternative is every consumer of this stack maintaining a list of \
+         'what some other kind of thing might have left here', which is wrong the moment \
+         somebody adds a component and does not think of the list"
+    );
+}
+
+#[test]
+fn a_tombstone_reused_by_the_same_spawn_keeps_its_local_only_state() {
+    // The other half of the rule, and why the reset is not simply done on every revive: a replay
+    // re-running the spawn it ran before is the *same thing* coming back. A client rolls back
+    // several times a second, and clearing the entity each time would throw away whatever the
+    // game hung on it -- then re-firing the observer to rebuild that is the nameplate-per-
+    // rollback bug `SpawnedAs` exists to prevent.
+    let mut app = app();
+    app.world_mut().spawn_tracked(Height(1));
+    step(&mut app);
+    let bullet = app.world_mut().spawn_tracked((Height(5), Tag));
+    step(&mut app);
+    assert!(
+        app.world().get::<Dressed>(bullet).is_some(),
+        "the observer dressed it at its first spawn"
+    );
+
+    rollback_to_tick(app.world_mut(), 1);
+    // The very same bundle type: the replay running the same spawn again.
+    let again = app.world_mut().spawn_tracked((Height(6), Tag));
+
+    assert_eq!(again, bullet);
+    assert!(
+        app.world().get::<Tag>(again).is_some(),
+        "the same spawn replayed is the same thing, not a new occupant"
+    );
+    assert!(
+        app.world().get::<Dressed>(again).is_some(),
+        "and its local-only state survives, because nothing reset it"
+    );
+}
+
+#[test]
 fn restoring_a_tick_where_an_entity_was_alive_rebuilds_it_through_the_spawn_path() {
     let mut app = app();
     let body = app.world_mut().spawn_tracked((Height(10), Tag));

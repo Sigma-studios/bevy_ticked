@@ -5,7 +5,42 @@ pull requests #1–#14 on this repository are the phases.
 
 ## Unreleased
 
-- **Fix** — a lockstep joiner no longer runs ticks before it knows the roster. It held only until
+- **Fix** — a tracked id handed to a different thing now starts from nothing. `lifetimes::reset`
+  strips a reused entity back to what this crate owns — components *and* children — before the
+  replay's bundle goes on, because an insert overwrites the types the new bundle names and says
+  nothing about the rest. A pellet's id handed to a piece of a ragdoll used to arrive carrying the
+  pellet's state, its sprite, its mesh and its children, and `redress` then fired the game's
+  observer against a hybrid of two things. The snapshot path gets it too: `apply_full_body` revives
+  a tombstone the authority still has, and since the marker never left, `Add<TickTrackedEntity>`
+  did not fire there at all — so a peer that only *heard* about a reused id was never told to
+  redress it, and kept the old occupant's picture while carrying the new one's state. Without
+  this, every consumer needed its own hand-written list of "components some other kind of thing
+  might have left here", wrong from the moment anybody adds a component and silent when it is.
+
+- **Fix** — a peer that still holds an id **alive** is now told when it has been handed to
+  something else. That was the third path and the only one with no local sign of it: a tombstoned
+  id learns from the record that revives it, and a peer's own spawns go through `SpawnedAs`, but a
+  peer holding the id alive as the previous occupant just gets components decoded onto it —
+  `TickTrackedEntity` never left, so `Add` never fired, and the entity kept the old occupant's
+  sprite and, in a physics game, its collider while carrying the new one's state. It is reachable:
+  in a shooter, a client predicting a shot on the tick the authority instead resolved that player's
+  death, since a player's own projectiles and their own ragdoll pieces mint under the same slot,
+  and the ids collide inside a single tick so no snapshot ever omits the id first. Bodies now carry
+  `reborn`, the ids handed over since the world that recipient acknowledged, which the authority
+  already knows because it is what calls `reset`; `apply_full_body` resets and redresses each.
+  Per recipient and baseline-relative, since a needless reset re-dresses an entity that was right.
+  Comparing the record's type mask against the entity's shape is *not* an option — see `SpawnedAs`.
+  Pinned by `id_changes_hands.rs`, which holds all three paths apart and checks that an id nobody
+  named is left alone. **Wire change**: `FullBody` and `DeltaBody` gain a field.
+
+- **Breaking** — `ReplicationClass::Once` and `register_networked_ticked_component_once` are gone;
+  use `register_networked_ticked_component`. "With the entity's first record, never again" is once
+  per **id**, and an id is not a thing — a replay hands a dead pellet's id to something else, and
+  the recipient was never told the new kind or owner. This crate shipped the bug in its own
+  `Owner` registration, the test fixtures taught it, and a consumer game had it too. The saving was
+  a byte comparison: `Changed` already sends nothing when the encoded bytes match the baseline, so
+  immutable data costs exactly the same on the wire and is now correct when it turns out not to be
+  immutable after all. Migration is deleting `_once` from the call. It held only until
   some participant existed, and the host's announcement of the joiner itself (or of another
   joiner) could arrive before the roster it sends on acceptance: the joiner ran those ticks with
   nobody on `LockstepRoster`, so a game spawning from the roster was missing the host's bodies

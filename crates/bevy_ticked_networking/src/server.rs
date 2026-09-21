@@ -5,6 +5,7 @@ use bevy::prelude::*;
 
 use bevy_ticked::{
     TickedLoop, TickedSystems,
+    lifetimes::TrackedEntityLifetimes,
     registry::TickedComponentRegistry,
     tick::{CurrentTick, HistoryBufferTicks, TickHoldReason, TickHolds},
     tracked_entity::{LocalSpawnerSlot, SpawnerSlot, TickTrackedEntity, TrackedIdAllocator},
@@ -16,7 +17,7 @@ use crate::{
     input::{InputQueue, MAX_INPUT_LEAD_TICKS, TickedInput},
     messages::{PeerLeft, ReceivedNetworkInput, ReceivedSnapshotAck, SendNetworkSnapshot},
     snapshot::{
-        MARGIN_UNMEASURED, RelayedInput, SnapshotBody, SnapshotPacket, build_full_body,
+        FullBody, MARGIN_UNMEASURED, RelayedInput, SnapshotBody, SnapshotPacket, build_full_body,
         encode_packet_with,
     },
 };
@@ -468,6 +469,29 @@ impl<T: TickedInput> Command for BroadcastSnapshotCommand<T> {
                     measured.ticks.clamp(i16::MIN as i64 + 1, i16::MAX as i64) as i16
                 });
 
+            // Which ids have been handed to a different thing since the world this recipient
+            // last acknowledged. Relative to their baseline, because a reset is not free: it
+            // throws away whatever the game hung on the entity locally, so naming an id that did
+            // not change hands re-dresses something that was already right.
+            let baseline_tick = recipient.and_then(|uuid| {
+                let acked = world.resource::<LastAck>().0.get(&uuid).copied()?;
+                world
+                    .resource::<Baselines>()
+                    .get(uuid, acked)
+                    .map(|baseline| baseline.tick)
+            });
+            let reborn: Vec<u64> = match world.get_resource::<TrackedEntityLifetimes>() {
+                Some(lifetimes) => match baseline_tick {
+                    Some(at) => lifetimes.reborn_since(at).collect(),
+                    // No usable baseline, so a full body is going out. A joiner holds no ids for
+                    // a rename to confuse; a client whose ack fell off the ring does, so it gets
+                    // the whole window — a superset whose only cost is re-dressing an entity that
+                    // was already right.
+                    None => lifetimes.reborn_ids().collect(),
+                },
+                None => Vec::new(),
+            };
+
             // Delta or keyframe. A delta only against a baseline the client acknowledged and
             // the ring still holds; a full body on a keyframe, after a nack, and to anyone
             // without a usable ack (a joiner, a client whose ack fell off the ring).
@@ -479,9 +503,11 @@ impl<T: TickedInput> Command for BroadcastSnapshotCommand<T> {
                 && let Some(acked) = world.resource::<LastAck>().0.get(&uuid).copied()
                 && let Some(baseline) = world.resource::<Baselines>().get(uuid, acked)
             {
-                delta = Some(build_delta(
-                    &registry, &body, &layouts, baseline, &rates, seq,
-                ));
+                delta = Some({
+                    let mut built = build_delta(&registry, &body, &layouts, baseline, &rates, seq);
+                    built.reborn = reborn.clone();
+                    built
+                });
             }
             let is_delta = delta.is_some();
             let packet = SnapshotPacket {
@@ -490,7 +516,10 @@ impl<T: TickedInput> Command for BroadcastSnapshotCommand<T> {
                 your_margin,
                 body: match delta {
                     Some(delta) => SnapshotBody::Delta(delta),
-                    None => SnapshotBody::Full(body.clone()),
+                    None => SnapshotBody::Full(FullBody {
+                        reborn,
+                        ..body.clone()
+                    }),
                 },
             };
             let bytes = encode_packet_with(&packet, compression);

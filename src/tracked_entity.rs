@@ -22,7 +22,7 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::lifetimes::{redress, revive};
+use crate::lifetimes::{redress, reset, revive};
 use crate::tracked_index::TrackedEntityIndex;
 
 /// How many low bits of an id name the spawner slot.
@@ -205,8 +205,13 @@ impl TrackedSpawner<'_, '_> {
                         // spawn it has run before, and dressing that again would fire the game's
                         // observer once per rollback.
                         let changed_hands = entity.get::<SpawnedAs>().copied() != Some(minted_as);
-                        entity.insert((bundle, minted_as));
                         let e = entity.id();
+                        if changed_hands {
+                            // Before the bundle goes on: a different thing starts from nothing
+                            // rather than from whatever the last occupant left here.
+                            entity.world_scope(|world| reset(world, e));
+                        }
+                        entity.insert((bundle, minted_as));
                         entity.world_scope(|world| {
                             revive(world, e, id.0, tick);
                             if changed_hands {
@@ -256,6 +261,10 @@ impl TrackedWorldExt for World {
                 // spawn coming round again, and must not be dressed a second time.
                 let minted_as = SpawnedAs(TypeId::of::<B>());
                 let changed_hands = self.get::<SpawnedAs>(entity).copied() != Some(minted_as);
+                if changed_hands {
+                    // Before the bundle, for the reason in `TrackedSpawner::spawn_by`.
+                    reset(self, entity);
+                }
                 self.entity_mut(entity).insert((bundle, minted_as));
                 revive(self, entity, id.0, tick);
                 if changed_hands {

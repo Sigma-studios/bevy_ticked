@@ -41,7 +41,7 @@ use bevy::prelude::*;
 
 use crate::registry::TickedComponentRegistry;
 use crate::tick::CurrentTick;
-use crate::tracked_entity::TickTrackedEntity;
+use crate::tracked_entity::{SpawnedAs, TickTrackedEntity};
 use crate::tracked_index::TrackedEntityIndex;
 
 /// When a tracked id was alive.
@@ -66,6 +66,13 @@ impl Lifetime {
 #[derive(Resource, Default)]
 pub struct TrackedEntityLifetimes {
     by_id: BTreeMap<u64, Lifetime>,
+    /// The tick an id last **changed hands**, for the ids where that has happened.
+    ///
+    /// Not a lifetime and not expressible as one: the id did not die, it became something else,
+    /// and a peer can hold it *alive* as the previous occupant throughout. That peer cannot work
+    /// the change out for itself — a record is only components — so the authority says so
+    /// outright, which is what `FullBody::reborn` carries.
+    reborn: BTreeMap<u64, u64>,
     /// The newest tick captured, so a death noted between ticks lands on the next one.
     last_captured: Option<u64>,
     /// Reused every capture, so a tick allocates nothing once warm.
@@ -77,6 +84,7 @@ impl Clone for TrackedEntityLifetimes {
     fn clone(&self) -> Self {
         Self {
             by_id: self.by_id.clone(),
+            reborn: self.reborn.clone(),
             last_captured: self.last_captured,
             scratch: Vec::new(),
             query: None,
@@ -104,6 +112,30 @@ impl TrackedEntityLifetimes {
 
     pub fn born_at(&self, id: u64) -> Option<u64> {
         self.by_id.get(&id).map(|lifetime| lifetime.born)
+    }
+
+    /// Note that `id` has been handed to a different thing at `tick`. Called by [`reset`].
+    pub fn note_reborn(&mut self, tick: u64, id: u64) {
+        let at = self.reborn.entry(id).or_insert(tick);
+        *at = (*at).max(tick);
+    }
+
+    /// The ids that have changed hands since `tick`, ascending.
+    ///
+    /// What a recipient whose world is that old still has to be told about. Relative to their
+    /// baseline rather than absolute, because a reset is not free: it throws away whatever the
+    /// game hung on the entity locally, and doing that to an id which did not change hands would
+    /// re-dress something already right.
+    pub fn reborn_since(&self, tick: u64) -> impl Iterator<Item = u64> + '_ {
+        self.reborn
+            .iter()
+            .filter(move |(_, at)| **at > tick)
+            .map(|(id, _)| *id)
+    }
+
+    /// Every id that has changed hands inside the window, ascending.
+    pub fn reborn_ids(&self) -> impl Iterator<Item = u64> + '_ {
+        self.reborn.keys().copied()
     }
 
     /// Every id alive at `tick`, ascending.
@@ -214,6 +246,9 @@ impl TrackedEntityLifetimes {
     /// has not happened.
     pub(crate) fn truncate_after(&mut self, tick: u64) {
         self.last_captured = self.last_captured.map(|t| t.min(tick));
+        // A change of hands after `tick` has not happened; the replay decides again whether it
+        // does, and `reset` records it again if so.
+        self.reborn.retain(|_, at| *at <= tick);
         self.by_id.retain(|_, lifetime| lifetime.born <= tick);
         for lifetime in self.by_id.values_mut() {
             if lifetime.died.is_some_and(|died| died > tick) {
@@ -226,10 +261,14 @@ impl TrackedEntityLifetimes {
     pub(crate) fn prune_before(&mut self, tick: u64) {
         self.by_id
             .retain(|_, lifetime| lifetime.died.is_none_or(|died| died >= tick));
+        // Every recipient still in the ring has acknowledged something newer than this, so a
+        // change of hands older than the window is one nobody is owed.
+        self.reborn.retain(|_, at| *at >= tick);
     }
 
     pub(crate) fn clear(&mut self) {
         self.by_id.clear();
+        self.reborn.clear();
         self.last_captured = None;
     }
 }
@@ -328,6 +367,52 @@ pub fn revive(world: &mut World, entity: Entity, id: u64, tick: u64) {
     }
     if let Some(mut lifetimes) = world.get_resource_mut::<TrackedEntityLifetimes>() {
         lifetimes.note_alive(tick, id);
+    }
+}
+
+/// Strip an entity back to what this stack owns, so an id handed to a different thing starts
+/// from nothing.
+///
+/// A tombstone is reused deliberately — that is what keeps a game's `Entity` handles good across
+/// a rewind — and the replay's bundle is *inserted over* whatever the last occupant left behind.
+/// An insert overwrites the types the new bundle names and says nothing at all about the rest, so
+/// a pellet's id handed to a piece of a ragdoll arrives still carrying the pellet's state, its
+/// sprite, its mesh and its children. [`redress`] then fires the game's observer against what is
+/// by then a hybrid of two things.
+///
+/// Without this, every consumer of this stack needs its own hand-written list of "components some
+/// other kind of thing might have left here" — which is unmaintainable in the way that matters:
+/// it is wrong from the moment somebody adds a component and does not think of the list, and it
+/// fails silently, as the wrong picture on screen or the wrong branch of a system run against an
+/// entity that should never have matched it. A change of hands is a *new thing*. It starts empty.
+///
+/// What survives is only what this crate itself put there: the id, what it was minted as, and the
+/// tombstone bookkeeping [`revive`] is about to clear. The children go with the rest — the old
+/// occupant's nameplate is as much its clothes as its sprite was, and `retain` on its own would
+/// strip the `Children` component and leak the entities it named.
+///
+/// Call it **before** the new bundle goes on, and only when the id has actually changed hands —
+/// see [`SpawnedAs`]. A replay re-running the same spawn is the same thing coming back, and
+/// resetting that would throw away local-only state the game is entitled to keep between
+/// rollbacks.
+pub fn reset(world: &mut World, entity: Entity) {
+    let Ok(mut entity_mut) = world.get_entity_mut(entity) else {
+        return;
+    };
+    let id = entity_mut
+        .get::<TickTrackedEntity>()
+        .map(|tracked| tracked.0);
+    entity_mut.despawn_related::<Children>();
+    entity_mut.retain::<(TickTrackedEntity, SpawnedAs, Tombstone, Disabled)>();
+
+    // Noted here rather than at the call sites, so that every path which empties an entity also
+    // tells the wire. A peer can hold this id alive as the previous occupant and have no way to
+    // notice the change; `TrackedEntityLifetimes::reborn_since` is how it is eventually told.
+    let tick = world.get_resource::<CurrentTick>().map_or(0, |t| t.0);
+    if let Some(id) = id
+        && let Some(mut lifetimes) = world.get_resource_mut::<TrackedEntityLifetimes>()
+    {
+        lifetimes.note_reborn(tick, id);
     }
 }
 
