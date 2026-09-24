@@ -5,6 +5,27 @@ pull requests #1–#14 on this repository are the phases.
 
 ## Unreleased
 
+- **Fix** — ids are minted per kind of thing, so a client that disagrees with the authority about
+  one spawn no longer renames every later one. An id was `sequence << 8 | slot` from a single
+  counter per slot, and a client legitimately spawns things the authority does not (a guessed
+  remote input) and skips things only the authority does (a refilled weapon pad). Every such
+  difference shifted the rest of that slot by one, so the authority's gun arrived under the id the
+  client had given its predicted grenade blast. The client still held that id alive, `reborn` was
+  empty because the authority had never reset anything, and the record was decoded onto the blast:
+  a gun drawn as a blast, a blast that never went away. Ids are now
+  `sequence << 24 | stream << 8 | slot`, with `stream` a 16-bit hash of the sorted wire names of the
+  networked components in the spawn's bundle, and `TrackedIdAllocator` counts per
+  `(slot, stream)`. A disagreement can now only shift ids between spawns of the same shape, which
+  are dressed alike. `TrackedSpawner` and `spawn_tracked_by` do this with nothing asked of the
+  game; `TrackedIdAllocator::next`/`next_authority` mint in stream `0` as before, and `next_in`
+  names a stream. Wire names rather than `TypeId`s, so a native and a web build agree. Registering
+  a ticked component now also registers it with the ECS, so every peer can name it from the
+  first spawn. `spawn_tracked_by` also puts `SpawnedAs` on a fresh spawn, which it used to leave
+  off. The allocator's wire encoding changed and every id's value with it, so all peers must be
+  on this version; the avian golden trace was re-recorded for the new id values and is
+  bit-identical when keyed by sequence. Tested with real divergence, no hand-filled `reborn`, in
+  `tests/divergent_mints.rs`.
+
 - **Fix** — a game that inserts its own `PausePolicy` before the role plugins now gets the pause
   machinery along with its policy. `pause::install` guarded its idempotence on `PausePolicy`
   itself — it needs one, because both role plugins call it and a listen server adds both — so a

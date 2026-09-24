@@ -24,8 +24,8 @@ pub use crate::{
     },
     time::{TickRateDilation, Ticked, TickedTime, run_tick_schedule},
     tracked_entity::{
-        LocalSpawnerSlot, SLOT_BITS, SpawnerSlot, TickTrackedEntity, TrackedIdAllocator,
-        TrackedSpawner, TrackedWorldExt,
+        LocalSpawnerSlot, SLOT_BITS, STREAM_BITS, SpawnerSlot, TickTrackedEntity,
+        TrackedIdAllocator, TrackedSpawner, TrackedWorldExt,
     },
     tracked_index::TrackedEntityIndex,
     world_actions::WorldActions,

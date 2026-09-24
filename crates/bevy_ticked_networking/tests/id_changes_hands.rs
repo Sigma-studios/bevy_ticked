@@ -20,10 +20,10 @@
 //!
 //! It is not an exotic corner either. Every snapshot arrives through the branch it lives in —
 //! `apply_delta` rebuilds a `FullBody` and `apply_snapshot` hands it to `apply_full_body`, so "the
-//! entity already exists" is the ordinary case. In a shooter it is reached by a client predicting
-//! a shot on the tick the authority instead resolved that player's death: a player's own
-//! projectiles and their own ragdoll pieces mint under the same slot, and because both happen
-//! inside a single tick, no snapshot ever omits the id first for the peer to tombstone it.
+//! entity already exists" is the ordinary case. `reborn` covers what the *authority* re-minted.
+//! What only a client got wrong — a shot predicted on the tick the authority resolved a death —
+//! the authority never saw, so it cannot be named here; ids minted per kind of thing keep it from
+//! happening at all, which `divergent_mints.rs` tests.
 
 use bevy::prelude::*;
 use bevy_ticked::lifetimes::{TrackedEntityLifetimes, reset, tombstone};
