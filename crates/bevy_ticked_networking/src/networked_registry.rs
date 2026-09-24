@@ -65,6 +65,10 @@ impl NetworkedTickedAppExt for App {
     ) -> &mut Self {
         self.init_resource::<TickedComponentRegistry>();
         self.init_resource::<WorldActions<T>>();
+        // Registered with the ECS now rather than at its first spawn, so every peer can name it
+        // by `ComponentId` from the start — which is how a spawn's id stream is worked out, see
+        // `bevy_ticked::tracked_entity::stream_of`.
+        self.world_mut().register_component::<T>();
         let mut registry = self.world_mut().resource_mut::<TickedComponentRegistry>();
         registry.register_networked_as::<T>(
             wire_name,

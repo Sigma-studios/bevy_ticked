@@ -305,6 +305,17 @@ impl TickedComponentRegistry {
         self.frozen().by_type.get(&TypeId::of::<T>()).copied()
     }
 
+    /// The wire name of a networked type, by `TypeId`; `None` for a rollback-only or unregistered
+    /// one. Does not freeze the registry: it reads a registration, not the wire order.
+    ///
+    /// What [`TrackedSpawner`](crate::tracked_entity::TrackedSpawner) keys a spawn's id stream by
+    /// — see [`stream_of`](crate::tracked_entity::stream_of).
+    pub fn networked_wire_name(&self, type_id: TypeId) -> Option<&'static str> {
+        let index = *self.inner.type_indices.get(&type_id)?;
+        let entry = &self.inner.entries[usize::from(index)];
+        entry.wire.is_some().then_some(entry.wire_name)
+    }
+
     /// How many types are on the wire. Freezes the registry.
     pub fn wire_len(&self) -> usize {
         self.frozen().entries.len()
@@ -706,6 +717,10 @@ impl TickedAppExt for App {
     fn register_ticked_component<T: TickedComponent>(&mut self) -> &mut Self {
         self.init_resource::<TickedComponentRegistry>();
         self.init_resource::<WorldActions<T>>();
+        // Registered with the ECS now rather than at its first spawn, so every peer can name it
+        // by `ComponentId` from the start — which is how a spawn's id stream is worked out, see
+        // `tracked_entity::stream_of`.
+        self.world_mut().register_component::<T>();
         let mut registry = self.world_mut().resource_mut::<TickedComponentRegistry>();
         registry.register::<T>();
         self
@@ -717,6 +732,10 @@ impl TickedAppExt for App {
     ) -> &mut Self {
         self.init_resource::<TickedComponentRegistry>();
         self.init_resource::<WorldActions<T>>();
+        // Registered with the ECS now rather than at its first spawn, so every peer can name it
+        // by `ComponentId` from the start — which is how a spawn's id stream is worked out, see
+        // `tracked_entity::stream_of`.
+        self.world_mut().register_component::<T>();
         let mut registry = self.world_mut().resource_mut::<TickedComponentRegistry>();
         registry.register_as::<T>(wire_name);
         self

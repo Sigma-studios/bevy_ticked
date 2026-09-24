@@ -1068,16 +1068,16 @@ fn converge_lead(
     })
 }
 
-/// The authority's sequence as the last snapshot left it, so a client that mints under slot
+/// The authority's counters as the last snapshot left them, so a client that mints under slot
 /// 0 is caught.
 ///
 /// A client mints under its own slot, and that is fine: the host, running the same simulation
 /// from the same inputs, mints the same id and confirms it. An id minted under the authority's
-/// slot on a client is one the host will hand out to something else, and the snapshot then
+/// slot on a client is one the host may hand out to something else, and the snapshot then
 /// merges two entities into one. Every consumer wrote a `debug_assert` for this; here it is
 /// once, as a warning that names the id.
 #[derive(Resource, Default)]
-struct AuthoritySequenceAfterSnapshot(u64);
+struct AuthoritySequenceAfterSnapshot(Vec<(u16, u64)>);
 
 fn watch_for_client_minted_ids(
     allocator: Res<TrackedIdAllocator>,
@@ -1085,13 +1085,25 @@ fn watch_for_client_minted_ids(
     mut after_snapshot: ResMut<AuthoritySequenceAfterSnapshot>,
     mut health: ResMut<HealthWarnings>,
 ) {
-    let authority = allocator.peek(SpawnerSlot::AUTHORITY);
+    let authority: Vec<(u16, u64)> = allocator
+        .sequences()
+        .filter(|(slot, _, _)| *slot == SpawnerSlot::AUTHORITY)
+        .map(|(_, stream, next)| (stream, next))
+        .collect();
     if applied.is_changed() {
         after_snapshot.0 = authority;
         return;
     }
-    if authority > after_snapshot.0 {
-        let minted = TickTrackedEntity::new(SpawnerSlot::AUTHORITY, authority - 1).0;
+    let grown = authority.iter().find(|(stream, next)| {
+        let before = after_snapshot
+            .0
+            .iter()
+            .find(|(seen, _)| seen == stream)
+            .map_or(1, |(_, next)| *next);
+        *next > before
+    });
+    if let Some((stream, next)) = grown {
+        let minted = TickTrackedEntity::new_in(SpawnerSlot::AUTHORITY, *stream, next - 1).0;
         HealthWarnings::raise(&mut health.client_minted_tracked_id, || {
             format!(
                 "this client minted tracked id {minted} under the authority's slot; only the \
