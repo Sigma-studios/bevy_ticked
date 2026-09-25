@@ -25,11 +25,16 @@
 //! Reading is watermarked: [`TickedEventReader`] hands out each tick's events once
 //! and remembers how far it has presented.
 //!
-//! That combination is what makes rollback survivable. A tick that is replayed and
-//! comes out the same was already presented and stays presented. A tick that is
-//! replayed and comes out *different* — because a snapshot corrected it — rewinds
-//! the watermark, so the corrected version is presented and the prediction that
-//! never really happened is not.
+//! That combination is what makes rollback survivable. A rollback rewinds the
+//! watermark to the tick it rolls back to, so the replayed ticks are read again —
+//! but the log also remembers what it has already handed out for each tick, and a
+//! reader is only given what is *new*. A tick that is replayed and comes out the
+//! same was already presented and stays presented: nothing is read twice. A tick
+//! that comes out *different* — because a snapshot corrected it — presents what the
+//! correction added, so the truth is heard even when the guess was not.
+//!
+//! What a correction *removed* was presented already and cannot be taken back; a
+//! sound that has played has played. That is the one thing a rollback costs here.
 //!
 //! # What it is not
 //!
@@ -64,8 +69,13 @@ use bevy::prelude::*;
 use crate::tick::{CurrentTick, HistoryBufferTicks};
 
 /// Trait bound for anything that can be logged per tick.
-pub trait TickedEvent: Send + Sync + Clone + 'static {}
-impl<T> TickedEvent for T where T: Send + Sync + Clone + 'static {}
+///
+/// `PartialEq` because a replayed tick's events are compared with what was already
+/// presented for it: an event the replay merely repeats is not presented again. So
+/// two events that should both be heard on the same tick — two players firing —
+/// must compare unequal; carry who or where, not only what.
+pub trait TickedEvent: Send + Sync + Clone + PartialEq + 'static {}
+impl<T> TickedEvent for T where T: Send + Sync + Clone + PartialEq + 'static {}
 
 /// A per-tick log of `T`, rollback-aware and presented exactly once.
 ///
@@ -74,9 +84,14 @@ impl<T> TickedEvent for T where T: Send + Sync + Clone + 'static {}
 pub struct TickedEvents<T: TickedEvent> {
     /// tick -> everything that happened at that tick, in the order it was written.
     log: BTreeMap<u64, Vec<T>>,
-    /// The highest tick already handed to a reader. Rewound when a replayed tick
-    /// disagrees with what it said the first time.
+    /// The highest tick already handed to a reader. Rewound by a rollback, so the
+    /// replayed ticks are read again — through [`Self::heard`].
     presented: u64,
+    /// tick -> what has already been handed to a reader for that tick. A rollback
+    /// leaves this alone: it is what the reader was told, whatever the log now
+    /// says, and it is how a replay that repeats a tick is kept from being
+    /// presented twice.
+    heard: BTreeMap<u64, Vec<T>>,
     /// The tick currently being written, so the first write of a replay clears it.
     writing: Option<u64>,
 }
@@ -86,6 +101,7 @@ impl<T: TickedEvent> Default for TickedEvents<T> {
         Self {
             log: BTreeMap::new(),
             presented: 0,
+            heard: BTreeMap::new(),
             writing: None,
         }
     }
@@ -117,6 +133,8 @@ impl<T: TickedEvent> TickedEvents<T> {
     /// Called when a rollback invalidates predicted ticks. Rewinding `presented` is
     /// the half that is easy to forget and impossible to notice: without it, the
     /// corrected version of a tick would be silently swallowed as "already shown".
+    /// What was shown is kept (see [`Self::heard`]), so rewinding does not show it
+    /// again.
     pub fn truncate_after(&mut self, tick: u64) {
         self.log.split_off(&(tick + 1));
         self.presented = self.presented.min(tick);
@@ -126,17 +144,23 @@ impl<T: TickedEvent> TickedEvents<T> {
     /// Drop everything before `tick`.
     pub fn prune_before(&mut self, tick: u64) {
         self.log = self.log.split_off(&tick);
+        self.heard = self.heard.split_off(&tick);
         self.presented = self.presented.max(tick.saturating_sub(1));
     }
 
     /// Clear the whole log, for a session reset.
     pub fn clear(&mut self) {
         self.log.clear();
+        self.heard.clear();
         self.presented = 0;
         self.writing = None;
     }
 
     /// Everything not yet presented, oldest first, and advance the watermark.
+    ///
+    /// A tick read again after a rollback gives only what it did not say the first
+    /// time, counted: a tick that was heard with two of the same event and now has
+    /// three gives one.
     fn drain_unpresented(&mut self, up_to: u64) -> Vec<(u64, T)> {
         let mut out = Vec::new();
         // `BTreeMap::range` panics on an inverted range rather than yielding
@@ -145,7 +169,22 @@ impl<T: TickedEvent> TickedEvents<T> {
         let from = self.presented.saturating_add(1);
         if from <= up_to {
             for (&tick, events) in self.log.range(from..=up_to) {
-                out.extend(events.iter().cloned().map(|event| (tick, event)));
+                let heard = self.heard.entry(tick).or_default();
+                // Each thing already heard excuses one equal event, once.
+                let mut excused = vec![false; heard.len()];
+                let mut fresh = Vec::new();
+                for event in events {
+                    let repeat = heard
+                        .iter()
+                        .zip(excused.iter_mut())
+                        .find(|(was, used)| !**used && *was == event);
+                    match repeat {
+                        Some((_, used)) => *used = true,
+                        None => fresh.push(event.clone()),
+                    }
+                }
+                heard.extend(fresh.iter().cloned());
+                out.extend(fresh.into_iter().map(|event| (tick, event)));
             }
         }
         self.presented = self.presented.max(up_to);
@@ -343,6 +382,68 @@ mod tests {
             vec![(2, Thunk(99))],
             "the corrected tick 2 must be presented, and tick 1 must not repeat"
         );
+    }
+
+    #[test]
+    fn a_replay_that_comes_out_the_same_is_not_presented_again() {
+        // The common rollback: a snapshot corrects something else — a remote
+        // player's position — and the replay reproduces this peer's own events
+        // exactly. Rewinding the watermark must not present them a second time, or
+        // every misprediction anywhere plays every recent sound twice.
+        let mut events = log();
+        events.write(1, Thunk(1));
+        events.write(2, Thunk(2));
+        events.write(3, Thunk(3));
+        assert_eq!(events.drain_unpresented(3).len(), 3);
+
+        events.truncate_after(1);
+        events.write(2, Thunk(2));
+        events.write(3, Thunk(3));
+        assert!(
+            events.drain_unpresented(3).is_empty(),
+            "a replay that says the same thing says nothing new"
+        );
+    }
+
+    #[test]
+    fn a_correction_presents_only_what_it_added() {
+        // Two identical events heard; the corrected tick has three of them and
+        // something else. One of each is new.
+        let mut events = log();
+        events.write(2, Thunk(7));
+        events.write(2, Thunk(7));
+        assert_eq!(events.drain_unpresented(2).len(), 2);
+
+        events.truncate_after(1);
+        events.write(2, Thunk(7));
+        events.write(2, Thunk(8));
+        events.write(2, Thunk(7));
+        events.write(2, Thunk(7));
+        assert_eq!(
+            events.drain_unpresented(2),
+            vec![(2, Thunk(8)), (2, Thunk(7))]
+        );
+
+        // And that is now what tick 2 was heard to say, for the next rollback.
+        events.truncate_after(1);
+        for thunk in [7, 7, 8, 7] {
+            events.write(2, Thunk(thunk));
+        }
+        assert!(events.drain_unpresented(2).is_empty());
+    }
+
+    #[test]
+    fn a_rollback_before_the_reader_caught_up_still_presents_the_rest() {
+        // Ticks the reader never reached are new, whatever the rollback did.
+        let mut events = log();
+        events.write(1, Thunk(1));
+        events.write(2, Thunk(2));
+        assert_eq!(events.drain_unpresented(1), vec![(1, Thunk(1))]);
+
+        events.truncate_after(0);
+        events.write(1, Thunk(1));
+        events.write(2, Thunk(2));
+        assert_eq!(events.drain_unpresented(2), vec![(2, Thunk(2))]);
     }
 
     #[test]
