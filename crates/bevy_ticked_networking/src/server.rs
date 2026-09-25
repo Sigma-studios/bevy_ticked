@@ -5,6 +5,7 @@ use bevy::prelude::*;
 
 use bevy_ticked::{
     TickedLoop, TickedSystems,
+    events::TickedEventRegistry,
     lifetimes::TrackedEntityLifetimes,
     registry::TickedComponentRegistry,
     tick::{CurrentTick, HistoryBufferTicks, TickHoldReason, TickHolds},
@@ -250,6 +251,8 @@ fn reset_on_host<T: TickedInput>(world: &mut World) {
     world.insert_resource(LastAck::default());
     let registry = world.resource::<TickedComponentRegistry>().clone();
     registry.clear_all(world);
+    // The tick is back at zero, so the event logs are too; see `reset_on_leave`.
+    TickedEventRegistry::clear_all(world);
     // The world a solo player opened to friends is the session's world from its first tick:
     // with the histories cleared, nothing else says these entities were ever born, and a
     // restore to tick 0 would tombstone every one of them.

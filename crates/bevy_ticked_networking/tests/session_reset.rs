@@ -159,3 +159,50 @@ fn reset_on_leave_resets_registered_resources() {
         "the round the last session ended on is not the one the next lobby starts in"
     );
 }
+
+/// What happened in the next session is presented, however long the last one ran.
+///
+/// Leaving and hosting both set the tick back to zero, and neither used to clear the
+/// event logs: their watermark stayed at the tick the last session stopped on, so
+/// every event of the next one counted as already presented until its clock got back
+/// there. A game heard its countdown (read off state) and none of its gunshots.
+#[test]
+fn events_are_presented_again_after_leaving_and_hosting() {
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    struct Bang;
+
+    #[derive(Resource, Default)]
+    struct Heard(usize);
+
+    fn bang(tick: Res<CurrentTick>, mut events: TickedEventWriter<Bang>) {
+        events.write(tick.0, Bang);
+    }
+
+    fn hear(mut events: TickedEventReader<Bang>, mut heard: ResMut<Heard>) {
+        heard.0 += events.read().len();
+    }
+
+    let mut app = peer();
+    app.add_ticked_event::<Bang>()
+        .init_resource::<Heard>()
+        .add_systems(TickedSimulation, bang)
+        .add_systems(Update, hear);
+
+    app.insert_resource(LocalServerPlayer(1));
+    for _ in 0..200 {
+        app.update();
+    }
+    let first = app.world().resource::<Heard>().0;
+    assert!(first > 100, "the first session is heard: {first}");
+
+    app.world_mut().remove_resource::<LocalServerPlayer>();
+    app.update();
+    app.insert_resource(LocalServerPlayer(1));
+    app.update();
+    let before = app.world().resource::<Heard>().0;
+    for _ in 0..20 {
+        app.update();
+    }
+    let second = app.world().resource::<Heard>().0 - before;
+    assert!(second >= 15, "the second session is heard too: {second}");
+}

@@ -162,6 +162,18 @@ impl<T: TickedEvent> TickedEvents<T> {
     /// time, counted: a tick that was heard with two of the same event and now has
     /// three gives one.
     fn drain_unpresented(&mut self, up_to: u64) -> Vec<(u64, T)> {
+        // The tick is behind what has been presented: the clock was set back
+        // without this log being told — a session reset that did not clear it.
+        // Nothing a rollback does gets here, since a rollback rewinds the
+        // watermark first. Left alone, every event from now until the clock
+        // passed the old watermark would count as already shown: silence, for
+        // as long as the last session ran. Start over from the tick it is.
+        if self.presented > up_to {
+            self.log.split_off(&(up_to + 1));
+            self.heard.clear();
+            self.presented = 0;
+            self.writing = None;
+        }
         let mut out = Vec::new();
         // `BTreeMap::range` panics on an inverted range rather than yielding
         // nothing, and "everything is already presented" inverts it — which is the
@@ -241,7 +253,7 @@ impl TickedEventAppExt for App {
         self.world_mut()
             .resource_mut::<TickedEventRegistry>()
             .0
-            .push(truncate_one::<T>);
+            .push((truncate_one::<T>, clear_one::<T>));
         self.add_systems(
             crate::TickedLoop,
             prune_ticked_events::<T>.in_set(crate::TickedSystems::PostTick),
@@ -269,7 +281,7 @@ fn prune_ticked_events<T: TickedEvent>(
 /// writes nothing, so there is no first-write to clear the stale entry with. The
 /// prediction that never happened would be presented anyway.
 #[derive(Resource, Default)]
-pub struct TickedEventRegistry(Vec<fn(&mut World, u64)>);
+pub struct TickedEventRegistry(Vec<(fn(&mut World, u64), fn(&mut World))>);
 
 impl TickedEventRegistry {
     /// Discard every registered log's events after `tick`, and rewind their
@@ -278,22 +290,32 @@ impl TickedEventRegistry {
         let Some(registry) = world.get_resource::<Self>() else {
             return;
         };
-        let truncators = registry.0.clone();
-        for truncate in truncators {
+        let logs = registry.0.clone();
+        for (truncate, _) in logs {
             truncate(world, tick);
         }
     }
 
-    /// Clear every registered log, for a session reset.
+    /// Clear every registered log, for a session reset: whatever the tick was,
+    /// the next session starts from nothing presented and nothing heard.
+    ///
+    /// Every path that sets the tick back to zero calls this. One that does not
+    /// leaves the watermark where the last session stopped, and every event of
+    /// the next one is taken as already presented until the clock passes it.
     pub fn clear_all(world: &mut World) {
-        // Truncating before tick 0 empties the log and resets the watermark.
         let Some(registry) = world.get_resource::<Self>() else {
             return;
         };
-        let truncators = registry.0.clone();
-        for truncate in truncators {
-            truncate(world, 0);
+        let logs = registry.0.clone();
+        for (_, clear) in logs {
+            clear(world);
         }
+    }
+}
+
+fn clear_one<T: TickedEvent>(world: &mut World) {
+    if let Some(mut events) = world.get_resource_mut::<TickedEvents<T>>() {
+        events.clear();
     }
 }
 
@@ -444,6 +466,34 @@ mod tests {
         events.write(1, Thunk(1));
         events.write(2, Thunk(2));
         assert_eq!(events.drain_unpresented(2), vec![(2, Thunk(2))]);
+    }
+
+    #[test]
+    fn clearing_forgets_what_was_heard_too() {
+        let mut events = log();
+        events.write(5, Thunk(1));
+        assert_eq!(events.drain_unpresented(5).len(), 1);
+        events.clear();
+        // The next session's tick 5 is not the last one's.
+        events.write(5, Thunk(1));
+        assert_eq!(events.drain_unpresented(5), vec![(5, Thunk(1))]);
+    }
+
+    #[test]
+    fn a_clock_set_back_without_a_clear_still_presents() {
+        // A session that ran to tick 900, then a reset that zeroed the tick and
+        // did not clear this log. Before, nothing was presented again until the
+        // new session reached tick 900.
+        let mut events = log();
+        events.write(900, Thunk(1));
+        assert_eq!(events.drain_unpresented(900).len(), 1);
+
+        events.write(3, Thunk(2));
+        assert_eq!(events.drain_unpresented(3), vec![(3, Thunk(2))]);
+        events.write(4, Thunk(3));
+        assert_eq!(events.drain_unpresented(4), vec![(4, Thunk(3))]);
+        // And the old session's tick 900 is gone, not waiting to be presented.
+        assert_eq!(events.at_tick(900), &[] as &[Thunk]);
     }
 
     #[test]
