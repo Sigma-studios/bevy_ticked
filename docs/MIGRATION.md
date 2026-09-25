@@ -34,6 +34,29 @@ obeys; `docs/avian.md` the physics bundle.
 | `TickedPlugin::default()` for a networked game | `TickedPlugin { source: TickSource::Hz(64.0), .. }` | T4 |
 | a game's own role teardown when its lobby changes host | `end_ticked_session`, done by `TickedEnsembleSessionPlugin` on `HostChanged` | T17 |
 | an exhaustive `match` on `TickHoldReason` | `+ HostMigration` | T18 |
+| `TickedEvent: Send + Sync + Clone` | `+ PartialEq` | T19 |
+
+## T19 — a replay does not repeat an event
+
+No change to `bevy_ensemble`'s pin, and none to the wire: event logs do not travel.
+
+### What a reader was given is remembered
+
+A client's correction truncates every `TickedEvents` log after the snapshot's tick and rewinds
+its presentation watermark, so the corrected version of a tick is presented rather than
+swallowed as already shown. But the rewind was unconditional: every event from the replayed
+ticks was presented again, including the ones the replay reproduced exactly. A misprediction
+anywhere — most often a remote player's position — replayed this peer's own recent gunshots,
+footsteps and blasts. A game that played sounds from `TickedEventReader` heard them twice.
+
+The log now keeps what it has handed out for each tick, for as long as it keeps the tick, and a
+tick read again after a rollback gives only what the replay *added*, counted: heard with two of
+an event and replayed with three gives one. What a correction removed was presented already and
+stays so.
+
+**Change in a game:** an event type must be `PartialEq`, and two events that should both be
+presented on one tick must compare unequal — carry who or where, not only what. A game that
+de-duplicated replayed events itself (a set of `(tick, event)` it had played) can delete that.
 
 ## T18 — a lockstep match survives its host
 
