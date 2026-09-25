@@ -15,6 +15,7 @@ pub mod snapshot;
 use bevy::prelude::*;
 
 use bevy_ticked::{
+    events::TickedEventRegistry,
     registry::TickedComponentRegistry,
     resource_registry::TickedResourceRegistry,
     tick::{CurrentTick, TickHoldReason, TickHolds},
@@ -63,6 +64,10 @@ pub fn reset_on_leave<T: TickedInput>(world: &mut World) {
     world.resource_mut::<InputQueue<T>>().inputs.clear();
     let registry = world.resource::<TickedComponentRegistry>().clone();
     registry.clear_all(world);
+    // And the event logs, whose watermark would otherwise stay at the tick this session stopped
+    // on: every event of the next one would be taken as already presented until its clock got
+    // back there.
+    TickedEventRegistry::clear_all(world);
     // Clearing a resource's history is not the same as clearing the resource: a `RoundState`
     // that said "round 7, team B leads" said it into the next lobby too, and every consumer
     // wrote a `reset_round_on_leave` to put it back. Registered means "part of the session",
