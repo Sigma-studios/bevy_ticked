@@ -58,6 +58,23 @@
 //! despawn bodies through the tracked paths (`despawn_ticked`) so the entities a restored graph
 //! names still exist.
 //!
+//! **The solve order is named by tracked ids, not by spawn order.** avian's result depends on
+//! the order its colliders and joints were spawned in: the broad phase names a new pair's
+//! colliders in the order their proxies entered the collider trees, the narrow phase computes the
+//! manifold in that orientation, the constraint graph colours contacts greedily in the order they
+//! started touching (and the colours are solved in sequence), and joints are solved in the order
+//! a query visits their table rows. A client never builds its world in the host's order -- a
+//! snapshot spawns in id order, a rollback revives tombstones in map order, the host's tables are
+//! spawn order shuffled by every despawn -- so without this no prediction of a contact or a
+//! ragdoll could ever match the host's bit for bit (`tests/spawn_order_independence.rs`: the
+//! same eight boxes spawned in reverse part at the first body-on-body contact). The plugin flips
+//! each new contact pair so the collider with the lower tracked id is first, rebuilds the
+//! constraint colouring every step in tracked-id order, and re-seats joint rows in tracked-id
+//! order whenever a spawn or rollback has disturbed them. A collider without its own
+//! `TickTrackedEntity` is keyed by its body's, and an untracked one (level geometry) by its
+//! `Entity`, which is canonical only if every peer spawns it the same way.
+//! `spawn_order_dependent_solve()` turns all of it off.
+//!
 //! # Sets
 //!
 //! [`TickedSimulationSet`] orders a game's systems around the step inside `TickedSimulation`:
@@ -98,19 +115,22 @@ pub enum TickedSimulationSet {
 }
 
 macro_rules! ticked_avian {
-    ($avian:ident, $place_from:item) => {
-    use $avian::collision::contact_types::ContactGraph;
+    ($avian:ident, [$($joint:ty),* $(,)?], $place_from:item) => {
+    use $avian::collision::contact_types::{ContactGraph, ContactId};
     use $avian::dynamics::solver::constraint_graph::ConstraintGraph;
     use $avian::dynamics::solver::islands::{
         BodyIslandNode, IslandPlugin, IslandSleepingPlugin, PhysicsIslands,
     };
+    use $avian::dynamics::joints::EntityConstraint;
     use $avian::dynamics::solver::joint_graph::JointGraph;
+    use bevy::ecs::storage::TableId;
     use $avian::physics_transform::PhysicsTransformConfig;
     use $avian::prelude::*;
     use bevy::prelude::*;
     use bevy_ticked::TickedSimulation;
     use bevy_ticked::registry::{TickedAppExt, TickedComponentRegistry};
     use bevy_ticked::resource_registry::{TickedResourceAppExt, TickedResourceRegistry};
+    use bevy_ticked::tracked_entity::TickTrackedEntity;
     use bevy_ticked_networking::networked_registry::NetworkedTickedAppExt;
 
     pub use crate::TickedSimulationSet;
@@ -131,6 +151,9 @@ macro_rules! ticked_avian {
         pub physics_added_by_the_game: bool,
         /// Keep avian's `Transform` → `Position` sync on. Solo games only.
         pub positions_from_transforms: bool,
+        /// Orient contact pairs, colour contact constraints and order joints by tracked id rather
+        /// than by spawn order. On by default; see the crate docs.
+        pub canonical_solve_order: bool,
     }
 
     impl Default for TickedAvianPlugin {
@@ -139,6 +162,7 @@ macro_rules! ticked_avian {
                 allow_sleeping: false,
                 physics_added_by_the_game: false,
                 positions_from_transforms: false,
+                canonical_solve_order: true,
             }
         }
     }
@@ -159,6 +183,14 @@ macro_rules! ticked_avian {
         /// nothing having touched `Transform` between ticks; solo games only.
         pub fn positions_from_transforms(mut self) -> Self {
             self.positions_from_transforms = true;
+            self
+        }
+
+        /// Leave contacts and joints in avian's own order, which follows spawn order. Two peers
+        /// that spawned the same bodies in different orders then solve every contact and every
+        /// joint differently. For a game that never sends a snapshot.
+        pub fn spawn_order_dependent_solve(mut self) -> Self {
+            self.canonical_solve_order = false;
             self
         }
     }
@@ -238,6 +270,19 @@ macro_rules! ticked_avian {
             if !self.allow_sleeping {
                 app.register_required_components::<RigidBody, SleepingDisabled>();
             }
+
+            if self.canonical_solve_order {
+                app.add_systems(
+                    PhysicsSchedule,
+                    (
+                        orient_new_contact_pairs.in_set(BroadPhaseSystems::Last),
+                        (recolor_constraint_graph, $(reseat_joints::<$joint>,)*)
+                            .chain()
+                            .after(PhysicsStepSystems::NarrowPhase)
+                            .before(PhysicsStepSystems::Solver),
+                    ),
+                );
+            }
         }
 
         fn finish(&self, app: &mut App) {
@@ -283,6 +328,181 @@ macro_rules! ticked_avian {
             .insert(place_from(transform));
     }
 
+    /// Where a collider sits in the canonical order: its own tracked id, else its body's tracked
+    /// id (a child collider), else its `Entity` (level geometry spawned the same way on every
+    /// peer). Tracked before untracked.
+    ///
+    /// **Sibling child colliders are the one spawn-dependent case.** Two untracked colliders on
+    /// one tracked body share its id, and the tie between them is broken by `Entity`, which is
+    /// whatever the spawn order made it. A body whose several colliders can touch the same thing
+    /// in one step — a ragdoll limb with two capsules, a car with a collider per wheel — orders
+    /// those contacts by spawn order again. Give each such child collider its own
+    /// `TickTrackedEntity` (spawn it through `TrackedSpawner`) and the tie is gone.
+    type ContactKey = (u8, u64, u64);
+
+    fn contact_key(
+        collider: Entity,
+        tracked: &Query<(Option<&TickTrackedEntity>, Option<&ColliderOf>)>,
+        bodies: &Query<&TickTrackedEntity>,
+    ) -> ContactKey {
+        match tracked.get(collider) {
+            Ok((Some(id), _)) => (0, id.0, 0),
+            Ok((None, Some(of))) => match bodies.get(of.body) {
+                Ok(id) => (1, id.0, collider.to_bits()),
+                Err(_) => (2, collider.to_bits(), 0),
+            },
+            _ => (2, collider.to_bits(), 0),
+        }
+    }
+
+    /// The broad phase names a new pair's colliders in the order it found them, which follows
+    /// the order their proxies entered the collider trees: spawn order. Everything the narrow
+    /// phase computes for the pair (normal, anchors, feature ids) and the solver's view of it
+    /// follows that orientation. Flip every pair that has no contact yet so the collider with
+    /// the lower [`ContactKey`] is `collider1`. A pair with manifolds is left alone: it was
+    /// oriented here when it was new, and flipping it would orphan its manifolds.
+    fn orient_new_contact_pairs(
+        mut contact_graph: ResMut<ContactGraph>,
+        tracked: Query<(Option<&TickTrackedEntity>, Option<&ColliderOf>)>,
+        bodies: Query<&TickTrackedEntity>,
+        mut flip: Local<Vec<ContactId>>,
+    ) {
+        flip.clear();
+        for pair in contact_graph.active_pairs() {
+            if !pair.manifolds.is_empty() || pair.flags.contains(ContactPairFlags::TOUCHING) {
+                continue;
+            }
+            if contact_key(pair.collider2, &tracked, &bodies)
+                < contact_key(pair.collider1, &tracked, &bodies)
+            {
+                flip.push(pair.contact_id);
+            }
+        }
+        for &id in flip.iter() {
+            let Some((edge, pair)) = contact_graph.get_mut_by_id(id) else {
+                continue;
+            };
+            core::mem::swap(&mut edge.collider1, &mut edge.collider2);
+            core::mem::swap(&mut edge.body1, &mut edge.body2);
+            core::mem::swap(&mut pair.collider1, &mut pair.collider2);
+            core::mem::swap(&mut pair.body1, &mut pair.body2);
+        }
+    }
+
+    /// avian colours contact constraints greedily, in the order the narrow phase reports the
+    /// pairs that started touching (contact-id order, which is insertion order, which is spawn
+    /// order), and solves the colours in sequence: the colour a constraint lands in decides
+    /// which impulses it sees. Rebuild the colouring every step from scratch, pushing the
+    /// manifolds in [`ContactKey`] order, so the solve order is a function of which pairs touch
+    /// and nothing else.
+    fn recolor_constraint_graph(
+        mut contact_graph: ResMut<ContactGraph>,
+        mut constraint_graph: ResMut<ConstraintGraph>,
+        tracked: Query<(Option<&TickTrackedEntity>, Option<&ColliderOf>)>,
+        bodies: Query<&TickTrackedEntity>,
+        mut handles: Local<Vec<ContactId>>,
+        mut order: Local<Vec<(ContactKey, ContactKey, ContactId, usize)>>,
+    ) {
+        handles.clear();
+        for color in &constraint_graph.colors {
+            handles.extend(color.manifold_handles.iter().map(|h| h.contact_id));
+        }
+        if handles.is_empty() {
+            return;
+        }
+        handles.sort_unstable_by_key(|id| id.0);
+        order.clear();
+        for run in handles.chunk_by(|a, b| a == b) {
+            let id = run[0];
+            let Some((_, pair)) = contact_graph.get_by_id(id) else {
+                continue;
+            };
+            order.push((
+                contact_key(pair.collider1, &tracked, &bodies),
+                contact_key(pair.collider2, &tracked, &bodies),
+                id,
+                run.len(),
+            ));
+        }
+        // Stable, and keyed on the pair: two pairs never share both keys, so the order is total.
+        order.sort_by_key(|&(k1, k2, _, _)| (k1, k2));
+
+        constraint_graph.clear();
+        for &(_, _, id, manifolds) in order.iter() {
+            let Some((edge, pair)) = contact_graph.get_mut_by_id(id) else {
+                continue;
+            };
+            debug_assert_eq!(manifolds, pair.manifolds.len());
+            edge.constraint_handles.clear();
+            for _ in 0..manifolds {
+                constraint_graph.push_manifold(edge, pair);
+            }
+        }
+    }
+
+    /// A joint's place in the canonical order: its own tracked id, else its bodies' — and, for
+    /// two untracked joints on the same pair of bodies, the joint's own `Entity`, so that the key
+    /// is total and the order it gives is the same from one step to the next. That last tie is
+    /// spawn-dependent across peers in the way `ContactKey`'s sibling case is: track such joints.
+    type JointKey = (u8, u64, u64, u64);
+
+    /// Set on a joint for the instant it is moved out of its table and back. See
+    /// [`reseat_joints`].
+    #[derive(Component)]
+    struct Reseated;
+
+    /// avian solves joints the way it prepares, warm-starts and damps them: by iterating a
+    /// query over the joint components, which visits rows in table order -- spawn order, shuffled
+    /// by every `swap_remove`. Every joint of a ragdoll shares the torso, so the order the solver
+    /// visits them in is the order their corrections compound in.
+    ///
+    /// Nothing in avian takes an order, so the rows are put in one: when the joints of a type are
+    /// out of [`JointKey`] order within any archetype, every one of them is moved out of its
+    /// table (a marker inserted) and back (removed), in key order. A move appends, so each table
+    /// is left holding them sorted. Costs one pass over the joints each step, and the moves only
+    /// in a step whose order a spawn, revive or rollback disturbed. Order is checked per *table*,
+    /// because that is what a query iterates: two archetypes can share a table (they differ only
+    /// in sparse-set components), and their rows interleave in it. Tables are still visited in
+    /// the order the world created them, which a peer that built its world differently may not
+    /// share; joints of one type that all carry the same components live in one table.
+    fn reseat_joints<C: Component + EntityConstraint<2>>(
+        world: &mut World,
+        joints: &mut QueryState<
+            (Entity, &C, Option<&TickTrackedEntity>),
+            (Without<RigidBody>, Without<JointDisabled>),
+        >,
+        mut rows: Local<Vec<(TableId, JointKey, Entity)>>,
+    ) {
+        rows.clear();
+        for (entity, joint, id) in joints.iter(world) {
+            let key = match id {
+                Some(id) => (0, id.0, 0, 0),
+                None => {
+                    let body = |e: Entity| {
+                        world.get::<TickTrackedEntity>(e).map_or(e.to_bits(), |t| t.0)
+                    };
+                    let [a, b] = joint.entities();
+                    (1, body(a), body(b), entity.to_bits())
+                }
+            };
+            let table = world.entity(entity).location().table_id;
+            rows.push((table, key, entity));
+        }
+        let in_order = rows
+            .windows(2)
+            .all(|w| w[0].0 != w[1].0 || w[0].1 <= w[1].1);
+        if in_order {
+            return;
+        }
+        rows.sort_by_key(|&(_, key, _)| key);
+        for &(_, _, entity) in rows.iter() {
+            world.entity_mut(entity).insert(Reseated);
+        }
+        for &(_, _, entity) in rows.iter() {
+            world.entity_mut(entity).remove::<Reseated>();
+        }
+    }
+
     fn register_resource_if_missing<R: bevy_ticked::resource_registry::TickedResource>(
         app: &mut App,
     ) {
@@ -319,6 +539,13 @@ macro_rules! ticked_avian {
 pub mod avian3d {
     ticked_avian!(
         avian3d,
+        [
+            FixedJoint,
+            RevoluteJoint,
+            SphericalJoint,
+            PrismaticJoint,
+            DistanceJoint
+        ],
         fn place_from(transform: &Transform) -> (Position, Rotation) {
             (
                 Position(transform.translation),
@@ -333,6 +560,7 @@ pub mod avian3d {
 pub mod avian2d {
     ticked_avian!(
         avian2d,
+        [FixedJoint, RevoluteJoint, PrismaticJoint, DistanceJoint],
         fn place_from(transform: &Transform) -> (Position, Rotation) {
             (
                 Position(transform.translation.truncate()),
