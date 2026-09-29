@@ -20,6 +20,10 @@ impl Plugin for TickedOverlayPlugin {
 }
 
 /// Snapshot of the counters at the last frame, so the overlay shows rates, not just totals.
+///
+/// The rates subtract with `saturating_sub`: a game may reset the counters (a test zeroes them
+/// once a round opens), and the first refresh after that is one reading of zero rather than an
+/// overflow panic in a debug build.
 #[derive(Default)]
 struct LastFrame {
     ticks: u64,
@@ -57,7 +61,7 @@ fn publish_ticked_lines(
             ),
         );
         if refresh {
-            let per_s = (cost.ticks - last.ticks) as f64 / dt;
+            let per_s = cost.ticks.saturating_sub(last.ticks) as f64 / dt;
             extras.set("ticked.rate", format!("ticks/s: {per_s:.1}"));
             last.ticks = cost.ticks;
         }
@@ -65,8 +69,8 @@ fn publish_ticked_lines(
     if let Some(replay) = replay
         && refresh
     {
-        let rollbacks_per_s = (replay.rollbacks - last.rollbacks) as f64 / dt;
-        let ticks_per_s = (replay.ticks_replayed - last.ticks_replayed) as f64 / dt;
+        let rollbacks_per_s = replay.rollbacks.saturating_sub(last.rollbacks) as f64 / dt;
+        let ticks_per_s = replay.ticks_replayed.saturating_sub(last.ticks_replayed) as f64 / dt;
         extras.set(
             "ticked.replay",
             format!(
@@ -81,7 +85,7 @@ fn publish_ticked_lines(
     if let Some(snapshots) = snapshots
         && refresh
     {
-        let per_s = (snapshots.sent - last.snapshots) as f64 / dt;
+        let per_s = snapshots.sent.saturating_sub(last.snapshots) as f64 / dt;
         extras.set(
             "ticked.snapshot",
             format!(
@@ -94,7 +98,7 @@ fn publish_ticked_lines(
     if let Some(inputs) = inputs
         && refresh
     {
-        let per_s = (inputs.received - last.inputs) as f64 / dt;
+        let per_s = inputs.received.saturating_sub(last.inputs) as f64 / dt;
         extras.set(
             "ticked.input",
             format!(
