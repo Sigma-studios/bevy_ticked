@@ -5,6 +5,32 @@ pull requests #1–#14 on this repository are the phases.
 
 ## Unreleased
 
+- **Behaviour change** — `bevy_ticked_avian` solves in a canonical order, **on by default**.
+  avian's result depended on spawn order (pair orientation from the broad phase, greedy constraint
+  colouring in touch order, joints in table-row order), so a client, which never builds its world
+  in the host's order, could not predict a contact or a ragdoll bit for bit. New contact pairs are
+  now oriented so the collider with the lower tracked id is `collider1`, the constraint colouring
+  is rebuilt each step in tracked-id order, and joint rows are re-seated in tracked-id order.
+  Simulation results change against earlier builds — recorded replays and golden traces must be
+  re-recorded — and `collider1`/`collider2` (and `body1`/`body2`) in `CollisionStart`,
+  `CollisionEnd` and `ContactPair` follow the tracked-id order rather than spawn order. Sibling
+  child colliders of one body, and untracked joints on the same pair of bodies, still tie-break by
+  `Entity`: track them to make them canonical. `TickedAvianPlugin::spawn_order_dependent_solve()`
+  restores avian's own order, for a game that never sends a snapshot.
+  `tests/spawn_order_independence.rs`.
+
+- **Architecture** — an explicit session lifecycle and a registry of session state (T20).
+  `TickedSession` (`Offline`/`Solo`/`Host`/`Client`) is a Bevy state derived from the role
+  resources, and the doors are its `OnExit`/`OnEnter` systems: ordered, and before the tick of the
+  frame the role takes effect — a join applied its first snapshot to the solo world 40/40 times
+  before, 0/40 now. What a door resets is whatever was registered with `bevy_ticked::session`
+  (`init_session_resource`, `SessionScope::{Role, Session}`, `PerPeer`), not a list per door;
+  about sixty-five hand-written reset statements and five `Local`s that leaked into the next
+  session are gone, and a source guard keeps new `Local`s out of the networking crates. Solo is a
+  session (`StartSolo`/`EndSession`), a host change is one door with no frame without a role,
+  `PausePolicy::automatic_pauses` replaces the games' `keep_the_lobby_running`, and focus loss no
+  longer pauses by default. See `docs/MIGRATION.md` T20.
+
 - **Fix** — ids are minted per kind of thing, so a client that disagrees with the authority about
   one spawn no longer renames every later one. An id was `sequence << 8 | slot` from a single
   counter per slot, and a client legitimately spawns things the authority does not (a guessed

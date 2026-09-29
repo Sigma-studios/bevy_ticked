@@ -1,10 +1,11 @@
 //! A host change, through the bridge.
 //!
 //! The snapshot model cannot carry a match across a host change — the authoritative world was the
-//! old host's — so the bridge ends the ticked session on every survivor and starts a fresh one with
-//! the new host in the same lobby. These drive the lobby crate's migration over the loopback
-//! harness and check the three things that can go wrong in between: a role never taken back, a
-//! role taken back too early, and state from the old session leaking into the new one.
+//! old host's — so the bridge re-enters every survivor's role: the old session's world goes, and a
+//! fresh session starts with the new host in the same lobby. These drive the lobby crate's
+//! migration over the loopback harness and check the three things that can go wrong in between: a
+//! role not taken, a handshake timed out while the new host is still being reached, and state from
+//! the old session leaking into the new one.
 
 use std::time::Duration;
 
@@ -46,6 +47,10 @@ fn seated_session() -> (TickedNetwork, PeerId, PeerId) {
     (net, clients[0], clients[1])
 }
 
+/// A host change is a door, not a gap: the old session's world is gone on every survivor, and each
+/// is already in its new role — the new host hosting, the other a client of it — with no frame in
+/// between without one. The old shape dropped both roles and waited two frames to take one back,
+/// because the doors it would otherwise have raced had no order; they do now.
 #[test]
 fn a_host_change_ends_the_snapshot_session_for_every_survivor() {
     let (mut net, a, b) = seated_session();
@@ -53,8 +58,13 @@ fn a_host_change_ends_the_snapshot_session_for_every_survivor() {
 
     net.migrate(a);
     net.step();
+    assert_eq!(role(net.app(a)), Role::Host, "a hosts at once");
+    assert_eq!(
+        role(net.app(b)),
+        Role::Client,
+        "and b is its client at once"
+    );
     for peer in [a, b] {
-        assert_eq!(role(net.app(peer)), Role::Solo, "no role on peer {peer:?}");
         assert_eq!(
             tracked(&mut net, peer),
             0,

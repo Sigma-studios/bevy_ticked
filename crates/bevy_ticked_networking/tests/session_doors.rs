@@ -235,3 +235,28 @@ fn an_absent_recipient_count_means_send_anyway() {
         "unknown is not zero"
     );
 }
+
+/// A role removed and inserted again in one frame, under the same uuid, is a new session: its doors
+/// run. Without that the old world, clock and last-applied snapshot survived into it unseen.
+#[test]
+fn a_role_taken_again_in_the_same_frame_runs_its_doors() {
+    use bevy_ticked_networking::client::AppliedSnapshotTick;
+
+    let mut app = peer();
+    app.world_mut().insert_resource(LocalClientPlayer(2));
+    app.update();
+    app.world_mut().spawn((TickTrackedEntity(1), Pos(5)));
+    app.world_mut()
+        .insert_resource(AppliedSnapshotTick(Some(400)));
+    app.world_mut().insert_resource(CurrentTick(400));
+    app.update();
+
+    app.world_mut().remove_resource::<LocalClientPlayer>();
+    app.world_mut().insert_resource(LocalClientPlayer(2));
+    app.update();
+
+    let mut tracked = app.world_mut().query::<&TickTrackedEntity>();
+    assert_eq!(tracked.iter(app.world()).count(), 0, "the old world went");
+    assert_eq!(app.world().resource::<AppliedSnapshotTick>().0, None);
+    assert_eq!(app.world().resource::<CurrentTick>().0, 0);
+}

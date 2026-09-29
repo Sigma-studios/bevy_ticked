@@ -14,7 +14,7 @@ overlay = ["bevy_ensemble/netdebug"]
 local-session = ["dep:bevy_ensemble_webrtc", "bevy_ensemble_webrtc/server"]
 
 [dependencies]
-bevy = { version = "0.19", default-features = false, features = ["std", "bevy_log"] }
+bevy = { version = "0.19", default-features = false, features = ["std", "bevy_log", "bevy_state"] }
 bevy_ticked = { path = "../.." }
 bevy_ticked_networking = { path = "../bevy_ticked_networking" }
 bevy_ensemble = { workspace = true }

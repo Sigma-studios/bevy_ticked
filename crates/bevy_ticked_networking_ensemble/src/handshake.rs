@@ -51,8 +51,10 @@ use bevy::prelude::*;
 use bevy_ensemble::prelude::*;
 use bevy_ensemble::{HandshakeVerified, LobbyClientMessage, LobbyClientPlayerUuid};
 use bevy_ticked::prelude::*;
+use bevy_ticked::session::{PerPeer, SessionAppExt, SessionReset, SessionScope};
 use bevy_ticked::tick::CurrentTick;
 use bevy_ticked_networking::client::LocalClientPlayer;
+use bevy_ticked_networking::session::{SessionDoor, TickedSession};
 use serde::{Deserialize, Serialize};
 
 /// What each peer says about the shape of its registries.
@@ -198,6 +200,30 @@ pub struct SpawnerSlots {
     by_uuid: BTreeMap<u128, u8>,
 }
 
+impl SessionReset for SpawnerSlots {}
+
+impl PerPeer for SpawnerSlots {
+    fn forget(&mut self, peer: u128) {
+        self.free(peer);
+    }
+}
+
+/// A welcome that arrived before the client role it is for. See [`receive_welcome`].
+///
+/// A resource registered with the session, where it used to be a `Local`: a welcome kept for a
+/// role that never came — a join abandoned between the host's welcome and the role — was applied
+/// to the *next* session's client role, slot and all.
+#[derive(Resource, Default, Debug, Clone, Copy)]
+pub struct PendingWelcome(pub Option<TickedSessionWelcome>);
+
+impl SessionReset for PendingWelcome {}
+
+/// How long this client has waited for its host's registries. See [`refuse_after_timeout`].
+#[derive(Resource, Default, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HandshakeWait(pub Duration);
+
+impl SessionReset for HandshakeWait {}
+
 impl SpawnerSlots {
     /// The slot `uuid` holds, or the lowest free one from now on. `None` when all 255 are taken.
     pub fn assign(&mut self, uuid: u128) -> Option<u8> {
@@ -246,13 +272,30 @@ pub(crate) fn plugin(app: &mut App) {
         "bevy_ticked/SessionWelcome",
         bevy_ensemble::MessageAuthority::HostOnly,
     )
-    .init_resource::<SpawnerSlots>()
+    // Slots belong to the host's session and to each client in it: a departed client's is
+    // given back through `PeerLeft`, and a new session hands them out from one again.
+    .init_per_peer_resource::<SpawnerSlots>()
+    // What this peer learned from its host's handshake is about the lobby it joined, and may be
+    // learned before the client role is taken — so it lasts the session, not the role, and goes
+    // on the leave (and at a host change, by hand: see `follow_host_change`).
+    .remove_at_session_end::<RegistryVerified>(SessionScope::Session)
+    .init_session_resource::<PendingWelcome>()
+    .init_session_resource_scoped::<HandshakeWait>(SessionScope::Role)
     .insert_resource(HandshakeInstalled)
     .add_observer(announce_registry)
-    .add_observer(free_departed_slot)
     .add_systems(
         Update,
-        (check_registry, receive_welcome, refuse_after_timeout).chain(),
+        (
+            check_registry,
+            receive_welcome,
+            apply_welcome,
+            refuse_after_timeout,
+        )
+            .chain(),
+    )
+    .add_systems(
+        OnEnter(TickedSession::Client),
+        apply_welcome.after(SessionDoor),
     );
     if !app.world().contains_resource::<HandshakeTimeout>() {
         app.insert_resource(HandshakeTimeout(Duration::from_secs(5)));
@@ -304,7 +347,7 @@ fn announce_registry(
 /// snapshot, and the error names the registration. The host's own session is untouched — three
 /// players on the right build do not lose their game because a fourth is on the wrong one, and
 /// the fourth finds out on its own side, since both peers compare. On a client a mismatch is
-/// the end: the role is dropped, `reset_on_leave` clears whatever was built, and
+/// the end: the role is dropped, the leave door clears whatever was built, and
 /// [`RegistryMismatch`] keeps it from being taken back.
 fn check_registry(world: &mut World) {
     let arrivals: Vec<(Option<u128>, TickedRegistryHandshake)> = {
@@ -399,37 +442,36 @@ fn verify_client(world: &mut World, uuid: u128) {
 /// A client keeps the slot its host gave it, and draws remote bodies far enough behind the
 /// host's send rate that there is always a next state to blend toward.
 ///
-/// Applied only while this peer holds the client role. A welcome can arrive in the gap after a
-/// host change, before the role is taken back; a slot inserted then would be cleared by the
-/// `reset_on_leave` it raced, so the welcome is kept until there is a role to apply it to.
+/// Applied only once this peer *is* a client — the state, not merely the role resource. A host
+/// verifies a client as soon as the client's registries arrive, which can be before the client has
+/// taken its role, and a role resource is in place a frame before its join door runs: a slot
+/// inserted in that frame was removed by the door out of the state before (a solo game's), and the
+/// client then minted in the authority's range. So the welcome waits, and is applied by the join
+/// door's own follow-up ([`apply_welcome`] in `OnEnter(Client)`) or on any later frame.
 fn receive_welcome(
     mut welcomes: MessageReader<ReceivedEnsembleMessage<TickedSessionWelcome>>,
-    mut pending: Local<Option<TickedSessionWelcome>>,
+    mut pending: ResMut<PendingWelcome>,
+) {
+    if let Some(welcome) = welcomes.read().last() {
+        pending.0 = Some(welcome.message);
+    }
+}
+
+pub(crate) fn apply_welcome(
+    mut pending: ResMut<PendingWelcome>,
+    // Absent only in an app without a role plugin, where the role resource is all there is.
+    state: Option<Res<State<TickedSession>>>,
     client: Option<Res<LocalClientPlayer>>,
     mut commands: Commands,
 ) {
-    if let Some(welcome) = welcomes.read().last() {
-        *pending = Some(welcome.message);
-    }
-    if client.is_none() {
+    if client.is_none() || state.is_some_and(|state| *state.get() != TickedSession::Client) {
         return;
     }
-    if let Some(welcome) = pending.take() {
+    if let Some(welcome) = pending.0.take() {
         commands.insert_resource(LocalSpawnerSlot(SpawnerSlot(welcome.slot)));
         commands.insert_resource(bevy_ticked_networking::replication::InterpolationDelay(
             (2 * welcome.send_every).max(2),
         ));
-    }
-}
-
-/// Give a slot back the moment its client's `LobbyClient` goes, whichever way it went.
-fn free_departed_slot(
-    remove: On<Remove, LobbyClient>,
-    uuids: Query<&LobbyClientPlayerUuid>,
-    mut slots: ResMut<SpawnerSlots>,
-) {
-    if let Ok(uuid) = uuids.get(remove.entity) {
-        slots.free(uuid.0);
     }
 }
 
@@ -439,22 +481,32 @@ fn free_departed_slot(
 /// Measured on `Time`, the frame clock, from the frame the client role was taken: it is the
 /// player's wait that is being bounded, and a client whose transport never delivers the
 /// reliable handshake is one whose transport is not going to deliver anything else either.
-fn refuse_after_timeout(world: &mut World, mut waited: Local<Duration>) {
+fn refuse_after_timeout(world: &mut World) {
     let client = world.contains_resource::<LocalClientPlayer>();
     let verified = world.contains_resource::<RegistryVerified>();
     if !client || verified {
-        *waited = Duration::ZERO;
+        world.resource_mut::<HandshakeWait>().0 = Duration::ZERO;
         return;
     }
-    *waited += world.resource::<Time>().delta();
+    // A lobby still reaching its new host after a host change: the role is taken, and the host
+    // it will verify against is not there yet. A slow reconnect is not a silent host.
+    if crate::session::awaiting_new_host(world) {
+        return;
+    }
+    let delta = world.resource::<Time>().delta();
+    let waited = {
+        let mut wait = world.resource_mut::<HandshakeWait>();
+        wait.0 += delta;
+        wait.0
+    };
     let timeout = world
         .get_resource::<HandshakeTimeout>()
         .map_or(Duration::from_secs(5), |timeout| timeout.0);
-    if *waited < timeout {
+    if waited < timeout {
         return;
     }
-    let waited_for = *waited;
-    *waited = Duration::ZERO;
+    let waited_for = waited;
+    world.resource_mut::<HandshakeWait>().0 = Duration::ZERO;
     error!(
         "the host never announced its registries in {waited_for:?}: the registry handshake did \
          not complete, so no snapshot has been applied and the session is being ended. The host \
@@ -464,8 +516,8 @@ fn refuse_after_timeout(world: &mut World, mut waited: Local<Duration>) {
     end_client_session(world);
 }
 
-/// Dropping the roles is what actually ends it: `reset_on_leave` fires on their removal and
-/// clears the queue, the tick and every tracked entity the wrong-shaped snapshots built.
+/// Dropping the roles is what actually ends it: the leave door runs on the state following them,
+/// and clears the queue, the tick and every tracked entity the wrong-shaped snapshots built.
 fn end_client_session(world: &mut World) {
     crate::session::end_ticked_session(world);
 }
@@ -553,7 +605,7 @@ mod tests {
         );
         assert!(
             app.world().get_resource::<LocalClientPlayer>().is_none(),
-            "the role is dropped, which is what makes reset_on_leave clear the wrong-shaped world"
+            "the role is dropped, which is what makes the leave door clear the wrong-shaped world"
         );
         assert!(!app.world().contains_resource::<RegistryVerified>());
     }

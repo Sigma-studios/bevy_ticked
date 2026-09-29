@@ -60,6 +60,23 @@ pub struct Needle {
     pub reason: &'static str,
 }
 
+/// State a system keeps for itself, which no session door can reach.
+///
+/// A `Local` lives as long as the app. In a crate that plays sessions one after another that is
+/// a leak with a delay: five of them in this stack held something a session had set — a held-pass
+/// count, a "tick 0 captured" flag, a "buffer seeded" flag, a welcome waiting for its role, the
+/// last acknowledgement sent — and each one handed it to the next session, where it presented as
+/// jitter, a throttled first snapshot or a missing rewind target, never as "a `Local`". Session
+/// state goes in a resource registered with `bevy_ticked::session`, which every door resets.
+///
+/// Banned from the networking crates' sources with an explicit allowlist: presentation and
+/// diagnostics that are not session state, and per-call scratch that is cleared before every use.
+pub const SESSION_STATE_NEEDLES: &[Needle] = &[Needle {
+    needle: "Local<",
+    reason: "a system Local outlives every session; register a resource with \
+             bevy_ticked::session (init_session_resource_scoped) so the doors reset it",
+}];
+
 /// One file that is allowed one needle, with the reason and, if the reason is temporary, the
 /// date by which it should have gone.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

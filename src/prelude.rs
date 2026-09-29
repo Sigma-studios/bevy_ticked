@@ -18,6 +18,7 @@ pub use crate::{
         ResourceActions, TickedResource, TickedResourceAppExt, TickedResourceRegistry,
     },
     rollback::{rollback_and_resimulate, rollback_to_tick},
+    session::{PerPeer, SessionAppExt, SessionReset, SessionResources, SessionScope},
     tick::{
         CurrentTick, HISTORY_BUFFER_TICKS, HistoryBufferTicks, ResetToTick, SECONDS_PER_TICK,
         StepBackward, StepForward, TICKS_PER_SECOND, TickHoldReason, TickHolds,

@@ -1,12 +1,12 @@
-//! Becoming a host, becoming a client, and stopping being either.
+//! Becoming a host, becoming a client, playing alone, and stopping being any of them.
 //!
 //! # Why this belongs here and not in the game
 //!
-//! `bevy_ticked_networking` has two role resources; `bevy_ensemble` has lobbies, participants and
-//! a local uuid. Mapping the second onto the first is the one thing that turns two independent
-//! crates into a session, and until now it was left to the consumer — so **every** consumer wrote
-//! it, including both examples in this repository, and they wrote it differently in the places
-//! that are hardest to get right.
+//! `bevy_ticked_networking` has three role resources and a [`TickedSession`] state derived from
+//! them; `bevy_ensemble` has lobbies, participants and a local uuid. Mapping the second onto the
+//! first is the one thing that turns two independent crates into a session, and until it lived here
+//! it was left to the consumer — so **every** consumer wrote it, including both examples in this
+//! repository, and they wrote it differently in the places that are hardest to get right.
 //!
 //! The differences are not cosmetic:
 //!
@@ -17,36 +17,53 @@
 //!   camera, which is drawn as somebody else — is wrong for its duration.
 //!   [`adopt_role`] keys off [`LocalMultiplayerPlayerId`] instead, which appears the moment the
 //!   signalling server says the lobby was joined, and is strictly earlier than any peer connection
-//!   can exist. Earlier still is the placeholder a host holds between asking to host and the
-//!   lobby being created, and that one is *not* adopted from: see [`adopt_role`].
-//!
-//! - **What to tear down.** Upstream's `reset_on_host` raises the entity counter and
-//!   `reset_on_join` zeroes it, but neither despawns what the peer built while it thought it was
-//!   alone. A solo body left standing is an untracked duplicate the instant the host's world
-//!   arrives — the host's copy of that player spawns beside it and both are drawn.
+//!   can exist.
 //!
 //! - **The window in between.** Between a lobby appearing and a role being adopted, a peer is
-//!   still nominally the authority over its own solo world *and* the participant roster has
-//!   already arrived. Anything that mints a tracked entity there is doing a client-side spawn: the
-//!   next snapshot despawns it, the system spawns it again, and the two chase each other at the
+//!   still nominally the authority over its own world *and* the participant roster has already
+//!   arrived. Anything that mints a tracked entity there is doing a client-side spawn: the next
+//!   snapshot despawns it, the system spawns it again, and the two chase each other at the
 //!   snapshot rate. [`may_spawn_tracked`] is the guard, and it is strictly stricter than "am I the
 //!   authority".
+//!
+//! # Playing alone is a session
+//!
+//! Both games that can play alone wrote the same four things by hand: a `SoloPlayer` resource and
+//! a `LocalPlayer` set to a made-up uuid on the way in, a `reset_on_leave` system with a
+//! `Local<bool>` that watched for "no lobby and no solo" to put the game back on the way out, and
+//! a rule that a lobby appearing under a solo game ends it. None of it was wrong, and all of it was
+//! a second session lifecycle beside this one, with its own doors and none of the ordering.
+//!
+//! So solo is a state of [`TickedSession`] like the others: [`StartSolo`] enters it under
+//! [`TickedEnsembleSessionPlugin::solo_uuid`], [`EndSession`] leaves it — through the same leave as
+//! any session, so whatever a game registered with `init_session_resource` goes back — and a lobby
+//! appearing hands the solo world over rather than ending it: the peer stays the authority over it
+//! until the lobby gives it a role, and then a host keeps the world it built and a client has it
+//! replaced by the host's. A lobby that goes before giving a role — a refused host request, a join
+//! that never completed — hands the world back: the player is still playing alone.
 //!
 //! # When the host changes
 //!
 //! A lobby that migrates keeps its entity when its host goes, and another member hosts it. The
 //! snapshot model cannot carry a match across that: the authoritative world lived on the old host,
-//! and a client only ever held what it was sent, a little in the past. So a [`HostChanged`] ends the
-//! ticked session on every peer — both roles dropped, `reset_on_leave` clearing the world — and the
-//! roles are taken back afterwards, in the same lobby: a fresh session with the new host, which a
-//! game shows as its lobby screen. See [`end_ticked_session`].
+//! and a client only ever held what it was sent, a little in the past. So a [`HostChanged`] is a
+//! door: every survivor leaves its role and enters its new one in the same frame — the new host as
+//! a host of an empty world, every other member as a client of it again — with the lobby standing
+//! throughout. A game shows it as its lobby screen.
+//!
+//! It used to be done by dropping both roles, waiting two whole frames so that the leave keyed on
+//! the removal had certainly run before the join keyed on the addition, and taking a role back
+//! once the new host was reached. The wait is gone with the race: the doors run in order now, in
+//! `StateTransition`, before the tick. The "reached" half is still needed and lives in the
+//! handshake, which does not start its clock on a client until the lobby has stopped
+//! [`AwaitingHost`].
 //!
 //! # Opt in, rather than automatic
 //!
 //! [`TickedEnsembleSessionPlugin`] is separate from
 //! [`TickedNetworkingEnsemblePlugin`](crate::TickedNetworkingEnsemblePlugin) on purpose. A
 //! consumer that already adopts roles by hand would otherwise find this crate doing it too — and
-//! the despawn above is not something to start doing to somebody's world without being asked.
+//! the despawn at a join is not something to start doing to somebody's world without being asked.
 
 use core::time::Duration;
 
@@ -54,22 +71,23 @@ use bevy::prelude::*;
 use bevy_ensemble::prelude::*;
 // `PeerRtt` / `PeerRttJitter` come in via the prelude above; named here so the reason they are
 // wanted is legible at the import site.
-use bevy_ensemble::{
-    HandshakeVerified, HostChanged, LobbyClientPlayerUuid, PeerRtt, PeerRttJitter,
-};
+use bevy_ensemble::{AwaitingHost, HostChanged, LobbyClientPlayerUuid, PeerRtt, PeerRttJitter};
 use bevy_ticked::prelude::*;
 use bevy_ticked::time::{Ticked, TickedTime};
-use bevy_ticked_networking::client::{ClientTickBuffer, LocalClientPlayer};
+use bevy_ticked_networking::client::{AppliedSnapshotTick, ClientTickBuffer, LocalClientPlayer};
 use bevy_ticked_networking::messages::PeerLeft;
 use bevy_ticked_networking::server::{LocalServerPlayer, SnapshotRecipientList};
-
-use crate::handshake::{
-    HandshakeTimedOut, HandshakeTimeout, LocalSpawnerSlot, RegistryMismatch, RegistryVerified,
-    SpawnerSlots, TickedPeerVerified,
+use bevy_ticked_networking::session::{
+    LocalSoloPlayer, SessionDoor, TickedSession, restart_session,
 };
 
-/// Adopt and release the ticked role from the ensemble lobby, run the registry handshake, and
-/// keep [`SnapshotRecipientList`] current.
+use crate::handshake::{
+    HandshakeTimedOut, HandshakeTimeout, PendingWelcome, RegistryMismatch, RegistryVerified,
+    TickedPeerVerified,
+};
+
+/// Adopt and release the ticked role from the ensemble lobby, run the registry handshake, keep
+/// [`SnapshotRecipientList`] current, and play alone on request.
 ///
 /// Add alongside [`TickedNetworkingEnsemblePlugin`](crate::TickedNetworkingEnsemblePlugin) to stop
 /// writing session bookkeeping by hand.
@@ -77,34 +95,72 @@ pub struct TickedEnsembleSessionPlugin {
     /// How long a client waits for its host's registries before giving up. See
     /// [`HandshakeTimeout`].
     pub handshake_timeout: Duration,
+    /// The uuid a solo session plays under: what [`LocalPlayer`] and
+    /// [`LocalSoloPlayer`] hold after [`StartSolo`]. `1` by default, which is what both games that
+    /// play alone chose, and which no signalling server hands out.
+    ///
+    /// [`LocalPlayer`]: bevy_ticked_networking::input_plugin::LocalPlayer
+    pub solo_uuid: u128,
 }
 
 impl Default for TickedEnsembleSessionPlugin {
     fn default() -> Self {
         Self {
             handshake_timeout: Duration::from_secs(5),
+            solo_uuid: 1,
         }
     }
 }
+
+/// Runtime copy of [`TickedEnsembleSessionPlugin::solo_uuid`].
+#[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SoloUuid(pub u128);
+
+/// Start playing alone: this peer becomes [`TickedSession::Solo`], the authority over its own
+/// world, under [`SoloUuid`]. Ignored while in any other session or with a lobby forming — leave
+/// that first.
+#[derive(Message, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StartSolo;
+
+/// Leave whatever session this peer is in: a solo one, a lobby it hosts or joined, or one still
+/// forming. The lobby entities are despawned and the roles dropped; the leave door does the rest.
+#[derive(Message, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EndSession;
 
 impl Plugin for TickedEnsembleSessionPlugin {
     fn build(&self, app: &mut App) {
         install_lobby_tracking(app);
         app.init_resource::<SnapshotRecipientList>()
             .insert_resource(HandshakeTimeout(self.handshake_timeout))
+            .insert_resource(SoloUuid(self.solo_uuid))
+            .add_message::<StartSolo>()
+            .add_message::<EndSession>()
             .add_plugins(crate::handshake::plugin)
+            .init_session_resource_scoped::<TickBufferSeeded>(SessionScope::Role)
+            .remove_at_session_end::<SoloHandedToLobby>(SessionScope::Role)
+            .init_session_resource::<Visiting>()
             .add_observer(forget_departed_client)
+            // Sized at the join door itself, before the first tick: a snapshot that arrived with
+            // the role is applied in that tick and closes the `Update` window below.
+            .add_systems(
+                OnEnter(TickedSession::Client),
+                seed_tick_buffer.after(SessionDoor),
+            )
             .add_systems(
                 PreUpdate,
-                end_session_on_host_change.after(bevy_ensemble::EnsembleSet::ReceivePackets),
+                follow_host_change.after(bevy_ensemble::EnsembleSet::ReceivePackets),
             )
             .add_systems(
                 Update,
                 (
+                    end_session,
+                    start_solo,
+                    hand_solo_to_a_lobby,
                     adopt_role,
                     seed_tick_buffer,
                     release_role,
                     forget_mismatch,
+                    end_a_visit_without_a_role,
                     list_recipients,
                 )
                     .chain(),
@@ -148,7 +204,8 @@ impl Plugin for LobbyTrackingPlugin {
     }
 }
 
-/// True when this peer holds neither role — playing alone, or not in a session yet.
+/// True when this peer holds neither the host nor the client role — playing alone, or not in a
+/// session yet.
 pub fn is_solo(
     server: Option<Res<LocalServerPlayer>>,
     client: Option<Res<LocalClientPlayer>>,
@@ -162,6 +219,20 @@ pub fn is_solo(
 /// is the authority over its own world.
 pub fn is_authoritative(client: Option<Res<LocalClientPlayer>>) -> bool {
     client.is_none()
+}
+
+/// True while this peer is in a session of any kind, including one still forming: playing alone,
+/// hosting, a client, or with a lobby it asked to host or join and has not yet been given a role
+/// in.
+///
+/// What a game's screens follow. It is `false` exactly when the leave has run — or, for a lobby
+/// that never gave a role, is about to run this frame — so a menu shown on `!in_session` is shown
+/// over a world that has been put back.
+pub fn in_session(
+    state: Res<State<TickedSession>>,
+    lobbies: Query<(), Or<(With<Lobby>, With<PendingLobby>)>>,
+) -> bool {
+    *state.get() != TickedSession::Offline || !lobbies.is_empty()
 }
 
 /// True when this peer may mint a tracked entity **right now**.
@@ -186,21 +257,20 @@ pub fn may_spawn_tracked(
     lobbies.is_empty()
 }
 
-/// End this peer's ticked session, host or client: both roles dropped, and everything the registry
-/// handshake established about the session forgotten.
+/// End this peer's ticked session, whatever it is: every role dropped, solo included, and every
+/// host-side mark of a verified client taken off.
 ///
-/// Dropping the roles is what does the work — `reset_on_leave` runs on their removal and clears
-/// the queue, the tick and every tracked entity. What this adds is the bookkeeping that belonged
-/// to the session: the verification, the spawner slot this peer was given, the slots it gave out,
-/// and which clients it had verified.
+/// Dropping the roles is what does the work: the state follows them to
+/// [`TickedSession::Offline`], and the leave door clears the world, the clock and everything
+/// registered for the session. The lobby, if there is one, is left to the caller.
 pub fn end_ticked_session(world: &mut World) {
     world.remove_resource::<LocalServerPlayer>();
     world.remove_resource::<LocalClientPlayer>();
-    world.remove_resource::<RegistryVerified>();
-    world.remove_resource::<LocalSpawnerSlot>();
-    if let Some(mut slots) = world.get_resource_mut::<SpawnerSlots>() {
-        *slots = SpawnerSlots::default();
-    }
+    world.remove_resource::<LocalSoloPlayer>();
+    unverify_clients(world);
+}
+
+fn unverify_clients(world: &mut World) {
     let verified: Vec<Entity> = world
         .query_filtered::<Entity, With<TickedPeerVerified>>()
         .iter(world)
@@ -210,39 +280,124 @@ pub fn end_ticked_session(world: &mut World) {
     }
 }
 
-/// On a peer whose lobby changed host: the ticked session has been ended, and roles are taken back
-/// once it is safe to.
-///
-/// Two conditions, both about order. A whole frame with no role, so that every `reset_on_leave`
-/// keyed on a role's removal has run before a `reset_on_host` or `reset_on_join` keyed on its
-/// addition — in one frame, the two run in no set order, and a leave that runs second undoes the
-/// join. And, on a client, the new host reached: a role taken before then starts the registry
-/// handshake's clock on a link that is still being built, and a reconnect slower than
-/// [`HandshakeTimeout`] would latch [`HandshakeTimedOut`] on a session that was about to work.
-#[derive(Resource, Clone, Copy, Debug)]
-pub struct ReadoptAfterHostChange {
-    frames_left: u8,
+/// Forget what this peer knew about its host's registries: a new host has to be verified afresh.
+fn forget_the_host(world: &mut World) {
+    world.remove_resource::<RegistryMismatch>();
+    world.remove_resource::<HandshakeTimedOut>();
+    world.remove_resource::<RegistryVerified>();
+    world.resource_mut::<PendingWelcome>().0 = None;
 }
 
-/// End the ticked session on every peer the moment its lobby changes host. See the module note.
-fn end_session_on_host_change(mut commands: Commands, mut changes: MessageReader<HostChanged>) {
-    let Some(change) = changes.read().last() else {
+/// A solo world whose lobby is forming: this peer is still its authority, and the world goes to
+/// whichever role the lobby gives. If the lobby goes first, the solo session carries on.
+#[derive(Resource, Clone, Copy, Debug, Default)]
+pub struct SoloHandedToLobby;
+
+/// Whether this peer has been in a session — a role, solo, or a lobby — since it last left one.
+/// What lets a lobby that never gave a role still end in a leave.
+#[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Visiting(bool);
+
+impl SessionReset for Visiting {}
+
+// ── the doors a game asks for ───────────────────────────────────────────────
+
+fn start_solo(
+    mut commands: Commands,
+    mut starts: MessageReader<StartSolo>,
+    uuid: Res<SoloUuid>,
+    state: Res<State<TickedSession>>,
+    server: Option<Res<LocalServerPlayer>>,
+    client: Option<Res<LocalClientPlayer>>,
+    lobbies: Query<(), Or<(With<Lobby>, With<PendingLobby>)>>,
+) {
+    if starts.read().last().is_none() {
+        return;
+    }
+    if *state.get() != TickedSession::Offline
+        || server.is_some()
+        || client.is_some()
+        || !lobbies.is_empty()
+    {
+        warn!(
+            "StartSolo while already in a session ({:?}); ignored",
+            state.get()
+        );
+        return;
+    }
+    commands.insert_resource(LocalSoloPlayer(uuid.0));
+}
+
+/// Leave: the lobbies despawned, as both games' `leave` did, and the roles dropped in the same
+/// flush so the leave door runs this frame rather than after the lobby's removal is noticed.
+fn end_session(
+    mut commands: Commands,
+    mut ends: MessageReader<EndSession>,
+    lobbies: Query<Entity, Or<(With<Lobby>, With<PendingLobby>)>>,
+) {
+    if ends.read().last().is_none() {
+        return;
+    }
+    for lobby in &lobbies {
+        commands.entity(lobby).try_despawn();
+    }
+    commands.queue(end_ticked_session);
+}
+
+/// A lobby appearing under a solo game hands the world to it. See the module note.
+fn hand_solo_to_a_lobby(
+    mut commands: Commands,
+    solo: Option<Res<LocalSoloPlayer>>,
+    handed: Option<Res<SoloHandedToLobby>>,
+    lobbies: Query<(), Or<(With<Lobby>, With<PendingLobby>)>>,
+) {
+    if solo.is_some() && handed.is_none() && !lobbies.is_empty() {
+        commands.insert_resource(SoloHandedToLobby);
+    }
+}
+
+// ── the lobby's doors ────────────────────────────────────────────────────────
+
+/// The lobby changed host: every role is left and taken again, in this frame, before the tick.
+///
+/// The new host hosts an empty world — a client's copy of the old host's was never its own — and
+/// every other member is a client of it, waiting for its world. What the handshake knew was about
+/// the old host and goes with it: a mismatch or a timeout gets a fresh chance with the new one.
+/// A peer that held no role is left to [`adopt_role`], which takes one as usual.
+fn follow_host_change(mut commands: Commands, mut changes: MessageReader<HostChanged>) {
+    let Some(change) = changes.read().last().cloned() else {
         return;
     };
     info!(
         "the lobby's host changed from {:#x} to {:#x}; the ticked session starts over with it",
         change.previous, change.new
     );
-    commands.queue(|world: &mut World| {
-        end_ticked_session(world);
-        // A mismatch or a timeout was about the old host. The new one gets its own chance.
-        world.remove_resource::<RegistryMismatch>();
-        world.remove_resource::<HandshakeTimedOut>();
-        world.insert_resource(ReadoptAfterHostChange { frames_left: 2 });
+    commands.queue(move |world: &mut World| {
+        forget_the_host(world);
+        let uuid = world
+            .get_resource::<LocalServerPlayer>()
+            .map(|role| role.0)
+            .or_else(|| world.get_resource::<LocalClientPlayer>().map(|role| role.0));
+        let Some(uuid) = uuid else {
+            return;
+        };
+        unverify_clients(world);
+        world.remove_resource::<LocalServerPlayer>();
+        world.remove_resource::<LocalClientPlayer>();
+        if change.promoted {
+            world.insert_resource(LocalServerPlayer(uuid));
+        } else {
+            world.insert_resource(LocalClientPlayer(uuid));
+        }
+        restart_session(world);
     });
 }
 
 /// Take the host or client role as soon as this peer knows which body is its own.
+///
+/// The world is the door's business: a client's `OnEnter` disposes of whatever this peer built
+/// alone, a host's keeps it. A solo player's marker goes in the same flush as the role is taken,
+/// so the state goes straight from `Solo` to the role and nothing in between runs a leave.
 fn adopt_role(
     mut commands: Commands,
     local_player: Option<Res<LocalMultiplayerPlayerId>>,
@@ -250,27 +405,14 @@ fn adopt_role(
     client: Option<Res<LocalClientPlayer>>,
     mismatch: Option<Res<RegistryMismatch>>,
     timed_out: Option<Res<HandshakeTimedOut>>,
-    readopt: Option<ResMut<ReadoptAfterHostChange>>,
-    tracked: Query<Entity, With<TickTrackedEntity>>,
     hosting: Query<(), (With<Host>, Or<(With<Lobby>, With<PendingLobby>)>)>,
     // A client adopts on the promoted lobby, not the pending one: until the backend's own
     // handshake has run, the data channel may not carry anything, and a role taken then
     // starts the registry handshake's clock on a link that cannot deliver it yet.
-    joined: Query<Has<HandshakeVerified>, (Without<Host>, With<Lobby>)>,
+    joined: Query<(), (Without<Host>, With<Lobby>)>,
 ) {
     if server.is_some() || client.is_some() {
         return;
-    }
-    if let Some(mut readopt) = readopt {
-        if readopt.frames_left > 0 {
-            readopt.frames_left -= 1;
-            return;
-        }
-        let new_host_reached = !hosting.is_empty() || joined.iter().any(|verified| verified);
-        if !new_host_reached {
-            return;
-        }
-        commands.remove_resource::<ReadoptAfterHostChange>();
     }
     // A session this peer cannot speak the language of, or never heard from, does not get
     // retried at frame rate.
@@ -288,26 +430,21 @@ fn adopt_role(
     if !is_host && joined.is_empty() {
         return;
     }
-
-    // A joiner's solo world ends here and it has to end completely: a body left standing is an
-    // untracked duplicate the moment the host's world arrives. A host's solo world is the
-    // session's world — a player who opens their game to friends keeps what they built, and
-    // `reset_on_host` raises the id counter over it rather than starting a second one.
-    if !is_host {
-        for entity in &tracked {
-            commands.entity(entity).try_despawn();
-        }
-    }
-
-    // Neither role touches the clock here. A client's `reset_on_join` holds `AwaitingSync`
-    // until the first snapshot; a host's `reset_on_host` releases it. Anything else holding
-    // the clock — the game's pause menu — is not this plugin's to lift.
+    commands.remove_resource::<LocalSoloPlayer>();
     if is_host {
         commands.insert_resource(LocalServerPlayer(local_player.0));
     } else {
         commands.insert_resource(LocalClientPlayer(local_player.0));
     }
 }
+
+/// That this client's prediction buffer has been sized from its link this session. Registered
+/// with the session, where it used to be a `Local<bool>`: a `Local` that only re-armed on a frame
+/// with no client role never re-armed across a host change, which keeps the role.
+#[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TickBufferSeeded(pub bool);
+
+impl SessionReset for TickBufferSeeded {}
 
 /// Size the client's prediction buffer from the connection, before the first input has made
 /// the trip that would let it measure itself.
@@ -329,25 +466,22 @@ fn adopt_role(
 ///
 /// # The window
 ///
-/// Only while the client is still waiting for its first snapshot, which is exactly the span
-/// the `AwaitingSync` hold covers on a client: after that the buffer holds measurements, and a seed is
-/// a guess that would be overwriting them. Pings start on the first frame a lobby exists, so a
+/// Only until the client has applied its first snapshot: after that the buffer holds
+/// measurements, and a seed is a guess that would be overwriting them. First at the join door
+/// itself (`OnEnter(Client)`), where a lobby that has pinged already has the numbers; then every
+/// frame until one comes back. Keyed on the first snapshot rather than the `AwaitingSync` hold,
+/// which a snapshot that arrived with the role releases before `Update` ever sees it held. Pings start on the first frame a lobby exists, so a
 /// sample is usually there in time — and when it isn't, nothing happens and the default is used.
 /// That is survivable rather than free: it costs one correction shortly after the join.
 fn seed_tick_buffer(
     client: Option<Res<LocalClientPlayer>>,
-    holds: Res<TickHolds>,
+    applied: Res<AppliedSnapshotTick>,
     ticked: Res<Time<Ticked>>,
     connection: Query<(&PeerRtt, Option<&PeerRttJitter>), With<Lobby>>,
     mut buffer: ResMut<ClientTickBuffer>,
-    mut seeded: Local<bool>,
+    mut seeded: ResMut<TickBufferSeeded>,
 ) {
-    if client.is_none() {
-        // Not a client, or no longer one: the next join gets a fresh seed.
-        *seeded = false;
-        return;
-    }
-    if *seeded || !holds.holds(TickHoldReason::AwaitingSync) {
+    if client.is_none() || seeded.0 || applied.0.is_some() {
         return;
     }
     let Some((rtt, jitter)) = connection.iter().next() else {
@@ -355,7 +489,7 @@ fn seed_tick_buffer(
         // window.
         return;
     };
-    *seeded = true;
+    seeded.0 = true;
     buffer.seed_from_rtt(
         Duration::from_secs_f64(rtt.0.max(0.0)),
         Duration::from_secs_f64(jitter.map_or(0.0, |jitter| jitter.0.max(0.0))),
@@ -371,8 +505,13 @@ fn seed_tick_buffer(
     );
 }
 
-/// Give the role back when the lobby goes, however it went. A host change ends the session too,
-/// in [`end_session_on_host_change`], with the lobby still standing.
+/// Give the role back when the lobby goes, however it went — and give a solo session back its
+/// world when the lobby it was handed to goes before giving a role.
+///
+/// That last case is a host request the server refused, or a join that never completed, from a
+/// practice game. The world was still the solo player's — no role had taken it — so the player is
+/// put back where they were, still playing alone, rather than thrown out of practice by a network
+/// error.
 ///
 /// A state check rather than `RemovedComponents<Lobby>`, because a refused join despawns an entity
 /// that never carried [`Lobby`] at all — the removal never fires, and the peer sits in a session
@@ -381,17 +520,17 @@ fn release_role(
     mut commands: Commands,
     server: Option<Res<LocalServerPlayer>>,
     client: Option<Res<LocalClientPlayer>>,
+    handed: Option<Res<SoloHandedToLobby>>,
     lobbies: Query<(), Or<(With<Lobby>, With<PendingLobby>)>>,
 ) {
-    if server.is_none() && client.is_none() {
-        return;
-    }
     if !lobbies.is_empty() {
         return;
     }
-    // `reset_on_leave` does the rest, keyed off the roles being removed.
-    commands.queue(end_ticked_session);
-    commands.remove_resource::<ReadoptAfterHostChange>();
+    if server.is_some() || client.is_some() {
+        commands.queue(end_ticked_session);
+    } else if handed.is_some() {
+        commands.remove_resource::<SoloHandedToLobby>();
+    }
 }
 
 /// Forget a registry mismatch or a handshake timeout once the lobby it belonged to is gone.
@@ -415,14 +554,46 @@ fn forget_mismatch(
     }
 }
 
+/// A lobby that goes without ever giving this peer a role still ends a session: a refused join, a
+/// host request the server turned down. There is no role to drop, so the leave is asked for by
+/// entering `Offline` again, which runs its door like any other leave.
+///
+/// What the games' own `reset_on_leave` did by watching "no lobby and no solo", and the one case
+/// the role-derived state cannot see on its own.
+fn end_a_visit_without_a_role(
+    mut visiting: ResMut<Visiting>,
+    state: Res<State<TickedSession>>,
+    server: Option<Res<LocalServerPlayer>>,
+    client: Option<Res<LocalClientPlayer>>,
+    solo: Option<Res<LocalSoloPlayer>>,
+    lobbies: Query<(), Or<(With<Lobby>, With<PendingLobby>)>>,
+    mut next: ResMut<NextState<TickedSession>>,
+) {
+    let in_one = *state.get() != TickedSession::Offline
+        || server.is_some()
+        || client.is_some()
+        || solo.is_some()
+        || !lobbies.is_empty();
+    if in_one {
+        if !visiting.0 {
+            visiting.0 = true;
+        }
+        return;
+    }
+    if visiting.0 {
+        // Reset by the leave itself: it is a session resource.
+        next.set(TickedSession::Offline);
+    }
+}
+
 /// Tell the server a client is gone, the moment the lobby crate knows it.
 ///
 /// A [`LobbyClient`] lives only on the host, and every way a client can go — kicked, timed out
 /// by liveness, or leaving of its own accord — ends with the backend despawning it. That is the
 /// one place all the ways meet, so it is the one place to write [`PeerLeft`], which is what
-/// makes the server forget the departed uuid's inputs and margin. Read here rather than on the
-/// participant entity because the participant is despawned by a command queued *from* this
-/// same removal, one flush later, and the uuid is still on the client entity while `Remove`
+/// makes the server forget the departed uuid's inputs, margin and spawner slot. Read here rather
+/// than on the participant entity because the participant is despawned by a command queued *from*
+/// this same removal, one flush later, and the uuid is still on the client entity while `Remove`
 /// runs.
 fn forget_departed_client(
     remove: On<Remove, LobbyClient>,
@@ -448,6 +619,16 @@ fn list_recipients(
     if recipients.0 != uuids {
         recipients.0 = uuids;
     }
+}
+
+/// Whether this client's lobby is still waiting to reach a new host. The handshake does not count
+/// the wait against its timeout; see [`HandshakeTimeout`].
+pub(crate) fn awaiting_new_host(world: &mut World) -> bool {
+    world
+        .query_filtered::<(), (With<Lobby>, With<AwaitingHost>)>()
+        .iter(world)
+        .next()
+        .is_some()
 }
 
 #[cfg(test)]

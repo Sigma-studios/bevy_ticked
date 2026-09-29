@@ -7,6 +7,7 @@ use bevy_ticked::{
     events::TickedEventRegistry,
     registry::TickedComponentRegistry,
     resource_registry::TickedResourceRegistry,
+    session::{SessionAppExt, SessionReset, SessionScope},
     tick::{CurrentTick, HistoryBufferTicks, TickHoldReason, TickHolds},
     time::{TickRateDilation, run_tick_schedule},
     tracked_entity::{SpawnerSlot, TickTrackedEntity, TrackedIdAllocator},
@@ -40,8 +41,8 @@ pub enum ClientSet {
 /// Written in place from the observer rather than inserted through `Commands`:
 /// two snapshots arriving in one frame have to compare against each other, and
 /// a deferred insert leaves both of them comparing against an empty slot.
-#[derive(Resource, Default)]
-struct PendingSnapshot(Option<SnapshotPacket>);
+#[derive(Resource, Default, Debug)]
+pub(crate) struct PendingSnapshot(pub(crate) Option<SnapshotPacket>);
 
 /// The tick of the last snapshot this client applied, so an older one arriving
 /// later is recognised for what it is.
@@ -143,6 +144,15 @@ impl Default for ClientTickBuffer {
         }
     }
 }
+
+impl SessionReset for ClientTickBuffer {}
+impl SessionReset for PendingSnapshot {}
+impl SessionReset for AppliedSnapshotTick {}
+impl SessionReset for PendingSnapshotTick {}
+impl SessionReset for LastAppliedSeq {}
+impl SessionReset for LastSentAck {}
+impl SessionReset for NackFull {}
+impl SessionReset for AuthoritySequenceAfterSnapshot {}
 
 impl ClientTickBuffer {
     /// Input-arrival margin used until something measures a better one.
@@ -262,25 +272,25 @@ impl<T: TickedInput> Plugin for TickedClientPlugin<T> {
         {
             app.insert_resource(HistoryBufferTicks(2 * ClientTickBuffer::MAX_TICKS));
         }
-        app.init_resource::<ClientTickBuffer>()
-            .init_resource::<PendingSnapshot>()
-            .init_resource::<AppliedSnapshotTick>()
-            .init_resource::<PendingSnapshotTick>()
-            .init_resource::<LastAppliedSeq>()
-            .init_resource::<NackFull>()
+        crate::session::install(app);
+        // Everything the client side learns about one link and one clock, registered with the
+        // session so that every door puts it back. Before the registry each of these was reset by
+        // hand, in some doors and not others; the last one found was `ClientTickBuffer`, whose
+        // `settling_until` is an absolute tick and froze the next session's lead for as long as
+        // the last one had run.
+        app.init_session_resource_scoped::<ClientTickBuffer>(SessionScope::Role)
+            .init_session_resource_scoped::<PendingSnapshot>(SessionScope::Role)
+            .init_session_resource_scoped::<AppliedSnapshotTick>(SessionScope::Role)
+            .init_session_resource_scoped::<PendingSnapshotTick>(SessionScope::Role)
+            .init_session_resource_scoped::<LastAppliedSeq>(SessionScope::Role)
+            .init_session_resource_scoped::<LastSentAck>(SessionScope::Role)
+            .init_session_resource_scoped::<NackFull>(SessionScope::Role)
+            .remove_at_session_end::<AwaitingReplay>(SessionScope::Role)
             .init_resource::<ReplayStats>()
             .init_resource::<HealthWarnings>()
             .add_message::<SnapshotApplied>()
             .add_observer(receive_snapshot)
-            .add_systems(
-                Update,
-                reset_on_join::<T>.run_if(resource_added::<LocalClientPlayer>),
-            )
-            .add_systems(
-                Update,
-                crate::reset_on_leave::<T>.run_if(resource_removed::<LocalClientPlayer>),
-            )
-            .init_resource::<AuthoritySequenceAfterSnapshot>()
+            .init_session_resource_scoped::<AuthoritySequenceAfterSnapshot>(SessionScope::Role)
             .configure_sets(
                 TickedLoop,
                 (
@@ -379,63 +389,6 @@ fn receive_snapshot(
         history.record(superseded.tick, body.entities.iter().cloned());
     }
     pending_tick.0 = Some(tick);
-}
-
-/// When `LocalClientPlayer` is inserted, reset tick state and pause
-/// until the first server snapshot arrives.
-///
-/// Tracked entities are despawned here, and that is not tidiness. Zeroing the
-/// counter while entities minted from the old one are still standing means the next
-/// `next()` hands out an id that is already in use — and `apply_snapshot` keys the
-/// whole world by id, so two entities sharing one id have their components merged
-/// into whichever the client happens to hold. Whatever this peer built while it
-/// thought it was playing alone is about to be replaced by the host's world in any
-/// case, so there is nothing here worth keeping and every reason not to keep it.
-///
-/// [`reset_on_host`](crate::server::reset_on_host) closes the same hole the other
-/// way, by raising the counter instead of despawning, because a solo player opening
-/// their world to friends does have a claim on it.
-fn reset_on_join<T: TickedInput>(world: &mut World) {
-    let stale: Vec<Entity> = {
-        // Tombstones go too. A tombstone is `Disabled`, so a default filter would leave it
-        // standing — and the allocator is reset to zero a few lines below, which means the first
-        // ids minted under the new session land straight on the previous one's graveyard.
-        let mut tracked = world.query_filtered::<Entity, (
-            With<TickTrackedEntity>,
-            bevy::ecs::query::Allow<bevy::ecs::entity_disabling::Disabled>,
-        )>();
-        tracked.iter(world).collect()
-    };
-    for entity in stale {
-        world.despawn(entity);
-    }
-
-    world.insert_resource(CurrentTick(0));
-    // Held until the host's world arrives; released by the first snapshot. A game's own pause
-    // is a different reason and is neither set nor lifted here.
-    world
-        .resource_mut::<TickHolds>()
-        .hold(TickHoldReason::AwaitingSync);
-    world.insert_resource(TrackedIdAllocator::default());
-    world.insert_resource(AppliedSnapshotTick::default());
-    world.insert_resource(LastAppliedSeq::default());
-    if let Some(uuid) = world.get_resource::<LocalClientPlayer>().map(|p| p.0) {
-        world.insert_resource(crate::input_plugin::LocalPlayer(uuid));
-    }
-    world.resource_mut::<InputQueue<T>>().inputs.clear();
-    if let Some(mut history) = world.get_resource_mut::<crate::replication::AuthoritativeHistory>()
-    {
-        history.clear();
-    }
-    world.insert_resource(crate::replication::DisplayTick::default());
-    let registry = world.resource::<TickedComponentRegistry>().clone();
-    registry.clear_all(world);
-    // Registered resources go back to their defaults: the host's first snapshot brings the
-    // networked ones, and the local ones have no business carrying a previous session's value.
-    if let Some(resources) = world.get_resource::<TickedResourceRegistry>().cloned() {
-        resources.reset_all(world);
-    }
-    TickedEventRegistry::clear_all(world);
 }
 
 /// Written once a snapshot has been applied to the world.
@@ -699,7 +652,7 @@ fn handle_server_snapshot<T: TickedInput>(world: &mut World) {
     }
 
     // Paused and already ahead of the snapshot. Not reachable after a normal
-    // `reset_on_join`, which zeroes the tick before any snapshot can arrive, but
+    // join door, which zeroes the tick before any snapshot can arrive, but
     // replaying while paused is not a thing to start doing if it ever is.
     if was_paused {
         registry.capture_all(world, snapshot_tick);
@@ -1076,7 +1029,7 @@ fn converge_lead(
 /// slot on a client is one the host may hand out to something else, and the snapshot then
 /// merges two entities into one. Every consumer wrote a `debug_assert` for this; here it is
 /// once, as a warning that names the id.
-#[derive(Resource, Default)]
+#[derive(Resource, Default, Debug)]
 struct AuthoritySequenceAfterSnapshot(Vec<(u16, u64)>);
 
 fn watch_for_client_minted_ids(
@@ -1120,6 +1073,16 @@ fn watch_for_client_minted_ids(
 /// packet losses cost nothing.
 const INPUT_REDUNDANCY: u64 = 3;
 
+/// The acknowledgement this client last put on the wire, so that a client at rest sends one
+/// packet per new ack rather than one per tick.
+///
+/// A resource registered with the session, where it used to be a `Local`: a `Local` lives as long
+/// as the app, and the next session's first ack — `seq` 1 again, from a new host — could match
+/// the last session's and go unsent, leaving the host building keyframes for a client it
+/// believed had acknowledged nothing.
+#[derive(Resource, Default, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LastSentAck(pub Option<u32>);
+
 /// PostTick: send the local player's recent inputs to the server.
 fn send_local_input<T: TickedInput>(
     tick: Res<CurrentTick>,
@@ -1128,7 +1091,7 @@ fn send_local_input<T: TickedInput>(
     queue: Res<InputQueue<T>>,
     ack: Res<LastAppliedSeq>,
     mut nack: ResMut<NackFull>,
-    mut last_sent_ack: Local<Option<u32>>,
+    mut last_sent_ack: ResMut<LastSentAck>,
     mut commands: Commands,
 ) {
     if holds.is_held() {
@@ -1143,12 +1106,12 @@ fn send_local_input<T: TickedInput>(
     // A client at rest has no input to send, but it still acknowledges what it applied: the
     // host builds deltas against the newest acknowledged packet, and a client that went quiet
     // would otherwise be sent keyframes until it moved.
-    let ack_is_news = ack.0.is_some() && ack.0 != *last_sent_ack;
+    let ack_is_news = ack.0.is_some() && ack.0 != last_sent_ack.0;
     if inputs.is_empty() && !ack_is_news && !nack.0 {
         return;
     }
     let nack_full = std::mem::take(&mut nack.0);
-    *last_sent_ack = ack.0;
+    last_sent_ack.0 = ack.0;
     commands.trigger(SendNetworkInput {
         inputs,
         ack: ack.0,
@@ -1281,5 +1244,114 @@ mod tests {
             jittery.target_replay_distance > clean.target_replay_distance,
             "the extra margin has to show up in the distance the client actually keeps"
         );
+    }
+
+    /// A client that has been in a session a while: a snap-back has set `settling_until` far into
+    /// that session's clock, the target has grown to fit its link, the clock is dilated and a
+    /// replay is still in flight. None of it belongs to the next session.
+    fn a_client_a_while_into_a_session() -> App {
+        use std::time::Duration;
+
+        use bevy::time::TimeUpdateStrategy;
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_plugins(bevy_ticked::TickedPlugin {
+                source: bevy_ticked::TickSource::Manual,
+                ..default()
+            })
+            .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
+                1.0 / 64.0,
+            )))
+            .add_plugins(crate::server::TickedServerPlugin::<u8>::new())
+            .add_plugins(TickedClientPlugin::<u8>::new());
+        app.world_mut().insert_resource(LocalClientPlayer(1));
+        app.update();
+
+        let world = app.world_mut();
+        world.insert_resource(CurrentTick(38_400));
+        {
+            let mut buffer = world.resource_mut::<ClientTickBuffer>();
+            buffer.target_replay_distance = 40;
+            buffer.target_margin = 9;
+            buffer.smoothed = 40.0;
+            buffer.excess_streak = 2;
+            buffer.settling_until = 38_450;
+        }
+        world.insert_resource(TickRateDilation(0.98));
+        world.insert_resource(AwaitingReplay { end_tick: 38_420 });
+        world
+            .resource_mut::<TickHolds>()
+            .hold(TickHoldReason::Replaying);
+        world.resource_mut::<PendingSnapshotTick>().0 = Some(38_399);
+        app
+    }
+
+    fn assert_forgotten(app: &App, door: &str) {
+        let world = app.world();
+        let buffer = world.resource::<ClientTickBuffer>();
+        let fresh = ClientTickBuffer::default();
+        assert_eq!(
+            buffer.settling_until, 0,
+            "{door}: the last session's settling tick would freeze the lead of the next one until \
+             its clock caught up"
+        );
+        assert_eq!(buffer.excess_streak, 0, "{door}");
+        assert_eq!(
+            (buffer.target_replay_distance, buffer.target_margin),
+            (fresh.target_replay_distance, fresh.target_margin),
+            "{door}: the target was sized for the last link"
+        );
+        assert_eq!(
+            *world.resource::<TickRateDilation>(),
+            TickRateDilation(1.0),
+            "{door}"
+        );
+        assert!(!world.contains_resource::<AwaitingReplay>(), "{door}");
+        assert!(
+            !world
+                .resource::<TickHolds>()
+                .holds(TickHoldReason::Replaying),
+            "{door}: a replay toward the last session's tick would hold the new clock"
+        );
+        assert_eq!(world.resource::<PendingSnapshotTick>().0, None, "{door}");
+    }
+
+    #[test]
+    fn leaving_forgets_the_last_links_lead() {
+        let mut app = a_client_a_while_into_a_session();
+        app.world_mut().remove_resource::<LocalClientPlayer>();
+        app.update();
+        assert_forgotten(&app, "after leaving");
+    }
+
+    #[test]
+    fn joining_forgets_the_last_links_lead() {
+        // The host changing is the case with no leave in front of it that a game could see; and a
+        // join is a door of its own either way.
+        let mut app = a_client_a_while_into_a_session();
+        app.world_mut().remove_resource::<LocalClientPlayer>();
+        app.update();
+        a_while_into(&mut app);
+        app.world_mut().insert_resource(LocalClientPlayer(2));
+        app.update();
+        assert_forgotten(&app, "after joining");
+        assert!(
+            app.world()
+                .resource::<TickHolds>()
+                .holds(TickHoldReason::AwaitingSync),
+            "and still waiting on the new host's world"
+        );
+    }
+
+    /// Dirty the client state again, without a role, so only the join can be what clears it.
+    fn a_while_into(app: &mut App) {
+        let world = app.world_mut();
+        world.resource_mut::<ClientTickBuffer>().settling_until = 38_450;
+        world.insert_resource(TickRateDilation(1.02));
+        world.insert_resource(AwaitingReplay { end_tick: 38_420 });
+        world
+            .resource_mut::<TickHolds>()
+            .hold(TickHoldReason::Replaying);
     }
 }

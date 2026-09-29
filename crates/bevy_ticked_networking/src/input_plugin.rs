@@ -30,10 +30,13 @@ use crate::input::{InputQueue, TickedInput};
 
 /// The local player's uuid, whatever the role: the host's own, the client's, or `0` solo.
 ///
-/// Set by `reset_on_host` and `reset_on_join`, cleared to `0` by `reset_on_leave`. A game
-/// reads this rather than choosing between `LocalServerPlayer` and `LocalClientPlayer`.
+/// Set by the session doors (see [`TickedSession`](crate::session::TickedSession)) to the host's,
+/// the client's or the solo player's uuid, and back to `0` at every door out. A game reads this
+/// rather than choosing between `LocalServerPlayer`, `LocalClientPlayer` and `LocalSoloPlayer`.
 #[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct LocalPlayer(pub u128);
+
+impl bevy_ticked::session::SessionReset for LocalPlayer {}
 
 /// What a sampler may return: the input, or `None` for "nothing to file this tick".
 pub trait Sampled<I> {

@@ -6,11 +6,13 @@ mod overlay;
 pub mod session;
 
 pub use handshake::{
-    HandshakeTimedOut, HandshakeTimeout, LocalSpawnerSlot, RegistryMismatch, RegistryVerified,
-    SpawnerSlots, TickedPeerVerified, TickedRegistryHandshake, TickedSessionWelcome,
+    HandshakeTimedOut, HandshakeTimeout, HandshakeWait, LocalSpawnerSlot, PendingWelcome,
+    RegistryMismatch, RegistryVerified, SpawnerSlots, TickedPeerVerified, TickedRegistryHandshake,
+    TickedSessionWelcome,
 };
 pub use session::{
-    ReadoptAfterHostChange, TickedEnsembleSessionPlugin, TickedSessionLobby, end_ticked_session,
+    EndSession, SoloHandedToLobby, SoloUuid, StartSolo, TickBufferSeeded,
+    TickedEnsembleSessionPlugin, TickedSessionLobby, end_ticked_session, in_session,
     is_authoritative, is_solo, may_spawn_tracked,
 };
 
@@ -160,9 +162,9 @@ fn forward_received_snapshots(
     mut commands: Commands,
 ) {
     for msg in messages.read() {
-        // A verified peer with no client role is between sessions: after a host change the new
-        // host can be verified a frame before the role is taken back, and a snapshot applied then
-        // is applied to a world `reset_on_join` is about to clear.
+        // A verified peer with no client role is not a client yet: a host may verify it before
+        // the role is taken, and a snapshot applied then would be applied to a world the join
+        // door is about to clear.
         if handshake.is_some() && (verified.is_none() || client.is_none()) {
             if let Some(stats) = stats.as_mut() {
                 stats.dropped_before_handshake += 1;

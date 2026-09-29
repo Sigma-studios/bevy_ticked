@@ -35,6 +35,118 @@ obeys; `docs/avian.md` the physics bundle.
 | a game's own role teardown when its lobby changes host | `end_ticked_session`, done by `TickedEnsembleSessionPlugin` on `HostChanged` | T17 |
 | an exhaustive `match` on `TickHoldReason` | `+ HostMigration` | T18 |
 | `TickedEvent: Send + Sync + Clone` | `+ PartialEq` | T19 |
+| `reset_on_leave::<T>` (and the hidden `reset_on_host`/`reset_on_join`) | the `TickedSession` state's doors; `bevy_ticked::session::{reset_session_state, end_session_state}` | T20 |
+| a game's `reset_on_leave` system with a `Local<bool>` | `app.init_session_resource::<R>()` + `impl SessionReset for R {}` | T20 |
+| a game's `SoloPlayer` + `LocalPlayer(SOLO_UUID)` + `end_solo_when_a_lobby_appears` | `StartSolo` / `EndSession`, `LocalSoloPlayer`, `TickedSession::Solo` | T20 |
+| a game's `leave()` despawning lobbies | `EndSession` | T20 |
+| a game's `keep_the_lobby_running` | `PausePolicy::automatic_pauses = false` while not in a match | T20 |
+| `ReadoptAfterHostChange` | gone: a host change re-enters the role in one door | T20 |
+| avian's spawn-order solve (implicit) | canonical tracked-id solve order, on by default; `TickedAvianPlugin::spawn_order_dependent_solve()` for the old one | T20 |
+
+## T20 — the session lifecycle
+
+### One state, derived from the roles, with ordered doors
+
+`bevy_ticked_networking::TickedSession` is a Bevy state — `Offline`, `Solo`, `Host`, `Client` —
+derived from `LocalServerPlayer`, `LocalClientPlayer` and the new `LocalSoloPlayer` by a system at
+the head of `StateTransition`. The doors are its `OnExit`/`OnEnter` systems (in the `SessionDoor`
+set), so they run strictly ordered and before the first tick of the frame the role takes effect.
+The old doors ran in `Update`, after the tick loop: a join applied its first snapshot onto the solo
+world in forty joins out of forty. The role plugins add `StatesPlugin` if nothing has; add
+`DefaultPlugins` or `StatesPlugin` before them, as every game already does.
+
+Writing the role resources is still how a role is taken. `restart_session(world)` re-enters the
+current state (`NextState::set` of the same state runs `OnExit` and `OnEnter` again).
+
+**Role effects land at the door, a frame after a hand-written role.** A game or test that inserts
+`LocalServerPlayer`/`LocalClientPlayer` itself sees the role resource at once, but `LocalPlayer`,
+`LocalSpawnerSlot`, the clock restart and the world's disposal only from the next frame's
+`StateTransition` — before that frame's tick. A system keyed on `resource_added::<LocalServerPlayer>`
+in `Update` therefore runs before the door and sees `LocalPlayer(0)`, no slot and the old clock.
+React in `OnEnter(TickedSession::Host).after(SessionDoor)` (or `Client`, `Solo`, `Offline`)
+instead: it runs after the door, before the first tick of the role. Removing a role resource and
+inserting it again, even with the same uuid, runs the doors again.
+
+What the doors do by role: a client's world is disposed of on the way in and out; a leave
+(entering `Offline`) disposes of it too; a host and a solo player keep what stands, with the
+allocator raised over it. `LocalPlayer` is the role's uuid, `0` offline.
+
+### A registry of session state
+
+`bevy_ticked::session`:
+
+```rust
+#[derive(Resource, Default, Debug)]
+struct JoinedCode(Option<String>);
+impl SessionReset for JoinedCode {}          // or override `reset` to keep config fields
+
+app.init_session_resource::<JoinedCode>();   // reset on the leave: a game's reset_on_leave
+```
+
+`SessionScope::Session` (the default) resets on the leave only — not when a solo world is handed to
+a lobby, not at a host change. `SessionScope::Role` resets at every door, in and out: the link and
+the clock, which is what the stack registers. `init_per_peer_resource::<R: PerPeer>()` also forgets
+a departed peer (`PeerLeft`); `remove_at_session_end::<R>(scope)` is for marker resources;
+`register_session_resource` resets one without inserting it. `reset_session_state(world)` resets
+the role scope, restarts the clock and releases the session's holds; `end_session_state(world)`
+resets the session scope. Ticked and networked resources are still reset with the world, by
+`TickedResourceRegistry::reset_all`, and kept by a host with its entities.
+
+### Solo is a session (`bevy_ticked_networking_ensemble`)
+
+`StartSolo` enters `TickedSession::Solo` under `TickedEnsembleSessionPlugin::solo_uuid` (default
+`1`). `EndSession` leaves any session: lobbies despawned, roles dropped, the leave door run. A lobby
+appearing under a solo game hands its world over — the peer stays `Solo` until the lobby gives it a
+role, then a host keeps the world and a client has it replaced; a lobby that goes first (a refused
+host request, a join that never completed) hands the world back and the peer is still `Solo`. From `Offline`, a lobby that never gave a role
+(a refused join) still ends in a leave, so what a game registered for the session goes back.
+`in_session` is the run condition a game's screens follow.
+
+### The pause gate
+
+`PausePolicy::automatic_pauses` (default `true`): while `false`, `HostUnfocused`, `HostStalled`
+and `HostTooSlow` are not raised and one in force is resumed. `auto_pause_on_focus_loss` now
+defaults to `false`.
+
+### The avian solve order is canonical (`bevy_ticked_avian`)
+
+On by default. New contact pairs are oriented so the collider with the lower tracked id is
+`collider1`; the constraint colouring is rebuilt every step in tracked-id order; joint rows are
+re-seated in tracked-id order after anything disturbs them. A client that built its world in a
+different order from its host now solves every contact and joint the same way.
+
+What changes for a game:
+
+- Simulation results differ from earlier builds: re-record replays and golden traces.
+- `collider1`/`collider2` and `body1`/`body2` in `CollisionStart`, `CollisionEnd` and `ContactPair`
+  are in tracked-id order, not spawn order. Code that assumed "the first one is the thing I spawned
+  first" must look at both.
+- Sibling child colliders of one body, and untracked joints on the same pair of bodies, still
+  tie-break by `Entity` (spawn order). Give them their own `TickTrackedEntity` where it matters.
+- `TickedAvianPlugin::spawn_order_dependent_solve()` turns it off, for a game that never sends a
+  snapshot and wants avian's own order.
+
+### Breaks
+
+- `bevy_ticked_networking::reset_on_leave` is gone (and from the prelude): the doors run
+  themselves; call `reset_session_state`/`end_session_state`/`dispose_world` if you drive a world
+  by hand.
+- `ReadoptAfterHostChange` is gone. A host change swaps the roles and re-enters them in one frame;
+  there is no frame without a role any more. The handshake's timeout does not count while the
+  lobby is `AwaitingHost`.
+- `end_ticked_session` no longer removes `RegistryVerified`/`LocalSpawnerSlot` or resets
+  `SpawnerSlots` itself (the doors do), and now removes `LocalSoloPlayer` too.
+- `PausePolicy` has a new field, `automatic_pauses`; `auto_pause_on_focus_loss` defaults to `false`.
+- `SpawnerSlots` is freed through `PeerLeft` rather than its own observer.
+- Interpolated entities are drawn at `latest applied - InterpolationDelay`, as documented: the
+  display tick used to start, and snap after a stall, two ticks short of that and never close the
+  gap while a snapshot came every tick. Remote bodies are now two ticks fresher.
+- Registered session types must be `Debug` (`SessionReset: Resource + Default + Debug`).
+- New public types: `TickedSession`, `LocalSoloPlayer`, `SessionDoor`, `restart_session`,
+  `dispose_world`, `client::LastSentAck`, `server::PassesHeld`, `PendingWelcome`, `HandshakeWait`,
+  `TickBufferSeeded`, `SoloHandedToLobby`, `SoloUuid`, `StartSolo`, `EndSession`, `in_session`,
+  `bevy_ticked::InitialCapture`, `bevy_ticked::capture_initial_state`,
+  `bevy_ticked_testing::source_guard::SESSION_STATE_NEEDLES`.
 
 ## T19 — a replay does not repeat an event
 
