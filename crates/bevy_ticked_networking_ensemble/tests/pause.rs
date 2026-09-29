@@ -218,3 +218,66 @@ fn a_client_pause_request_is_ignored_under_host_only_policy() {
     net.run(20);
     assert_eq!(pause_of(net.app(host)), None, "and a resume request too");
 }
+
+/// The gate both games wrote as `keep_the_lobby_running`: with automatic pauses off, a stall that
+/// would have paused the session does not.
+#[test]
+fn with_automatic_pauses_off_a_stall_does_not_pause() {
+    let mut net = session(1);
+    let host = net.host();
+    net.app_mut(host)
+        .world_mut()
+        .resource_mut::<PausePolicy>()
+        .automatic_pauses = false;
+    net.freeze(host, 64);
+    net.step();
+    assert_eq!(
+        pause_of(net.app(host)),
+        None,
+        "no automatic pause is raised"
+    );
+    assert!(!holds(net.app(host)).holds(TickHoldReason::SessionPause));
+}
+
+/// Turning automatic pauses off takes back one already in force — the game's lobby opening while
+/// the host is paused for being too slow — and leaves a pause somebody asked for alone.
+#[test]
+fn turning_automatic_pauses_off_resumes_an_automatic_pause_and_only_that() {
+    let mut net = session(1);
+    let host = net.host();
+    net.app_mut(host)
+        .world_mut()
+        .write_message(PauseSession(PauseReason::HostTooSlow));
+    net.run(5);
+    assert!(pause_of(net.app(host)).is_some(), "precondition: paused");
+    net.app_mut(host)
+        .world_mut()
+        .resource_mut::<PausePolicy>()
+        .automatic_pauses = false;
+    net.run(5);
+    assert_eq!(
+        pause_of(net.app(host)),
+        None,
+        "an automatic pause is taken back"
+    );
+
+    net.app_mut(host)
+        .world_mut()
+        .write_message(PauseSession(PauseReason::Host));
+    net.run(5);
+    assert!(
+        net.app(host)
+            .world()
+            .resource::<SessionPause>()
+            .0
+            .is_some_and(|p| p.reason == PauseReason::Host),
+        "the host's own pause stands"
+    );
+}
+
+/// Focus loss no longer pauses unless a game asks for it: every real-time game turned it off.
+#[test]
+fn focus_loss_does_not_pause_by_default() {
+    assert!(!PausePolicy::default().auto_pause_on_focus_loss);
+    assert!(PausePolicy::default().automatic_pauses);
+}

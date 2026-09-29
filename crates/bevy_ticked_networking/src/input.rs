@@ -1,8 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use std::marker::PhantomData;
+
 use bevy::prelude::*;
 use bevy_ticked::{
     TickedLoop, TickedSystems,
+    session::{PerPeer, SessionAppExt, SessionReset},
     tick::{CurrentTick, HistoryBufferTicks},
 };
 use serde::{Serialize, de::DeserializeOwned};
@@ -130,13 +133,44 @@ impl<T: TickedInput> InputQueue<T> {
 /// that safe: whichever plugin is built first installs the pruning system, and the
 /// second finds the queue already there and does nothing.
 pub(crate) fn install_input_queue<T: TickedInput>(app: &mut App) {
-    if app.world().contains_resource::<InputQueue<T>>() {
+    // Registered every time — `TickedInputPlugin` may have inserted the queue first, and the
+    // registry takes a second registration of the same type as the first. Keyed by tick and by
+    // player: a door clears it, and a departed client's inputs go with it.
+    app.init_per_peer_resource::<InputQueue<T>>();
+    if app.world().contains_resource::<InputQueuePruned<T>>() {
         return;
     }
-    app.init_resource::<InputQueue<T>>().add_systems(
-        TickedLoop,
-        prune_input_queue::<T>.in_set(TickedSystems::PostTick),
-    );
+    app.insert_resource(InputQueuePruned::<T>(PhantomData))
+        .add_systems(
+            TickedLoop,
+            prune_input_queue::<T>.in_set(TickedSystems::PostTick),
+        );
+}
+
+/// That the prune system for `InputQueue<T>` is installed.
+#[derive(Resource)]
+struct InputQueuePruned<T>(PhantomData<fn() -> T>);
+
+impl<T: TickedInput> core::fmt::Debug for InputQueue<T> {
+    /// Ticks and players, not the inputs: an input type need not be `Debug`, and "which ticks
+    /// does it hold, for whom" is what tells one session's queue from another's.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_map()
+            .entries(
+                self.inputs
+                    .iter()
+                    .map(|(tick, players)| (tick, players.keys().collect::<Vec<_>>())),
+            )
+            .finish()
+    }
+}
+
+impl<T: TickedInput> SessionReset for InputQueue<T> {}
+
+impl<T: TickedInput> PerPeer for InputQueue<T> {
+    fn forget(&mut self, peer: u128) {
+        self.remove_player(peer);
+    }
 }
 
 /// Drop inputs older than the retained history window.

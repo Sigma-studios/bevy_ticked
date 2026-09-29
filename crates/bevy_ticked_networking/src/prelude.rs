@@ -15,8 +15,8 @@ pub use crate::{
         SendPauseRequest, SessionPause, WhoMayPause,
     },
     replication::{AuthoritativeHistory, InterpolationDelay, Owner, ReplicationMode},
-    reset_on_leave,
     server::{LocalServerPlayer, SendEvery, SnapshotRecipientList, TickedServerPlugin},
+    session::{LocalSoloPlayer, SessionDoor, TickedSession, restart_session},
     smoothing::{
         CorrectionSmoothing, CorrectionStats, NoCorrectionSmoothing, PredictionError,
         SmoothingTarget, TickedSmoothingPlugin, measure_prediction,

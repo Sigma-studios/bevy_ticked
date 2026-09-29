@@ -7,6 +7,7 @@ pub mod prelude;
 pub mod registry;
 pub mod resource_registry;
 pub mod rollback;
+pub mod session;
 pub mod tick;
 pub mod time;
 pub mod tracked_entity;
@@ -20,6 +21,7 @@ use bevy::prelude::*;
 use registry::TickedComponentRegistry;
 use resource_registry::TickedResourceAppExt;
 use rollback::rollback_and_resimulate;
+use session::{SessionAppExt, SessionReset, SessionScope};
 use tick::{CurrentTick, HistoryBufferTicks, ResetToTick, StepBackward, StepForward, TickHolds};
 use time::{TickRateDilation, Ticked, TickedTime, run_tick_schedule};
 use tracked_entity::{TickTrackedEntity, TrackedIdAllocator};
@@ -237,6 +239,12 @@ impl Plugin for TickedPlugin {
             .init_resource::<TickHolds>()
             .init_resource::<Time<Ticked>>()
             .init_resource::<diagnostics::TickCost>()
+            .init_resource::<session::SessionResources>()
+            .init_session_resource_scoped::<InitialCapture>(SessionScope::Role)
+            // A client dilates its clock to steer its lead, and the next role must not inherit a
+            // clock that runs two per cent slow. Registered, not inserted: only a steerable clock
+            // has one, and a client checks for it.
+            .register_session_resource::<TickRateDilation>(SessionScope::Role)
             .init_schedule(TickedSimulation)
             .init_schedule(TickedLoop)
             .add_message::<StepForward>()
@@ -297,6 +305,8 @@ impl Plugin for TickedPlugin {
                     .resource_mut::<Time<Ticked>>()
                     .set_timestep_hz(hz);
                 install_run_ticked_loop(app);
+                // A client dilates its clock to steer its lead; the next role must not inherit
+                // a clock that runs two per cent slow.
                 app.init_resource::<TickRateDilation>()
                     .add_systems(RunTickedLoop, drive_ticked_loop_from_accumulator);
             }
@@ -379,21 +389,41 @@ fn drive_ticked_loop_from_accumulator(world: &mut World) {
     }
 }
 
-/// Capture the initial world state at tick 0 exactly once, as soon as any
-/// tracked components exist. Runs in every mode so that `ResetToTick(0)` and
-/// stepping back to the start always have a snapshot to restore.
-fn ensure_initial_capture(world: &mut World, mut done: Local<bool>) {
-    if *done {
+/// Whether tick 0 of the current session has been captured.
+///
+/// A resource rather than the `Local<bool>` it used to be, and registered with the session: a
+/// `Local` lives as long as the app, so tick 0 was captured for the first session an app ever
+/// played and never again. Every later session started with no tick 0 in its history, and a
+/// `ResetToTick(0)` or a step back to the start found nothing to restore.
+#[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct InitialCapture {
+    done: bool,
+}
+
+impl SessionReset for InitialCapture {}
+
+/// Capture tick 0 of this session once, as soon as there is a world to capture.
+///
+/// Called every frame from `PreUpdate`, and by every session door right after it restarts the
+/// clock: a host that keeps the world it built alone has that world at tick 0, and nothing else
+/// would capture it before the first tick moves the clock on.
+///
+/// Waits until at least one tracked entity exists. Capturing an empty world (before entities
+/// finish spawning from an async asset load, say) would make `ResetToTick(0)` strip components
+/// off every entity later, and an empty tick-0 snapshot is useless anyway.
+pub fn capture_initial_state(world: &mut World) {
+    if world
+        .get_resource::<InitialCapture>()
+        .is_none_or(|capture| capture.done)
+    {
         return;
     }
-    let registry = world.resource::<TickedComponentRegistry>().clone();
+    let Some(registry) = world.get_resource::<TickedComponentRegistry>().cloned() else {
+        return;
+    };
     if registry.is_empty() {
         return;
     }
-    // Wait until at least one tracked entity exists before snapshotting tick 0.
-    // Capturing an empty world (e.g. before entities finish spawning from an
-    // async asset load) would make `ResetToTick(0)` strip components off every
-    // entity later. An empty tick-0 snapshot is useless anyway.
     let mut tracked = world.query::<&TickTrackedEntity>();
     if tracked.iter(world).next().is_none() {
         return;
@@ -402,7 +432,11 @@ fn ensure_initial_capture(world: &mut World, mut done: Local<bool>) {
     if current_tick == 0 && !registry.has_tick_captured(world, 0) {
         registry.capture_all(world, 0);
     }
-    *done = true;
+    world.resource_mut::<InitialCapture>().done = true;
+}
+
+fn ensure_initial_capture(world: &mut World) {
+    capture_initial_state(world);
 }
 
 /// The core "advance one tick" step, shared by the `FixedUpdate` driver and the

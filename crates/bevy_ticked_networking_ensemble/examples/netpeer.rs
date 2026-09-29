@@ -406,7 +406,8 @@ fn watch_session(
 /// Once a second: what the session looks like from here.
 fn pulse(
     mut last: Local<Option<Instant>>,
-    held: Option<Res<bevy_ensemble::HeldUntilVerified>>,
+    // One per lobby, pending or joined: whatever this peer is holding for its session.
+    held: Query<&bevy_ensemble::HeldUntilVerified>,
     host_uuid: Option<Res<bevy_ensemble::HostUuid>>,
     lobbies: Query<(Has<Lobby>, Has<PendingLobby>, Has<Host>)>,
     clients: Query<(
@@ -428,7 +429,7 @@ fn pulse(
     }
     let held: Vec<usize> = peers
         .iter()
-        .map(|p| held.as_ref().map_or(0, |h| h.held_for(*p)))
+        .map(|p| held.iter().map(|h| h.held_for(*p)).sum())
         .collect();
     let lobbies: Vec<_> = lobbies.iter().collect();
     let clients: Vec<_> = clients.iter().map(|(_, a, b)| (a, b)).collect();

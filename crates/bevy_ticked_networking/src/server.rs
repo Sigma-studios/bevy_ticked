@@ -5,18 +5,17 @@ use bevy::prelude::*;
 
 use bevy_ticked::{
     TickedLoop, TickedSystems,
-    events::TickedEventRegistry,
     lifetimes::TrackedEntityLifetimes,
     registry::TickedComponentRegistry,
+    session::{PerPeer, SessionAppExt, SessionReset, SessionScope},
     tick::{CurrentTick, HistoryBufferTicks, TickHoldReason, TickHolds},
-    tracked_entity::{LocalSpawnerSlot, SpawnerSlot, TickTrackedEntity, TrackedIdAllocator},
 };
 
 use crate::{
     delta::{Baseline, Baselines, Compression, DeltaPolicy, SendRates, build_delta, layouts_of},
     diagnostics::{InputStats, SnapshotStats},
     input::{InputQueue, MAX_INPUT_LEAD_TICKS, TickedInput},
-    messages::{PeerLeft, ReceivedNetworkInput, ReceivedSnapshotAck, SendNetworkSnapshot},
+    messages::{ReceivedNetworkInput, ReceivedSnapshotAck, SendNetworkSnapshot},
     snapshot::{
         FullBody, MARGIN_UNMEASURED, RelayedInput, SnapshotBody, SnapshotPacket, build_full_body,
         encode_packet_with,
@@ -52,7 +51,7 @@ pub struct LastAck(pub HashMap<u128, u32>);
 /// can size their prediction lead from the real thing (see [`WorldSnapshot`]).
 ///
 /// [`WorldSnapshot`]: crate::snapshot::WorldSnapshot
-#[derive(Resource, Default)]
+#[derive(Resource, Default, Debug)]
 pub struct InputMargins(pub HashMap<u128, MeasuredMargin>);
 
 /// One client's input-arrival margin and the tick it was measured at.
@@ -76,8 +75,45 @@ pub const MARGIN_STALE_TICKS: u64 = 16;
 /// Only used to decide whether a late input may be forward-filled onto the next
 /// tick — see [`collect_network_inputs`]. Kept per sender because "newest" is a
 /// question about one client's stream, not about the session.
-#[derive(Resource, Default)]
+#[derive(Resource, Default, Debug)]
 pub struct NewestInputTick(pub HashMap<u128, u64>);
+
+impl SessionReset for SnapshotSeq {}
+impl PerPeer for SnapshotSeq {
+    fn forget(&mut self, peer: u128) {
+        self.0.remove(&peer);
+    }
+}
+impl SessionReset for LastAck {}
+impl PerPeer for LastAck {
+    fn forget(&mut self, peer: u128) {
+        self.0.remove(&peer);
+    }
+}
+impl SessionReset for InputMargins {}
+impl PerPeer for InputMargins {
+    fn forget(&mut self, peer: u128) {
+        self.0.remove(&peer);
+    }
+}
+impl SessionReset for NewestInputTick {}
+impl PerPeer for NewestInputTick {
+    fn forget(&mut self, peer: u128) {
+        self.0.remove(&peer);
+    }
+}
+impl SessionReset for NackedFull {}
+impl PerPeer for NackedFull {
+    fn forget(&mut self, peer: u128) {
+        self.0.remove(&peer);
+    }
+}
+impl SessionReset for Baselines {}
+impl PerPeer for Baselines {
+    fn forget(&mut self, peer: u128) {
+        Baselines::forget(self, peer);
+    }
+}
 
 /// Plugin for the server side of multiplayer tick networking.
 ///
@@ -171,6 +207,7 @@ impl<T: TickedInput> Plugin for TickedServerPlugin<T> {
         crate::input::install_input_queue::<T>(app);
         crate::replication::install_owner(app);
         crate::pause::install(app);
+        crate::session::install(app);
         app.insert_resource(SendEvery(self.send_every.max(1)))
             .insert_resource(DeltaPolicy {
                 keyframe_every: self.keyframe_every.max(1),
@@ -179,25 +216,22 @@ impl<T: TickedInput> Plugin for TickedServerPlugin<T> {
             })
             .insert_resource(SnapshotCompression(self.compression))
             .insert_resource(self.send_rates.clone())
-            .init_resource::<Baselines>()
-            .init_resource::<NackedFull>()
-            .init_resource::<InputMargins>()
-            .init_resource::<NewestInputTick>()
             .init_resource::<InputStats>()
             .init_resource::<SnapshotStats>()
-            .init_resource::<SnapshotSeq>()
-            .init_resource::<LastAck>()
+            // What a host holds about each client, and about its own broadcast. Per peer, so a
+            // client that leaves a running session takes its entries with it; and reset at every
+            // door, because every one of them is keyed by a tick or a `seq` of a clock that
+            // restarts at zero — a high-water mark from the last session makes every input of the
+            // next one look stale.
+            .init_per_peer_resource::<Baselines>()
+            .init_per_peer_resource::<NackedFull>()
+            .init_per_peer_resource::<InputMargins>()
+            .init_per_peer_resource::<NewestInputTick>()
+            .init_per_peer_resource::<SnapshotSeq>()
+            .init_per_peer_resource::<LastAck>()
+            .init_session_resource_scoped::<PassesHeld>(SessionScope::Role)
             .add_observer(collect_network_inputs::<T>)
             .add_observer(record_ack)
-            .add_observer(forget_departed_peer::<T>)
-            .add_systems(
-                Update,
-                reset_on_host::<T>.run_if(resource_added::<LocalServerPlayer>),
-            )
-            .add_systems(
-                Update,
-                crate::reset_on_leave::<T>.run_if(resource_removed::<LocalServerPlayer>),
-            )
             .add_systems(
                 TickedLoop,
                 broadcast_snapshot::<T>.in_set(TickedSystems::PostTick),
@@ -206,62 +240,6 @@ impl<T: TickedInput> Plugin for TickedServerPlugin<T> {
 
     fn finish(&self, app: &mut App) {
         bevy_ticked::require_steerable_tick_source(app, "TickedServerPlugin");
-    }
-}
-
-/// When `LocalServerPlayer` is inserted, reset tick state so the
-/// multiplayer session starts fresh from tick 0.
-///
-/// The allocator is raised past every id standing in the world, not zeroed, and that is
-/// the whole point of this function's shape. Zeroing it while tracked entities are still
-/// standing hands the next mint an id that is already in use, and the snapshot keys the
-/// entire world by id — so a rope that collides with a player has its components merged
-/// onto that player and no rope is ever created.
-///
-/// Despawning instead would also close the hole, but it is the wrong trade here: a
-/// solo player opening their world to friends would lose it. A client has no such
-/// claim, which is why [`reset_on_join`] does despawn.
-///
-/// The invariant either way: **no id is ever issued twice in a session.**
-fn reset_on_host<T: TickedInput>(world: &mut World) {
-    let held: Vec<TickTrackedEntity> = {
-        let mut tracked = world.query::<&TickTrackedEntity>();
-        tracked.iter(world).copied().collect()
-    };
-    let mut allocator = world.resource_mut::<TrackedIdAllocator>();
-    for id in &held {
-        allocator.raise_to(*id);
-    }
-    world.insert_resource(LocalSpawnerSlot(SpawnerSlot::AUTHORITY));
-    if let Some(uuid) = world.get_resource::<LocalServerPlayer>().map(|p| p.0) {
-        world.insert_resource(crate::input_plugin::LocalPlayer(uuid));
-    }
-    world.insert_resource(CurrentTick(0));
-    // A host's clock is the session's clock: nothing to wait for. Its own reasons only; a game
-    // that opened the lobby from a pause menu keeps its pause.
-    let mut holds = world.resource_mut::<TickHolds>();
-    holds.release(TickHoldReason::AwaitingSync);
-    holds.release(TickHoldReason::SoftHold);
-    world.resource_mut::<InputQueue<T>>().inputs.clear();
-    // The tick counter goes back to zero, so a high-water mark from the last
-    // session would make every input of this one look stale.
-    world.insert_resource(NewestInputTick::default());
-    world.insert_resource(InputMargins::default());
-    world.insert_resource(SnapshotSeq::default());
-    world.insert_resource(LastAck::default());
-    let registry = world.resource::<TickedComponentRegistry>().clone();
-    registry.clear_all(world);
-    // The tick is back at zero, so the event logs are too; see `reset_on_leave`.
-    TickedEventRegistry::clear_all(world);
-    // The world a solo player opened to friends is the session's world from its first tick:
-    // with the histories cleared, nothing else says these entities were ever born, and a
-    // restore to tick 0 would tombstone every one of them.
-    if let Some(mut lifetimes) =
-        world.get_resource_mut::<bevy_ticked::lifetimes::TrackedEntityLifetimes>()
-    {
-        for id in &held {
-            lifetimes.note_alive(0, id.0);
-        }
     }
 }
 
@@ -345,29 +323,6 @@ fn collect_network_inputs<T: TickedInput>(
     }
 }
 
-/// Observer: a client left, so nothing the host holds per sender may outlive it.
-///
-/// Its inputs at every tick (or the body it left behind keeps obeying its last
-/// keypress until the window prunes it), its margin (or every snapshot keeps
-/// reporting a player who is not there), and its newest-tick mark (or a rejoin
-/// under the same uuid finds all of its inputs older than "newest" and never
-/// gets one forward-filled). See [`PeerLeft`].
-fn forget_departed_peer<T: TickedInput>(
-    trigger: On<PeerLeft>,
-    mut queue: ResMut<InputQueue<T>>,
-    mut margins: ResMut<InputMargins>,
-    mut newest: ResMut<NewestInputTick>,
-    mut baselines: ResMut<Baselines>,
-    mut acks: ResMut<LastAck>,
-) {
-    let uuid = trigger.event().0;
-    queue.remove_player(uuid);
-    margins.0.remove(&uuid);
-    newest.0.remove(&uuid);
-    baselines.forget(uuid);
-    acks.0.remove(&uuid);
-}
-
 fn record_ack(
     trigger: On<ReceivedSnapshotAck>,
     mut acks: ResMut<LastAck>,
@@ -396,7 +351,7 @@ fn broadcast_snapshot<T: TickedInput>(
     send_every: Res<SendEvery>,
     server_player: Option<Res<LocalServerPlayer>>,
     recipients: Option<Res<SnapshotRecipientList>>,
-    mut passes_held: Local<u32>,
+    mut passes_held: ResMut<PassesHeld>,
     mut commands: Commands,
 ) {
     if server_player.is_none() || holds.holds(TickHoldReason::AwaitingSync) {
@@ -408,13 +363,13 @@ fn broadcast_snapshot<T: TickedInput>(
     // The first held pass always sends, so a pause reaches every client the tick it starts;
     // after that, once every `HELD_BROADCAST_EVERY` passes.
     if holds.is_held() {
-        if *passes_held > 0 && !(*passes_held).is_multiple_of(HELD_BROADCAST_EVERY) {
-            *passes_held += 1;
+        if passes_held.0 > 0 && !passes_held.0.is_multiple_of(HELD_BROADCAST_EVERY) {
+            passes_held.0 += 1;
             return;
         }
-        *passes_held += 1;
+        passes_held.0 += 1;
     } else {
-        *passes_held = 0;
+        passes_held.0 = 0;
     }
     // Before the encode, which is the whole point. See [`SnapshotRecipientList`].
     if recipients.is_some_and(|recipients| recipients.0.is_empty()) {
@@ -422,6 +377,17 @@ fn broadcast_snapshot<T: TickedInput>(
     }
     commands.queue(BroadcastSnapshotCommand::<T>(tick.0, PhantomData));
 }
+
+/// Consecutive loop passes the host's clock has been held for, which paces the held broadcast.
+///
+/// A resource registered with the session, where it used to be a `Local`: a host that left with
+/// its clock held — a pause menu open, which is the game's hold and survives every door — and
+/// hosted again still held had the first snapshot of the new session throttled by the count the
+/// last one reached, and a joiner waited half a second longer for its world than on a fresh app.
+#[derive(Resource, Default, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PassesHeld(pub u32);
+
+impl SessionReset for PassesHeld {}
 
 /// Passes of the loop between snapshots while the clock is held: half a second at 64 Hz.
 const HELD_BROADCAST_EVERY: u32 = 32;

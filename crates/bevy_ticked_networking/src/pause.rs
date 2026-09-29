@@ -18,10 +18,13 @@
 //! again, and each client re-acquires its lead through the ordinary "at or behind" path,
 //! which is a forward simulation of a few ticks and not a replay burst.
 //!
-//! The host pauses itself when its window loses focus (`window` feature) and when it notices
+//! The host pauses itself when it notices
 //! a gap in real time longer than [`PausePolicy::auto_pause_after_real_gap`]: it just came
 //! back from a stall, and the pause tells every client to drop what it predicted in the
-//! meantime.
+//! meantime. With the `window` feature it can also pause when its window loses focus; that one is
+//! off by default (see [`PausePolicy::auto_pause_on_focus_loss`]). All the automatic ones share
+//! one switch, [`PausePolicy::automatic_pauses`], for the stretches of a session — a lobby — where
+//! a pause protects nothing.
 //!
 //! Those two are *edges* — a window event, and one long frame. Neither can see a host that is
 //! simply too slow to keep up, which is the case between them:
@@ -42,6 +45,7 @@ use std::time::Duration;
 use bevy::prelude::*;
 use bevy_ticked::{
     MaxTicksPerFrame, TickedLoop, TickedSystems,
+    session::{SessionAppExt, SessionReset, SessionScope},
     tick::{CurrentTick, TickHoldReason, TickHolds},
     time::{Ticked, TickedTime},
 };
@@ -110,8 +114,38 @@ pub enum WhoMayPause {
 #[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PausePolicy {
     pub who_may_pause: WhoMayPause,
+    /// Whether the host pauses on its own at all: for [`HostUnfocused`](PauseReason::HostUnfocused),
+    /// [`HostStalled`](PauseReason::HostStalled) and [`HostTooSlow`](PauseReason::HostTooSlow).
+    /// True by default. While false none of them is raised, and one already in force is resumed.
+    ///
+    /// The switch the three fields below share, for a game whose session has stretches where an
+    /// automatic pause protects nothing. The case both games that needed it had is a lobby: a
+    /// pause holds the host's clock, and seating a joiner runs on the host's tick, so a paused
+    /// host seats a joiner and never sends them their body — while there is no simulation worth
+    /// protecting and nobody predicting into a future. Each game wrote the same system to take an
+    /// automatic pause straight back outside a match; this is that system, once. The game says
+    /// when:
+    ///
+    /// ```ignore
+    /// fn automatic_pauses_only_in_a_match(state: Res<MatchState>, mut policy: ResMut<PausePolicy>) {
+    ///     policy.automatic_pauses = state.in_match();
+    /// }
+    /// ```
+    ///
+    /// A pause somebody *asked* for — the host's own, a participant's, a custom one, waiting on a
+    /// peer — is not automatic and is never touched.
+    pub automatic_pauses: bool,
     /// The host pauses when its window loses focus and resumes when it regains it. Needs the
-    /// `window` feature to do anything.
+    /// `window` feature to do anything. **Off by default.**
+    ///
+    /// Written for a host that alt-tabbed on the web and got one frame a second, and the wrong
+    /// question for that: plenty of environments keep delivering frames to an unfocused window — a
+    /// second monitor, a host windowed beside the chat it is reading the lobby code from, several
+    /// copies of a game on one machine — and there it stopped a session that was perfectly able to
+    /// run. Every real-time game built on this turned it off. Whether the host *can keep up* is
+    /// what [`auto_pause_when_behind_for`](Self::auto_pause_when_behind_for) and
+    /// [`auto_pause_after_real_gap`](Self::auto_pause_after_real_gap) measure, and a web host
+    /// that is throttled trips one of them.
     pub auto_pause_on_focus_loss: bool,
     /// The host pauses when a frame arrives this long after the previous one — it has been
     /// away — and resumes on the next frame, so clients discard what they predicted.
@@ -139,7 +173,8 @@ impl Default for PausePolicy {
     fn default() -> Self {
         Self {
             who_may_pause: WhoMayPause::HostOnly,
-            auto_pause_on_focus_loss: true,
+            automatic_pauses: true,
+            auto_pause_on_focus_loss: false,
             auto_pause_after_real_gap: Some(Duration::from_millis(500)),
             // Three, so a single heavy frame is not a pause and a host that genuinely cannot
             // keep up is one within a second at any frame rate low enough to matter.
@@ -182,8 +217,8 @@ pub(crate) fn install(app: &mut App) {
     app.init_resource::<PauseInstalled>()
         .init_resource::<PausePolicy>()
         .init_resource::<SessionPause>()
-        .init_resource::<LastSnapshotHeard>()
-        .init_resource::<AutoPaused>()
+        .init_session_resource_scoped::<LastSnapshotHeard>(SessionScope::Role)
+        .init_session_resource_scoped::<AutoPaused>(SessionScope::Role)
         .init_resource::<HostBehind>()
         .add_message::<PauseSession>()
         .add_message::<ResumeSession>()
@@ -193,8 +228,12 @@ pub(crate) fn install(app: &mut App) {
         .add_systems(
             PreUpdate,
             (
-                detect_real_gap,
-                pause_when_behind,
+                (
+                    detect_real_gap,
+                    pause_when_behind,
+                    drop_disallowed_automatic_pause,
+                )
+                    .chain(),
                 client_soft_hold,
                 forward_client_requests,
             ),
@@ -219,6 +258,39 @@ pub(crate) fn install(app: &mut App) {
 /// Which automatic pause the host currently holds, so it resumes only its own.
 #[derive(Resource, Default, Debug, Clone, Copy, PartialEq, Eq)]
 struct AutoPaused(Option<PauseReason>);
+
+impl SessionReset for AutoPaused {}
+
+impl PauseReason {
+    /// Raised by the host on its own rather than asked for by anybody: see
+    /// [`PausePolicy::automatic_pauses`].
+    pub fn is_automatic(self) -> bool {
+        matches!(
+            self,
+            Self::HostUnfocused | Self::HostStalled | Self::HostTooSlow
+        )
+    }
+}
+
+/// While [`PausePolicy::automatic_pauses`] is off, an automatic pause in force is resumed.
+///
+/// Whichever raised it, and whenever: one raised a frame before the game turned automatic pauses
+/// off is as unwanted as one raised after.
+fn drop_disallowed_automatic_pause(
+    policy: Res<PausePolicy>,
+    host: Option<Res<LocalServerPlayer>>,
+    pause: Res<SessionPause>,
+    mut auto: ResMut<AutoPaused>,
+    mut resumes: MessageWriter<ResumeSession>,
+) {
+    if host.is_none() || policy.automatic_pauses {
+        return;
+    }
+    if pause.0.is_some_and(|paused| paused.reason.is_automatic()) {
+        resumes.write(ResumeSession);
+        auto.0 = None;
+    }
+}
 
 // ── the host ─────────────────────────────────────────────────────────────────
 
@@ -291,7 +363,7 @@ fn detect_real_gap(
         return;
     };
     if time.delta() > gap {
-        if pause.0.is_none() {
+        if pause.0.is_none() && policy.automatic_pauses {
             pauses.write(PauseSession(PauseReason::HostStalled));
             auto.0 = Some(PauseReason::HostStalled);
         }
@@ -356,7 +428,7 @@ fn pause_when_behind(
     }
 
     if behind.consecutive_frames >= threshold.max(1) {
-        if pause.0.is_none() {
+        if pause.0.is_none() && policy.automatic_pauses {
             if let Some(warnings) = warnings.as_deref_mut() {
                 let mut count = warnings.host_behind_real_time;
                 let frames = behind.consecutive_frames;
@@ -403,7 +475,7 @@ fn pause_on_focus_loss(
         return;
     }
     for event in focus.read() {
-        if !event.focused && pause.0.is_none() {
+        if !event.focused && pause.0.is_none() && policy.automatic_pauses {
             pauses.write(PauseSession(PauseReason::HostUnfocused));
             auto.0 = Some(PauseReason::HostUnfocused);
         } else if event.focused
@@ -503,6 +575,8 @@ fn client_follow_pause(world: &mut World) {
 /// When the last snapshot was applied, on the frame clock.
 #[derive(Resource, Default, Debug, Clone, Copy)]
 struct LastSnapshotHeard(Option<Duration>);
+
+impl SessionReset for LastSnapshotHeard {}
 
 /// A client that has heard nothing for a while holds rather than run ahead of a host that
 /// may be gone; the next snapshot releases it.

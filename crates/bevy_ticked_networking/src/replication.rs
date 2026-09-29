@@ -113,6 +113,15 @@ impl Default for AuthoritativeHistory {
     }
 }
 
+impl bevy_ticked::session::SessionReset for DisplayTick {}
+
+/// Emptied, not replaced: `max_ticks` is configuration a game may have raised, not session.
+impl bevy_ticked::session::SessionReset for AuthoritativeHistory {
+    fn reset(&mut self) {
+        self.clear();
+    }
+}
+
 impl AuthoritativeHistory {
     /// Remember a snapshot's records at `tick`.
     pub fn record(&mut self, tick: u64, records: impl IntoIterator<Item = EntityRecord>) {
@@ -219,9 +228,12 @@ pub struct RemoteInterpolationPlugin;
 
 impl Plugin for RemoteInterpolationPlugin {
     fn build(&self, app: &mut App) {
+        use bevy_ticked::session::{SessionAppExt, SessionScope};
+        // `InterpolationDelay` is not the session's: a game may set its own, and the welcome
+        // sets it from the host's send rate on every join.
         app.init_resource::<InterpolationDelay>()
-            .init_resource::<AuthoritativeHistory>()
-            .init_resource::<DisplayTick>()
+            .init_session_resource_scoped::<AuthoritativeHistory>(SessionScope::Role)
+            .init_session_resource_scoped::<DisplayTick>(SessionScope::Role)
             .add_observer(mark_owned_on_add)
             .add_systems(
                 Update,
@@ -280,6 +292,25 @@ fn mark_owned_on_role(
 ///
 /// Runs every pass of the loop, replay or not: a tick that ran with no snapshot still moved
 /// the entity by simulation, and the renderer must see the authoritative state again.
+/// The display tick for this pass, from the last one shown and the tick the delay aims at.
+///
+/// One tick per tick, whatever arrived: a bunch of late snapshots is absorbed over as many frames
+/// rather than shown as one jump. A clock that has fallen far behind (a stall, a pause) snaps
+/// instead of crawling for seconds — and the first one of a session starts where it aims.
+///
+/// Both jumps land *on* the target. They used to land two ticks short of it, and "one tick per
+/// tick" never closes a gap while a snapshot arrives every tick: the session was drawn two ticks
+/// further behind than `InterpolationDelay` says, from the first snapshot or the first stall on,
+/// for good. It went unnoticed at the start of a session because the join used to happen while
+/// the host's clock was below two, where the subtraction saturated to the target anyway.
+fn next_display_tick(shown: Option<u64>, target: u64) -> u64 {
+    match shown {
+        Some(shown) if shown + CATCH_UP_SNAP < target => target,
+        Some(shown) => (shown + 1).min(target),
+        None => target,
+    }
+}
+
 fn restore_interpolated_entities(world: &mut World) {
     if !world.contains_resource::<LocalClientPlayer>() {
         return;
@@ -290,14 +321,7 @@ fn restore_interpolated_entities(world: &mut World) {
     let target = latest.saturating_sub(world.resource::<InterpolationDelay>().0);
     let display_tick = {
         let mut display = world.resource_mut::<DisplayTick>();
-        let next = match display.0 {
-            // One tick per tick, whatever arrived: a bunch of late snapshots is absorbed over
-            // as many frames rather than shown as one jump. A clock that has fallen far behind
-            // (a stall, a pause) snaps instead of crawling for seconds.
-            Some(shown) if shown + CATCH_UP_SNAP < target => target.saturating_sub(2),
-            Some(shown) => (shown + 1).min(target),
-            None => target.saturating_sub(2),
-        };
+        let next = next_display_tick(display.0, target);
         display.0 = Some(next);
         next
     };
@@ -334,5 +358,33 @@ fn restore_interpolated_entities(world: &mut World) {
             }
         }
         registry.remove_absent(world, entity, &record.present);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_display_starts_on_its_target_and_snaps_onto_it() {
+        assert_eq!(next_display_tick(None, 40), 40, "the first of a session");
+        assert_eq!(next_display_tick(Some(39), 40), 40, "one tick per tick");
+        assert_eq!(
+            next_display_tick(Some(30), 40),
+            31,
+            "a small gap is crawled"
+        );
+        assert_eq!(
+            next_display_tick(Some(10), 40),
+            40,
+            "after a stall it snaps onto the target, not two ticks short of it for good"
+        );
+        // Snapshot every tick: the target moves one a tick, so a display that lands short never
+        // catches up. Landing on it, it stays on it.
+        let mut shown = next_display_tick(Some(10), 40);
+        for target in 41..60 {
+            shown = next_display_tick(Some(shown), target);
+            assert_eq!(shown, target);
+        }
     }
 }
