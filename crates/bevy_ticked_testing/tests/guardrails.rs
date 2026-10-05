@@ -4,6 +4,7 @@
 //! is exercised here against synthetic sources in a scratch directory, both ways: it bites on the
 //! reach, and it does not bite on a comment explaining the reach.
 
+use bevy_ticked::tick_types::Tick;
 use bevy_ticked_testing::golden::{HashTrace, Trace, check_golden};
 use bevy_ticked_testing::source_guard::{
     DEFAULT_NEEDLES, Exception, Needle, SourceGuard, code_only,
@@ -92,6 +93,10 @@ fn the_default_needles_catch_every_known_reach() {
         (
             "SECONDS_PER_TICK",
             "velocity.0 += acceleration * SECONDS_PER_TICK;",
+        ),
+        (
+            "DEFAULT_TIMESTEP",
+            "velocity.0 += acceleration * DEFAULT_TIMESTEP.as_secs_f32();",
         ),
     ];
     for needle in DEFAULT_NEEDLES {
@@ -273,7 +278,11 @@ fn a_stale_source_list_fails() {
 fn a_golden_trace_round_trips() {
     let scratch = Scratch::new("golden");
     let trace = HashTrace {
-        samples: vec![(1, 0x1234), (2, 0xdead_beef), (64, u64::MAX)],
+        samples: vec![
+            (Tick(1), 0x1234),
+            (Tick(2), 0xdead_beef),
+            (Tick(64), u64::MAX),
+        ],
     };
 
     // The text form is what a reviewer diffs, so it is pinned here as well as round-tripped.
@@ -314,7 +323,7 @@ fn a_golden_trace_round_trips() {
 #[should_panic(expected = "tick 7")]
 fn a_golden_difference_names_the_tick() {
     let recorded = HashTrace {
-        samples: vec![(5, 1), (6, 2), (7, 3), (8, 4)],
+        samples: vec![(Tick(5), 1), (Tick(6), 2), (Tick(7), 3), (Tick(8), 4)],
     };
     let mut now = recorded.clone();
     now.samples[2].1 = 99;

@@ -76,7 +76,7 @@ fn ending_a_solo_session_is_a_leave() {
     app.world_mut().spawn_tracked(Pos(3));
     app.insert_resource(JoinedCode(Some("ABCD".into())));
     step(&mut app, 30);
-    assert!(app.world().resource::<CurrentTick>().0 > 20);
+    assert!(app.world().resource::<CurrentTick>().0 > Tick(20));
 
     app.world_mut().write_message(EndSession);
     step(&mut app, 2);
@@ -89,7 +89,7 @@ fn ending_a_solo_session_is_a_leave() {
         "and so does what the game registered for it"
     );
     assert!(
-        app.world().resource::<CurrentTick>().0 <= 1,
+        app.world().resource::<CurrentTick>().0 <= Tick(1),
         "the clock starts over: what games reset by hand when leaving practice"
     );
     assert!(!app.world().resource::<InSession>().0);
@@ -230,12 +230,12 @@ fn joining_from_solo_keeps_what_arrived_before_the_join_door() {
         TickedSessionWelcome,
     };
 
-    fn snapshot(tick: u64) -> ReceivedEnsembleMessage<EnsembleSnapshotMessage> {
+    fn snapshot(tick: Tick) -> ReceivedEnsembleMessage<EnsembleSnapshotMessage> {
         ReceivedEnsembleMessage {
             sender: Some(HOST_UUID),
             message: EnsembleSnapshotMessage {
                 bytes: encode_packet(&SnapshotPacket {
-                    seq: tick as u32,
+                    seq: tick.0 as u32,
                     tick,
                     your_margin: 0,
                     body: SnapshotBody::Full(FullBody::default()),
@@ -252,14 +252,15 @@ fn joining_from_solo_keeps_what_arrived_before_the_join_door() {
 
     // The host's registries matched and the lobby is promoted, with a ping already back.
     app.insert_resource(RegistryVerified);
-    app.world_mut().spawn((Lobby, PeerRtt(0.2)));
+    app.world_mut()
+        .spawn((Lobby, PeerRtt(std::time::Duration::from_millis(200))));
     // The frame the role is taken: the host's welcome arrives with it.
     app.world_mut().write_message(ReceivedEnsembleMessage {
         sender: Some(HOST_UUID),
         message: TickedSessionWelcome {
             slot: 5,
-            server_tick: 1000,
-            send_every: 1,
+            server_tick: Tick(1000),
+            send_every: Ticks::ONE,
         },
         received_at: bevy_ensemble::Instant::now(),
     });
@@ -267,12 +268,12 @@ fn joining_from_solo_keeps_what_arrived_before_the_join_door() {
     assert_eq!(state(&app), TickedSession::Solo, "the door runs next frame");
 
     // The door's frame: a snapshot is forwarded in `PreUpdate`, before the door.
-    app.world_mut().write_message(snapshot(1000));
+    app.world_mut().write_message(snapshot(Tick(1000)));
     app.update();
     assert_eq!(state(&app), TickedSession::Client);
     assert_eq!(
         app.world().resource::<AppliedSnapshotTick>().0,
-        Some(1000),
+        Some(Tick(1000)),
         "the snapshot that arrived before the door is applied after it, the same frame"
     );
     assert_eq!(
@@ -290,7 +291,7 @@ fn joining_from_solo_keeps_what_arrived_before_the_join_door() {
         app.world()
             .resource::<ClientTickBuffer>()
             .target_replay_distance
-            > 6,
+            > Ticks(6),
         "a 200 ms round trip is more than the default guess"
     );
 }

@@ -41,7 +41,7 @@ fn step(app: &mut App) {
     app.update();
 }
 
-fn restore(app: &mut App, tick: u64) {
+fn restore(app: &mut App, tick: Tick) {
     let registry = app.world().resource::<TickedComponentRegistry>().clone();
     registry.restore_all(app.world_mut(), tick);
 }
@@ -59,7 +59,7 @@ fn a_resource_rolls_back() {
     step(&mut app);
 
     assert_eq!(app.world().resource::<Round>(), &Round(3));
-    restore(&mut app, 2);
+    restore(&mut app, Tick(2));
     assert_eq!(
         app.world().resource::<Round>(),
         &Round(1),
@@ -84,7 +84,7 @@ fn a_resource_and_a_component_roll_back_together() {
     app.world_mut().insert_resource(Round(9));
     step(&mut app);
 
-    restore(&mut app, 2);
+    restore(&mut app, Tick(2));
 
     assert_eq!(app.world().entity(entity).get::<Height>(), Some(&Height(0)));
     assert_eq!(app.world().resource::<Round>(), &Round(1));
@@ -102,12 +102,12 @@ fn resource_history_is_truncated_with_the_components() {
     }
 
     let registry = app.world().resource::<TickedComponentRegistry>().clone();
-    registry.truncate_all_after(app.world_mut(), 2);
+    registry.truncate_all_after(app.world_mut(), Tick(2));
 
     let actions = app.world().resource::<ResourceActions<Round>>();
-    assert!(actions.at_tick(2).is_some(), "tick 2 is kept");
+    assert!(actions.at_tick(Tick(2)).is_some(), "tick 2 is kept");
     assert!(
-        actions.at_tick(4).is_none(),
+        actions.at_tick(Tick(4)).is_none(),
         "and everything after it is gone, as it is for components"
     );
 }
@@ -121,7 +121,7 @@ fn restoring_a_tick_with_no_saved_resource_leaves_it_alone() {
     step(&mut app);
 
     app.world_mut().insert_resource(Round(7));
-    restore(&mut app, 9_999);
+    restore(&mut app, Tick(9_999));
 
     assert_eq!(
         app.world().resource::<Round>(),

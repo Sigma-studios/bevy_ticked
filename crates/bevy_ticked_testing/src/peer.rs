@@ -19,6 +19,7 @@
 //! [`peer_app_with`] is those four lines, once. [`client_server_peer`] adds the networking stack
 //! in the order a game would.
 
+use bevy_ticked::tick_types::Ticks;
 use std::time::Duration;
 
 use bevy::prelude::*;
@@ -55,7 +56,7 @@ pub struct PeerRecipe {
     /// How much virtual time one `App::update` represents. Defaults to [`TICK`].
     pub frame: Duration,
     /// Override the history window in ticks; `None` leaves it to the plugins.
-    pub history: Option<u64>,
+    pub history: Option<Ticks>,
     /// Add `bevy_ensemble::NetSimPlugin`, so `LoopbackNetwork::use_netsim` has something to
     /// drive. Off by default: the loopback `Link` impairs on the send side and is what most
     /// tests want.

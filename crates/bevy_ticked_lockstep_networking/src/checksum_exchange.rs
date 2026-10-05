@@ -64,6 +64,7 @@ use bevy_ensemble::{
     EnsembleAppExt, Host, Lobby, LobbyMessage, LobbyParticipant, LobbyParticipantOf,
     ReceivedEnsembleMessage, SendMode,
 };
+use bevy_ticked::tick_types::Tick;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::marker::PhantomData;
 
@@ -83,7 +84,7 @@ use crate::{
 /// reverse send you to opposite ends of a codebase.
 #[derive(Message, Serialize, Deserialize, Debug, Clone, Copy)]
 pub struct ChecksumReport<H> {
-    pub tick: u64,
+    pub tick: Tick,
     pub hash: H,
 }
 
@@ -132,7 +133,7 @@ impl<H: WorldHash> Default for PendingChecksumReports<H> {
 /// The tick this peer last put on the wire, so the cadence follows the log rather than repeating
 /// its interval arithmetic.
 #[derive(Resource, Debug, Default)]
-pub struct LastAnnouncedChecksum(pub Option<u64>);
+pub struct LastAnnouncedChecksum(pub Option<Tick>);
 
 /// Broadcasts this peer's world hash and compares what comes back. See the module docs.
 ///
@@ -501,7 +502,7 @@ mod tests {
         let mut app = App::new();
         let mut log = ChecksumLog::<TestHash>::every_tick();
         for (tick, hash) in samples {
-            log.samples.push((*tick, *hash));
+            log.samples.push((Tick(*tick), *hash));
         }
         app.insert_resource(log)
             .init_resource::<PendingChecksumReports<TestHash>>()
@@ -516,7 +517,10 @@ mod tests {
             .resource_mut::<Messages<ReceivedEnsembleMessage<ChecksumReport<TestHash>>>>()
             .write(ReceivedEnsembleMessage {
                 sender: Some(sender),
-                message: ChecksumReport { tick, hash },
+                message: ChecksumReport {
+                    tick: Tick(tick),
+                    hash,
+                },
                 received_at: bevy_ensemble::Instant::now(),
             });
     }
@@ -542,7 +546,7 @@ mod tests {
 
         let desync = desync_of(&app).expect("the peers disagree about tick 64");
         assert_eq!(desync.peer, 7);
-        assert_eq!(desync.divergence.tick, 64);
+        assert_eq!(desync.divergence.tick, Tick(64));
         assert_eq!(
             desync.divergence.sections,
             vec!["buildings"],
@@ -565,12 +569,12 @@ mod tests {
         app.world_mut()
             .resource_mut::<ChecksumLog<TestHash>>()
             .samples
-            .push((128, hash(1, 1)));
+            .push((Tick(128), hash(1, 1)));
         app.update();
 
         assert_eq!(
             desync_of(&app).map(|desync| desync.divergence.tick),
-            Some(128),
+            Some(Tick(128)),
             "the parked report has to be compared once the tick lands, or a client — which is \
              always behind — never checks anything at all"
         );
@@ -585,7 +589,7 @@ mod tests {
 
         assert_eq!(
             desync_of(&app).map(|desync| desync.divergence.tick),
-            Some(64),
+            Some(Tick(64)),
             "reporting 128 would name a symptom of whatever went wrong at 64"
         );
     }
@@ -600,7 +604,7 @@ mod tests {
 
         assert_eq!(
             desync_of(&app).map(|desync| desync.divergence.tick),
-            Some(64),
+            Some(Tick(64)),
             "the divergence is permanent, so every later tick differs too — re-reporting it once \
              a second buries the one number that mattered"
         );

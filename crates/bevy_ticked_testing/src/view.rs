@@ -7,6 +7,7 @@
 //! by hand, and each of them got at least one of the accessors subtly wrong — the lead computed
 //! the wrong way round, a `u64` subtraction that panicked when a client fell behind.
 
+use bevy_ticked::tick_types::{Tick, Ticks};
 use std::collections::BTreeMap;
 
 use bevy::prelude::*;
@@ -27,7 +28,7 @@ pub use crate::net::Role;
 pub use bevy_ticked_lockstep_networking::testing::*;
 
 /// The tick this peer has simulated up to.
-pub fn tick(app: &App) -> u64 {
+pub fn tick(app: &App) -> Tick {
     app.world().resource::<CurrentTick>().0
 }
 
@@ -40,7 +41,7 @@ pub fn paused(app: &App) -> bool {
 /// How many ticks `client` runs ahead of `host`. Negative when it has fallen behind, which is
 /// exactly the case a `u64` subtraction here used to panic on.
 pub fn lead(client: &App, host: &App) -> i64 {
-    tick(client) as i64 - tick(host) as i64
+    tick(client).offset_from(tick(host))
 }
 
 /// Which role this peer currently holds.
@@ -57,7 +58,7 @@ pub fn role(app: &App) -> Role {
 
 /// The tick of the last snapshot this client applied; `None` before the first of a session, or
 /// on a peer without the client plugin.
-pub fn applied_tick(app: &App) -> Option<u64> {
+pub fn applied_tick(app: &App) -> Option<Tick> {
     app.world()
         .get_resource::<AppliedSnapshotTick>()
         .and_then(|applied| applied.0)
@@ -70,7 +71,7 @@ pub fn applied_tick(app: &App) -> Option<u64> {
 /// The same number as [`applied_tick`] in a running session — the record is kept as the
 /// snapshot is applied — but read from `AuthoritativeHistory`, because that is what the
 /// restore reads, and a test about what a remote body shows wants the source the plugin uses.
-pub fn authoritative_tick(app: &App) -> Option<u64> {
+pub fn authoritative_tick(app: &App) -> Option<Tick> {
     app.world()
         .get_resource::<AuthoritativeHistory>()?
         .newest_tick()
@@ -92,7 +93,7 @@ fn client_buffer(app: &App) -> &ClientTickBuffer {
 
 /// What `current_tick - snapshot_tick` is steering toward on this client. Not the lead — see
 /// `ClientTickBuffer` for the difference, which is one one-way trip.
-pub fn target_replay_distance(app: &App) -> u64 {
+pub fn target_replay_distance(app: &App) -> Ticks {
     client_buffer(app).target_replay_distance
 }
 
@@ -134,7 +135,7 @@ pub fn health(app: &App) -> HealthWarnings {
 }
 
 /// The inclusive `(oldest, newest)` tick this peer holds history of `T` for.
-pub fn history_range<T: TickedComponent>(app: &App) -> Option<(u64, u64)> {
+pub fn history_range<T: TickedComponent>(app: &App) -> Option<(Tick, Tick)> {
     app.world()
         .get_resource::<WorldActions<T>>()?
         .recorded_range()
@@ -172,7 +173,7 @@ pub fn tombstone_count(app: &App) -> usize {
 }
 
 /// What history says `T` was on `id` at `tick`.
-pub fn component_at<T: TickedComponent>(app: &App, id: u64, tick: u64) -> Option<T> {
+pub fn component_at<T: TickedComponent>(app: &App, id: u64, tick: Tick) -> Option<T> {
     app.world()
         .get_resource::<WorldActions<T>>()?
         .at_tick(tick)?
@@ -189,23 +190,23 @@ pub fn latest<T: Component + Clone>(app: &App, id: u64) -> Option<T> {
 /// A copy of a peer's input queue, taken at one instant so a test can look at it twice.
 #[derive(Clone, Debug)]
 pub struct InputQueueView<I> {
-    inputs: BTreeMap<u64, BTreeMap<u128, I>>,
+    inputs: BTreeMap<Tick, BTreeMap<u128, I>>,
 }
 
 impl<I: Clone> InputQueueView<I> {
     /// Every tick with at least one input, ascending.
-    pub fn ticks(&self) -> Vec<u64> {
+    pub fn ticks(&self) -> Vec<Tick> {
         self.inputs.keys().copied().collect()
     }
 
     /// Every player's input at `tick`.
-    pub fn at(&self, tick: u64) -> BTreeMap<u128, I> {
+    pub fn at(&self, tick: Tick) -> BTreeMap<u128, I> {
         self.inputs.get(&tick).cloned().unwrap_or_default()
     }
 
     /// The newest tick this queue holds an input from `uuid` for. `None` is how a test tells
     /// "the input was lost" from "it arrived and did nothing".
-    pub fn newest_for(&self, uuid: u128) -> Option<u64> {
+    pub fn newest_for(&self, uuid: u128) -> Option<Tick> {
         self.inputs
             .iter()
             .rev()

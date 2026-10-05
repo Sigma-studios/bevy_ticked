@@ -15,6 +15,7 @@ use bevy::prelude::*;
 use bevy_ticked::prelude::TickedAppExt;
 use bevy_ticked::registry::TickedComponentRegistry;
 use bevy_ticked::tick::CurrentTick;
+use bevy_ticked::tick_types::Tick;
 use bevy_ticked::tracked_entity::{TickTrackedEntity, TrackedIdAllocator};
 use bevy_ticked_networking::prelude::*;
 use bevy_ticked_networking::snapshot::{apply_full_body, build_full_body};
@@ -46,12 +47,12 @@ fn peer() -> App {
     app
 }
 
-fn capture(app: &mut App, tick: u64) {
+fn capture(app: &mut App, tick: Tick) {
     let registry = app.world().resource::<TickedComponentRegistry>().clone();
     registry.capture_all(app.world_mut(), tick);
 }
 
-fn sync(host: &mut App, client: &mut App, tick: u64) {
+fn sync(host: &mut App, client: &mut App, tick: Tick) {
     capture(host, tick);
     let body = build_full_body(host.world_mut(), tick);
     apply_full_body(client.world_mut(), tick, &body);
@@ -81,14 +82,14 @@ fn tracked_ids(app: &mut App) -> Vec<u64> {
 fn the_snapshot_already_says_that_nobody_is_riding() {
     let mut host = peer();
     host.world_mut().spawn((TickTrackedEntity(1), Pos(0)));
-    capture(&mut host, 1);
+    capture(&mut host, Tick(1));
 
     let index = host
         .world()
         .resource::<TickedComponentRegistry>()
         .wire_index_of::<Ride>()
         .unwrap();
-    let body = build_full_body(host.world_mut(), 1);
+    let body = build_full_body(host.world_mut(), Tick(1));
 
     let record = body.record(1).expect("the body has the entity");
     assert!(
@@ -105,13 +106,13 @@ fn a_removed_component_is_replicated() {
 
     host.world_mut()
         .spawn((TickTrackedEntity(1), Pos(0), Ride(7)));
-    sync(&mut host, &mut client, 1);
+    sync(&mut host, &mut client, Tick(1));
     assert_eq!(only::<Ride>(&mut client), Some(Ride(7)), "the ride arrived");
 
     let entity = entity_with::<Ride>(&mut host);
     host.world_mut().entity_mut(entity).remove::<Ride>();
     host.world_mut().entity_mut(entity).insert(Pos(1));
-    sync(&mut host, &mut client, 2);
+    sync(&mut host, &mut client, Tick(2));
 
     assert_eq!(
         only::<Ride>(&mut client),
@@ -135,15 +136,15 @@ fn the_snapshot_path_and_the_rollback_path_agree() {
 
     host.world_mut()
         .spawn((TickTrackedEntity(1), Pos(0), Ride(7)));
-    sync(&mut host, &mut client, 1);
+    sync(&mut host, &mut client, Tick(1));
 
     let entity = entity_with::<Ride>(&mut host);
     host.world_mut().entity_mut(entity).remove::<Ride>();
-    sync(&mut host, &mut client, 2);
+    sync(&mut host, &mut client, Tick(2));
     let after_snapshot = only::<Ride>(&mut client);
 
     let registry = client.world().resource::<TickedComponentRegistry>().clone();
-    registry.restore_all(client.world_mut(), 2);
+    registry.restore_all(client.world_mut(), Tick(2));
     let after_rollback = only::<Ride>(&mut client);
 
     assert_eq!(after_snapshot, None);
@@ -164,11 +165,11 @@ fn a_rollback_only_component_is_never_stripped_by_a_snapshot() {
     let mut client = peer();
 
     host.world_mut().spawn((TickTrackedEntity(1), Pos(0)));
-    sync(&mut host, &mut client, 1);
+    sync(&mut host, &mut client, Tick(1));
 
     let entity = entity_with::<Pos>(&mut client);
     client.world_mut().entity_mut(entity).insert(LocalOnly(42));
-    sync(&mut host, &mut client, 2);
+    sync(&mut host, &mut client, Tick(2));
 
     assert_eq!(
         client.world().entity(entity).get::<LocalOnly>().copied(),
@@ -186,11 +187,11 @@ fn an_entity_spawned_by_the_same_snapshot_keeps_its_components() {
     let mut client = peer();
 
     host.world_mut().spawn((TickTrackedEntity(1), Pos(0)));
-    sync(&mut host, &mut client, 1);
+    sync(&mut host, &mut client, Tick(1));
 
     host.world_mut()
         .spawn((TickTrackedEntity(2), Pos(9), Ride(3)));
-    sync(&mut host, &mut client, 2);
+    sync(&mut host, &mut client, Tick(2));
 
     let mut q = client
         .world_mut()
@@ -221,13 +222,13 @@ fn an_entity_stripped_of_every_networked_component_survives_bare() {
     host.world_mut().spawn((TickTrackedEntity(1), Pos(0)));
     host.world_mut()
         .spawn((TickTrackedEntity(2), Pos(0), Ride(7)));
-    sync(&mut host, &mut client, 1);
+    sync(&mut host, &mut client, Tick(1));
     assert_eq!(tracked_ids(&mut client), vec![1, 2]);
 
     let entity = entity_with::<Ride>(&mut host);
     host.world_mut().entity_mut(entity).remove::<Ride>();
     host.world_mut().entity_mut(entity).remove::<Pos>();
-    sync(&mut host, &mut client, 2);
+    sync(&mut host, &mut client, Tick(2));
 
     assert_eq!(
         tracked_ids(&mut client),
@@ -258,12 +259,12 @@ fn an_entity_that_lives_between_two_snapshots_is_never_seen() {
     let mut client = peer();
 
     host.world_mut().spawn((TickTrackedEntity(1), Pos(0)));
-    sync(&mut host, &mut client, 1);
+    sync(&mut host, &mut client, Tick(1));
 
     let flash = host.world_mut().spawn((TickTrackedEntity(2), Pos(5))).id();
-    capture(&mut host, 2);
+    capture(&mut host, Tick(2));
     host.world_mut().despawn(flash);
-    sync(&mut host, &mut client, 3);
+    sync(&mut host, &mut client, Tick(3));
 
     assert_eq!(
         tracked_ids(&mut client),

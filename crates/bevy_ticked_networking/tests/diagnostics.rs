@@ -64,7 +64,7 @@ fn host() -> App {
     app
 }
 
-fn snapshot_matching(client: &mut App, tick: u64) -> SnapshotPacket {
+fn snapshot_matching(client: &mut App, tick: Tick) -> SnapshotPacket {
     let registry = client.world().resource::<TickedComponentRegistry>().clone();
     registry.capture_all(client.world_mut(), tick);
     let mut packet = SnapshotPacket::full(tick, build_full_body(client.world_mut(), tick));
@@ -72,14 +72,14 @@ fn snapshot_matching(client: &mut App, tick: u64) -> SnapshotPacket {
     packet
 }
 
-fn deliver(app: &mut App, tick: u64) {
+fn deliver(app: &mut App, tick: Tick) {
     let snapshot = snapshot_matching(app, tick);
     app.world_mut().trigger(ReceivedNetworkSnapshot(snapshot));
 }
 
 /// A packet that disagrees with the prediction, so it costs a rollback: the identical fast
 /// path (T9) makes a matching one cost nothing, which is what most of these count.
-fn snapshot_differing(app: &mut App, tick: u64) -> SnapshotPacket {
+fn snapshot_differing(app: &mut App, tick: Tick) -> SnapshotPacket {
     let mut packet = snapshot_matching(app, tick);
     let index = app
         .world()
@@ -92,7 +92,7 @@ fn snapshot_differing(app: &mut App, tick: u64) -> SnapshotPacket {
     packet
 }
 
-fn deliver_differing(app: &mut App, tick: u64) {
+fn deliver_differing(app: &mut App, tick: Tick) {
     let snapshot = snapshot_differing(app, tick);
     app.world_mut().trigger(ReceivedNetworkSnapshot(snapshot));
 }
@@ -104,7 +104,7 @@ fn sync(app: &mut App) {
         Pos(0),
         bevy_ticked_networking::replication::ReplicationMode::Predicted,
     ));
-    deliver(app, 0);
+    deliver(app, Tick::ZERO);
     app.update();
 }
 
@@ -136,12 +136,12 @@ fn every_applied_snapshot_is_counted_and_its_replay_distance_is_the_lead() {
     assert_eq!(after.snapshots_applied, 2);
     assert_eq!(after.rollbacks, before.rollbacks + 1);
     assert_eq!(
-        after.last_replay_distance, lead as i64,
+        after.last_replay_distance, lead.0 as i64,
         "a client leading by `lead` ticks replays `lead` ticks on a snapshot at current - lead"
     );
     assert_eq!(
         after.ticks_replayed - before.ticks_replayed,
-        lead,
+        lead.0,
         "and the tick counter says the same thing"
     );
 }
@@ -152,11 +152,11 @@ fn a_stale_snapshot_is_counted_as_dropped_not_applied() {
     sync(&mut app);
     let current = app.world().resource::<CurrentTick>().0;
 
-    deliver(&mut app, current - 1);
+    deliver(&mut app, current.prev());
     app.update();
     let applied = replay(&app).snapshots_applied;
 
-    deliver(&mut app, current - 3);
+    deliver(&mut app, current - Ticks(3));
     app.update();
 
     let stats = replay(&app);
@@ -172,7 +172,7 @@ fn a_snapshot_before_the_client_role_is_counted_at_the_door() {
     let mut app = client();
     app.world_mut().remove_resource::<LocalClientPlayer>();
     app.update();
-    deliver(&mut app, 0);
+    deliver(&mut app, Tick::ZERO);
     app.update();
 
     assert_eq!(replay(&app).dropped_before_handshake, 1);
@@ -241,7 +241,7 @@ fn a_counter_moved_by_a_snapshot_is_not_a_client_minted_id() {
     let current = app.world().resource::<CurrentTick>().0;
 
     // The host spawned something with a higher id; applying it raises the counter here.
-    let mut snapshot = snapshot_matching(&mut app, current - 1);
+    let mut snapshot = snapshot_matching(&mut app, current.prev());
     let index = app
         .world()
         .resource::<TickedComponentRegistry>()
@@ -266,16 +266,16 @@ fn a_counter_moved_by_a_snapshot_is_not_a_client_minted_id() {
 #[test]
 fn a_snapshot_older_than_the_history_window_is_counted() {
     let mut app = client();
-    app.insert_resource(HistoryBufferTicks(4));
+    app.insert_resource(HistoryBufferTicks(Ticks(4)));
     sync(&mut app);
     for _ in 0..16 {
         app.update();
     }
     let current = app.world().resource::<CurrentTick>().0;
-    let last_applied = 0;
+    let last_applied = Tick::ZERO;
     // Newer than the last applied snapshot, so not stale; older than anything in history.
-    let tick = last_applied + 1;
-    assert!(tick + 4 < current);
+    let tick = last_applied.next();
+    assert!(tick + Ticks(4) < current);
     // Built without capturing into this client's history, which `deliver` does and which would
     // itself extend the history back to `tick`.
     let mut snapshot = SnapshotPacket::full(tick, build_full_body(app.world_mut(), tick));
@@ -310,16 +310,16 @@ fn the_host_counts_inputs_and_flags_the_late_ones() {
         app.update();
     }
     let current = app.world().resource::<CurrentTick>().0;
-    assert!(current >= 2);
+    assert!(current >= Tick(2));
 
     app.world_mut().trigger(ReceivedNetworkInput {
         sender: LOCAL,
-        tick: current + 2,
+        tick: current + Ticks(2),
         input: Input { forward: true },
     });
     app.world_mut().trigger(ReceivedNetworkInput {
         sender: LOCAL,
-        tick: current - 1,
+        tick: current.prev(),
         input: Input { forward: true },
     });
 
@@ -336,9 +336,9 @@ fn the_host_counts_every_snapshot_it_broadcasts() {
     }
     let stats = *app.world().resource::<SnapshotStats>();
     let ticks = app.world().resource::<CurrentTick>().0;
-    assert!(ticks > 0);
+    assert!(ticks > Tick::ZERO);
     assert_eq!(
-        stats.sent, ticks,
+        stats.sent, ticks.0,
         "one broadcast per tick until send rates land"
     );
     assert!(

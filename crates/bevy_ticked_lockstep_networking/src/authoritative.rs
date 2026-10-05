@@ -9,6 +9,7 @@ use bevy_ensemble::{
     LobbyParticipant, LobbyParticipantOf, ReceivedEnsembleMessage,
 };
 use bevy_ticked::tick::CurrentTick;
+use bevy_ticked::tick_types::{Tick, Ticks};
 
 /// How many ticks a client may stay between "sent a snapshot" and "said it loaded" before the
 /// host stops keeping the tracker for it.
@@ -20,11 +21,11 @@ use bevy_ticked::tick::CurrentTick;
 /// host ran out of memory. A minute at 64 Hz is far longer than any join that is going to
 /// finish; a client that loads after it is caught up from the current tick and is the one
 /// with the gap.
-pub const PENDING_JOIN_WINDOW_TICKS: u64 = 4096;
+pub const PENDING_JOIN_WINDOW_TICKS: Ticks = Ticks(4096);
 
 pub fn tracker_has_actions_for_player<A>(
     tracker: &ActionTracker<A>,
-    tick: u64,
+    tick: Tick,
     player_uuid: u128,
 ) -> bool {
     tracker
@@ -68,10 +69,10 @@ pub fn broadcast_buffered_authoritative_actions_to_loaded_clients<A: LockstepAct
         let start_tick = pending_client_joins
             .0
             .get(&loaded_client)
-            .map(|snapshot_tick| snapshot_tick.saturating_add(1))
-            .unwrap_or_else(|| current_tick.0 + 1);
+            .map(|snapshot_tick| snapshot_tick.saturating_add(Ticks::ONE))
+            .unwrap_or_else(|| current_tick.0.next());
 
-        for tick in start_tick..=end_tick {
+        for tick in start_tick.through(end_tick) {
             // A tick with no entry is an *empty* tick, not an absent one, and the difference is a
             // hung session: a host's first `host_tick_buffer` ticks have no entries at all,
             // because its own flush schedules that far ahead. Skipping them left a client whose
@@ -136,7 +137,7 @@ pub fn broadcast_authoritative_actions<A: LockstepAction>(
         return;
     }
 
-    for tick in (last_broadcast_tick.0 + 1)..=current_tick.0 {
+    for tick in last_broadcast_tick.0.next().through(current_tick.0) {
         // An absent entry is an *empty* tick, not an unfinished one. The host simulated this tick,
         // so by definition nothing was outstanding for it — and its own first `host_tick_buffer`
         // ticks have no entries at all, because its flush schedules that far ahead. Breaking here
@@ -332,7 +333,7 @@ pub fn cleanup_old_tracker_entries<A: LockstepAction>(
             |policy| policy.trust_window,
         )
     } else {
-        0
+        Ticks::ZERO
     };
     let floor = current_tick.0.saturating_sub(retained);
     let oldest_kept = current_tick.0.saturating_sub(PENDING_JOIN_WINDOW_TICKS);
@@ -352,7 +353,7 @@ pub fn cleanup_old_tracker_entries<A: LockstepAction>(
         .values()
         .copied()
         .min()
-        .map(|snapshot_tick| snapshot_tick + 1)
+        .map(|snapshot_tick| snapshot_tick.next())
         .unwrap_or(floor)
         .min(floor);
     tracker.ticks.retain(|tick, _| *tick >= min_keep);
@@ -367,16 +368,16 @@ mod tests {
     fn a_tick_nobody_acted_on_still_counts_as_received() {
         let mut tracker = ActionTracker::<u8>::default();
 
-        apply_authoritative_tick(&mut tracker, &AuthoritativeTick::new(7, Vec::new()));
+        apply_authoritative_tick(&mut tracker, &AuthoritativeTick::new(Tick(7), Vec::new()));
 
         assert!(
-            tracker.ticks.contains_key(&7),
+            tracker.ticks.contains_key(&Tick(7)),
             "an empty authoritative tick has to be distinguishable from one that never arrived — \
              the client's pause check reads exactly this key, and would otherwise wait for ever \
              on a tick the host has already simulated past"
         );
         assert!(
-            tracker.ticks[&7].is_empty(),
+            tracker.ticks[&Tick(7)].is_empty(),
             "registering the tick must not invent an actor for it"
         );
     }
@@ -387,13 +388,13 @@ mod tests {
         // host's catch-up. While this merged, the overlap doubled every action in it on the
         // joining client: two buildings from one placement, two charges from one purchase.
         let mut tracker = ActionTracker::<u8>::default();
-        let authoritative = AuthoritativeTick::new(5, vec![(11, vec![1, 2])]);
+        let authoritative = AuthoritativeTick::new(Tick(5), vec![(11, vec![1, 2])]);
 
         apply_authoritative_tick(&mut tracker, &authoritative);
         apply_authoritative_tick(&mut tracker, &authoritative);
 
         assert_eq!(
-            tracker.ticks[&5][&11],
+            tracker.ticks[&Tick(5)][&11],
             vec![1, 2],
             "the host's ruling on a tick is complete, so hearing it twice must not double it"
         );
@@ -405,12 +406,12 @@ mod tests {
 
         apply_authoritative_tick(
             &mut tracker,
-            &AuthoritativeTick::new(3, vec![(11, vec![1, 2]), (22, Vec::new())]),
+            &AuthoritativeTick::new(Tick(3), vec![(11, vec![1, 2]), (22, Vec::new())]),
         );
 
-        assert_eq!(tracker.ticks[&3][&11], vec![1, 2]);
+        assert_eq!(tracker.ticks[&Tick(3)][&11], vec![1, 2]);
         assert!(
-            tracker.ticks[&3].contains_key(&22),
+            tracker.ticks[&Tick(3)].contains_key(&22),
             "a participant who acted on nothing is still present for the tick"
         );
     }

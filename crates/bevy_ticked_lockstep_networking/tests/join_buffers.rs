@@ -11,6 +11,7 @@ mod common;
 
 use bevy::prelude::*;
 use bevy_ensemble_loopback::{Link, LoopbackNetwork, PeerId};
+use bevy_ticked::prelude::Ticks;
 use bevy_ticked_lockstep_networking::testing::{
     actions_at, client_tick_buffer, host_tick_buffer, participant_joined_at, push_action,
 };
@@ -22,8 +23,8 @@ const CLIENT_PEER: PeerId = PeerId(1);
 
 fn config(host_tick_buffer: u64, client_tick_buffer: u64) -> LockstepConfig {
     LockstepConfig {
-        host_tick_buffer,
-        client_tick_buffer,
+        host_tick_buffer: Ticks(host_tick_buffer),
+        client_tick_buffer: Ticks(client_tick_buffer),
         ..default()
     }
 }
@@ -33,15 +34,15 @@ fn assert_session_runs(net: &mut LoopbackNetwork, frames: usize) {
     let host_was = tick(net, HOST_PEER);
     let client_was = tick(net, CLIENT_PEER);
     net.run(frames);
-    let wanted = frames as u64 / 2;
+    let wanted = Ticks(frames as u64 / 2);
     assert!(
         tick(net, HOST_PEER) >= host_was + wanted,
-        "the host advanced {} ticks in {frames} frames: the session is stalled",
+        "the host advanced {} in {frames} frames: the session is stalled",
         tick(net, HOST_PEER) - host_was
     );
     assert!(
         tick(net, CLIENT_PEER) >= client_was + wanted,
-        "the client advanced {} ticks in {frames} frames: the session is stalled",
+        "the client advanced {} in {frames} frames: the session is stalled",
         tick(net, CLIENT_PEER) - client_was
     );
     assert!(
@@ -82,7 +83,7 @@ fn a_client_carrying_a_large_buffer_from_a_previous_session_can_join_a_lan_host(
     joiner
         .world_mut()
         .resource_mut::<LockstepConfig>()
-        .client_tick_buffer = 48;
+        .client_tick_buffer = Ticks(48);
     let host_tick_when_added = tick(&net, HOST_PEER);
     net.add_client(2, joiner);
 
@@ -91,7 +92,7 @@ fn a_client_carrying_a_large_buffer_from_a_previous_session_can_join_a_lan_host(
     });
     let joined_at = participant_joined_at(net.app(HOST_PEER), 2).expect("joined");
     assert!(
-        joined_at >= host_tick_when_added + 1 + 48,
+        joined_at >= host_tick_when_added.next() + Ticks(48),
         "joined_at_tick {joined_at} leaves the joiner less than its own 48-tick buffer to get \
          its first actions in (the host was at {host_tick_when_added} when it connected)"
     );
@@ -116,7 +117,7 @@ fn adaptive_state_is_reset_with_the_lobby() {
         &mut net,
         500,
         "the tuner growing the client's buffer",
-        |net| client_tick_buffer(net.app(CLIENT_PEER)) > 6,
+        |net| client_tick_buffer(net.app(CLIENT_PEER)) > Ticks(6),
     );
     assert!(
         net.app(CLIENT_PEER)
@@ -133,12 +134,12 @@ fn adaptive_state_is_reset_with_the_lobby() {
     let client = net.app(CLIENT_PEER);
     assert_eq!(
         client_tick_buffer(client),
-        6,
+        Ticks(6),
         "the buffer the satellite link grew is still in force in a lobby that no longer exists"
     );
     assert_eq!(
         host_tick_buffer(client),
-        6,
+        Ticks(6),
         "the host-side buffer is part of the same config and goes back with it"
     );
     assert_eq!(
@@ -162,7 +163,7 @@ fn host_tick_buffer_zero_does_not_deadlock() {
 
     assert_eq!(
         host_tick_buffer(net.app(HOST_PEER)),
-        1,
+        Ticks(1),
         "a zero grace window asks a client's first batch to arrive before it can have been sent"
     );
     net.run(100);
@@ -178,18 +179,18 @@ fn the_host_pays_no_input_lag_for_its_own_actions() {
     let counter_before = counter(&net, HOST_PEER);
 
     push_action::<Action>(net.app_mut(HOST_PEER), 3);
-    run_until_tick(&mut net, HOST_PEER, before + 1, 10);
+    run_until_tick(&mut net, HOST_PEER, before.next(), 10);
 
     assert_eq!(
-        actions_at::<Action>(net.app(HOST_PEER), before + 1),
+        actions_at::<Action>(net.app(HOST_PEER), before.next()),
         vec![3],
         "the action was scheduled for some later tick, or lost"
     );
     assert_eq!(
         counter(&net, HOST_PEER),
         counter_before + 1 + 3,
-        "tick {} ran without the action pushed before it",
-        before + 1
+        "{} ran without the action pushed before it",
+        before.next()
     );
 
     // And the client applied it at the same tick, from the authoritative broadcast.

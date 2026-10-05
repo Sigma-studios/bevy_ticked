@@ -56,13 +56,13 @@ fn x(app: &mut App) -> f32 {
 fn interpolation_never_feeds_the_blend_back_into_the_simulation() {
     let mut app = app();
     let mut frames = 0;
-    while app.world().resource::<CurrentTick>().0 < 99 {
+    while app.world().resource::<CurrentTick>().0 < Tick(99) {
         app.update();
         frames += 1;
         assert!(frames < 1000, "the clock never reached tick 99");
     }
     // A frame can run two ticks, so land on 99 or 100 and expect that many units.
-    let ticks = app.world().resource::<CurrentTick>().0 as f32;
+    let ticks = app.world().resource::<CurrentTick>().0.0 as f32;
 
     // What the simulation holds, not what the renderer was shown.
     let mut q = app.world_mut().query::<&TickedInterpolation>();
@@ -197,9 +197,9 @@ fn stepping_app() -> App {
         .add_systems(
             TickedLoop,
             (
-                (|tick: Res<CurrentTick>, mut p: ResMut<Passes>| p.0.push(("pre", tick.0)))
+                (|tick: Res<CurrentTick>, mut p: ResMut<Passes>| p.0.push(("pre", tick.0.0)))
                     .in_set(TickedSystems::PreTick),
-                (|tick: Res<CurrentTick>, mut p: ResMut<Passes>| p.0.push(("post", tick.0)))
+                (|tick: Res<CurrentTick>, mut p: ResMut<Passes>| p.0.push(("post", tick.0.0)))
                     .in_set(TickedSystems::PostTick),
             ),
         );
@@ -224,7 +224,7 @@ fn a_manual_step_runs_pre_and_post_tick() {
         "a manual step used to advance the tick around the loop, so nothing in PreTick or \
          PostTick ran; saw {passes:?}"
     );
-    assert_eq!(app.world().resource::<CurrentTick>().0, 1);
+    assert_eq!(app.world().resource::<CurrentTick>().0, Tick(1));
 }
 
 #[test]
@@ -235,7 +235,7 @@ fn a_manual_rewind_runs_the_loop_without_advancing() {
         app.world_mut().write_message(StepForward);
         app.update();
     }
-    assert_eq!(app.world().resource::<CurrentTick>().0, 3);
+    assert_eq!(app.world().resource::<CurrentTick>().0, Tick(3));
     app.world_mut().resource_mut::<Passes>().0.clear();
 
     app.world_mut().write_message(StepBackward);
@@ -248,7 +248,7 @@ fn a_manual_rewind_runs_the_loop_without_advancing() {
         "after a rewind the loop runs once at the restored tick and the tick does not advance; \
          saw {passes:?}"
     );
-    assert_eq!(app.world().resource::<CurrentTick>().0, 2);
+    assert_eq!(app.world().resource::<CurrentTick>().0, Tick(2));
     assert!(
         (x(&mut app) - 2.0).abs() < 1e-6,
         "the world is the restored tick's"
@@ -264,7 +264,7 @@ fn a_manual_step_while_paused_still_advances() {
     app.update();
     app.world_mut().write_message(StepForward);
     app.update();
-    assert_eq!(app.world().resource::<CurrentTick>().0, 1);
+    assert_eq!(app.world().resource::<CurrentTick>().0, Tick(1));
     assert!(
         !app.world().contains_resource::<StepOnce>(),
         "the step marker is gone once the step has run"

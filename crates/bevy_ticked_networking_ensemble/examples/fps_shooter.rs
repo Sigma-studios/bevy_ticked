@@ -170,7 +170,7 @@ fn main() {
         .add_plugins((TickedInterpolationPlugin, TickedSmoothingPlugin))
         // The local player's input, sampled once per tick inside the loop and filed for the
         // tick about to run: a keypress costs no extra frame, and a frame that runs two
-        // ticks samples twice. It used to be an `Update` system stamping `tick + 1`.
+        // ticks samples twice. It used to be an `Update` system stamping `tick.next()`.
         .add_plugins(TickedInputPlugin::<PlayerInput>::new(capture_local_input))
         .init_resource::<LocalLook>()
         // Register networked components. The wire name is the type's identity on the

@@ -32,13 +32,6 @@ fn guard() -> SourceGuard {
                 expires: None,
             },
             Exception {
-                path: "src/adaptive_buffer.rs",
-                needle: "SECONDS_PER_TICK",
-                reason: "turns a measured round trip into a number of ticks of input buffer; \
-                         runs in Update and reads a measurement, never the tick's state",
-                expires: None,
-            },
-            Exception {
                 path: "src/checksum_exchange.rs",
                 needle: "Instant::now",
                 reason: "a #[cfg(test)] helper stamps `received_at` on a synthetic checksum \

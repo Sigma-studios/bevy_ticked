@@ -265,7 +265,7 @@ fn keep_the_world(world: &mut World) {
     }
     if let Some(mut lifetimes) = world.get_resource_mut::<TrackedEntityLifetimes>() {
         for id in &held {
-            lifetimes.note_alive(0, id.0);
+            lifetimes.note_alive(bevy_ticked::tick_types::Tick::ZERO, id.0);
         }
     }
 }
@@ -306,9 +306,19 @@ fn leave_role(world: &mut World) {
 /// A snapshot carried from an exit door to the join door of the same transition. Never outlives
 /// the transition: `enter_client` takes it, and nothing else writes it.
 #[derive(Resource, Default)]
-struct CarriedSnapshot(Option<(Option<SnapshotPacket>, Option<u64>)>);
+struct CarriedSnapshot(
+    Option<(
+        Option<SnapshotPacket>,
+        Option<bevy_ticked::tick_types::Tick>,
+    )>,
+);
 
-fn take_pending(world: &mut World) -> (Option<SnapshotPacket>, Option<u64>) {
+fn take_pending(
+    world: &mut World,
+) -> (
+    Option<SnapshotPacket>,
+    Option<bevy_ticked::tick_types::Tick>,
+) {
     let packet = world
         .get_resource_mut::<PendingSnapshot>()
         .and_then(|mut pending| pending.0.take());

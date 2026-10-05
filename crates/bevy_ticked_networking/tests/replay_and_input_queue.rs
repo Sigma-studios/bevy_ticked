@@ -67,7 +67,7 @@ fn client() -> App {
 
 /// A host-shaped snapshot for `tick`, holding exactly the state the client already
 /// predicted -- so a comparison, if there were one, would find nothing to correct.
-fn snapshot_matching(client: &mut App, tick: u64) -> SnapshotPacket {
+fn snapshot_matching(client: &mut App, tick: Tick) -> SnapshotPacket {
     let registry = client.world().resource::<TickedComponentRegistry>().clone();
     registry.capture_all(client.world_mut(), tick);
     let mut packet = SnapshotPacket::full(tick, build_full_body(client.world_mut(), tick));
@@ -76,7 +76,7 @@ fn snapshot_matching(client: &mut App, tick: u64) -> SnapshotPacket {
 }
 
 /// A host-shaped packet for `tick` that puts body 1 at `pos`, whatever the client predicted.
-fn snapshot_placing(app: &mut App, tick: u64, pos: i32) -> SnapshotPacket {
+fn snapshot_placing(app: &mut App, tick: Tick, pos: i32) -> SnapshotPacket {
     let mut packet = snapshot_matching(app, tick);
     let index = app
         .world()
@@ -89,7 +89,7 @@ fn snapshot_placing(app: &mut App, tick: u64, pos: i32) -> SnapshotPacket {
     packet
 }
 
-fn deliver(app: &mut App, tick: u64) {
+fn deliver(app: &mut App, tick: Tick) {
     let snapshot = snapshot_matching(app, tick);
     app.world_mut().trigger(ReceivedNetworkSnapshot(snapshot));
 }
@@ -105,7 +105,7 @@ fn sync(app: &mut App) {
     app.update();
     app.world_mut()
         .spawn((TickTrackedEntity(1), Pos(0), ReplicationMode::Predicted));
-    deliver(app, 0);
+    deliver(app, Tick::ZERO);
     app.update();
 }
 
@@ -131,7 +131,7 @@ fn a_snapshot_arriving_before_the_client_role_is_ignored() {
         q.iter(app.world()).next().copied()
     };
     // A snapshot that would move the body, from a peer we have not agreed to follow.
-    let snapshot = snapshot_placing(&mut app, 0, 999);
+    let snapshot = snapshot_placing(&mut app, Tick(0), 999);
     app.world_mut().trigger(ReceivedNetworkSnapshot(snapshot));
     app.update();
 
@@ -151,7 +151,7 @@ fn an_ignored_snapshot_is_not_applied_later() {
     let mut app = client_with_role(false);
     app.update();
 
-    let snapshot = snapshot_placing(&mut app, 0, 999);
+    let snapshot = snapshot_placing(&mut app, Tick(0), 999);
     app.world_mut().trigger(ReceivedNetworkSnapshot(snapshot));
     app.update();
 
@@ -175,14 +175,14 @@ fn the_initial_sync_is_marked_and_later_corrections_are_not() {
     let mut app = client();
     app.update();
 
-    deliver(&mut app, 0);
+    deliver(&mut app, Tick::ZERO);
     app.update();
     let first = applied(&mut app);
     assert_eq!(first.len(), 1, "one snapshot applied, saw {}", first.len());
     assert!(first[0].first, "the initial sync must say so");
 
     let current = app.world().resource::<CurrentTick>().0;
-    deliver(&mut app, current.saturating_sub(2));
+    deliver(&mut app, current.saturating_sub(Ticks(2)));
     app.update();
     let later = applied(&mut app);
     assert_eq!(later.len(), 1);
@@ -198,12 +198,12 @@ fn the_initial_sync_is_marked_and_later_corrections_are_not() {
 fn the_input_queue_is_pruned_to_the_history_window() {
     let mut app = client();
     sync(&mut app);
-    app.insert_resource(HistoryBufferTicks(4));
+    app.insert_resource(HistoryBufferTicks(Ticks(4)));
 
     for _ in 0..40 {
         let tick = app.world().resource::<CurrentTick>().0;
         app.world_mut().resource_mut::<InputQueue<Input>>().insert(
-            tick + 1,
+            tick.next(),
             LOCAL,
             Input { forward: true },
         );
@@ -215,7 +215,7 @@ fn the_input_queue_is_pruned_to_the_history_window() {
     let oldest = queue.inputs.keys().min().copied().unwrap();
 
     assert!(
-        oldest >= current.saturating_sub(4),
+        oldest >= current.saturating_sub(Ticks(4)),
         "tick {oldest} is older than the {current}-4 window and should have gone"
     );
     assert!(
@@ -235,7 +235,7 @@ fn the_input_queue_is_pruned_to_the_history_window() {
 #[test]
 fn pruning_inputs_on_the_history_window_cannot_starve_a_replay() {
     let mut app = client();
-    app.insert_resource(HistoryBufferTicks(16));
+    app.insert_resource(HistoryBufferTicks(Ticks(16)));
     sync(&mut app);
     for _ in 0..40 {
         app.update();
@@ -250,16 +250,16 @@ fn pruning_inputs_on_the_history_window_cannot_starve_a_replay() {
         .unwrap();
 
     assert!(
-        current.saturating_sub(oldest_state) <= 17,
+        current.since(oldest_state) <= Ticks(17),
         "history is bounded to the retention window"
     );
     assert!(
-        !registry.has_tick_captured(app.world(), oldest_state.saturating_sub(1)),
+        !registry.has_tick_captured(app.world(), oldest_state.prev()),
         "so an input for a tick older than the window is already unusable"
     );
     let queue = app.world().resource::<InputQueue<Input>>();
     assert!(
-        queue.inputs.keys().min().copied().unwrap_or(0) <= oldest_state,
+        queue.inputs.keys().min().copied().unwrap_or(Tick::ZERO) <= oldest_state,
         "and everything a replay could still reach is retained"
     );
 }
@@ -278,7 +278,10 @@ fn an_identical_snapshot_costs_no_rollback_and_no_replay() {
         .world()
         .resource::<ClientTickBuffer>()
         .target_replay_distance;
-    assert!(lead >= 2, "the client is supposed to lead the server");
+    assert!(
+        lead >= Ticks(2),
+        "the client is supposed to lead the server"
+    );
 
     let mut per_frame = Vec::new();
     for _ in 0..8 {
@@ -314,7 +317,7 @@ fn a_differing_snapshot_still_replays() {
     app.world_mut().resource_mut::<SimRuns>().0 = 0;
     app.update();
     assert!(
-        app.world().resource::<SimRuns>().0 >= lead as u32,
+        app.world().resource::<SimRuns>().0 >= lead.0 as u32,
         "a correction replays the lead"
     );
     assert_eq!(pos(&mut app), Some(Pos(77)));
@@ -327,7 +330,11 @@ fn the_client_already_holds_what_a_comparison_would_need() {
     let mut app = client();
     sync(&mut app);
 
-    let target = app.world().resource::<CurrentTick>().0.saturating_sub(2);
+    let target = app
+        .world()
+        .resource::<CurrentTick>()
+        .0
+        .saturating_sub(Ticks(2));
     assert!(
         app.world()
             .resource::<WorldActions<Pos>>()
@@ -354,21 +361,21 @@ fn a_snapshot_older_than_the_last_applied_one_is_dropped() {
     sync(&mut app);
     applied(&mut app);
 
-    let newer = snapshot_placing(&mut app, 10, 10);
+    let newer = snapshot_placing(&mut app, Tick(10), 10);
     app.world_mut().trigger(ReceivedNetworkSnapshot(newer));
     app.update();
     assert_eq!(pos(&mut app), Some(Pos(10)));
     let tick_after_newer = app.world().resource::<CurrentTick>().0;
 
     // Tick 9 turns up late.
-    let older = snapshot_placing(&mut app, 9, 9);
+    let older = snapshot_placing(&mut app, Tick(9), 9);
     app.world_mut().trigger(ReceivedNetworkSnapshot(older));
     app.update();
 
-    let seen: Vec<u64> = applied(&mut app).iter().map(|s| s.tick).collect();
+    let seen: Vec<Tick> = applied(&mut app).iter().map(|s| s.tick).collect();
     assert_eq!(
         seen,
-        vec![10],
+        vec![Tick(10)],
         "only the newer snapshot should have been applied, saw {seen:?}"
     );
     assert_eq!(
@@ -389,16 +396,16 @@ fn two_snapshots_in_one_frame_keep_the_newest_whichever_came_first() {
     applied(&mut app);
 
     // Newest first, then the straggler, before the tick loop has looked at either.
-    let newer = snapshot_placing(&mut app, 12, 12);
-    let older = snapshot_placing(&mut app, 11, 11);
+    let newer = snapshot_placing(&mut app, Tick(12), 12);
+    let older = snapshot_placing(&mut app, Tick(11), 11);
     app.world_mut().trigger(ReceivedNetworkSnapshot(newer));
     app.world_mut().trigger(ReceivedNetworkSnapshot(older));
     app.update();
 
-    let seen: Vec<u64> = applied(&mut app).iter().map(|s| s.tick).collect();
+    let seen: Vec<Tick> = applied(&mut app).iter().map(|s| s.tick).collect();
     assert_eq!(
         seen,
-        vec![12],
+        vec![Tick(12)],
         "the waiting slot kept the older one: {seen:?}"
     );
     assert_eq!(pos(&mut app), Some(Pos(12)));

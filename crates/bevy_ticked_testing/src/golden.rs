@@ -36,6 +36,7 @@
 use bevy::prelude::*;
 use bevy_ticked::checksum::WorldHash;
 use bevy_ticked::tick::CurrentTick;
+use bevy_ticked::tick_types::Tick;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::path::Path;
@@ -67,7 +68,7 @@ pub trait Trace: Serialize + DeserializeOwned {
 /// `(tick, hash)` samples in tick order — a [`WorldHash`] per sampled tick.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct HashTrace {
-    pub samples: Vec<(u64, u64)>,
+    pub samples: Vec<(Tick, u64)>,
 }
 
 impl Trace for HashTrace {
@@ -134,7 +135,7 @@ impl Trace for HashTrace {
                 .map_err(|error| format!("line {}: bad tick `{tick}`: {error}", index + 1))?;
             let hash = u64::from_str_radix(hash.trim_start_matches("0x"), 16)
                 .map_err(|error| format!("line {}: bad hash `{hash}`: {error}", index + 1))?;
-            samples.push((tick, hash));
+            samples.push((Tick(tick), hash));
         }
         Ok(Self { samples })
     }
@@ -165,7 +166,7 @@ pub fn record_trace<H: WorldHash>(app: &mut App, ticks: u64, every: u64) -> Hash
         let world = app.world_mut();
         let tick = world
             .get_resource::<CurrentTick>()
-            .map_or(frame, |current| current.0);
+            .map_or(Tick(frame), |current| current.0);
         let hash = H::sample(world).value();
         trace.samples.push((tick, hash));
     }

@@ -7,6 +7,7 @@ use bevy_ticked::{
     TickedLoop, TickedSystems,
     session::{PerPeer, SessionAppExt, SessionReset},
     tick::{CurrentTick, HistoryBufferTicks},
+    tick_types::{Tick, Ticks},
 };
 use serde::{Serialize, de::DeserializeOwned};
 
@@ -26,7 +27,7 @@ impl<T> TickedInput for T where T: Serialize + DeserializeOwned + Clone + Send +
 /// Defined here rather than next to the buffer so that the server does not depend on the client
 /// module for a number, and so that the two cannot drift apart without a reader noticing that
 /// the client's constant is spelled in terms of this one.
-pub const MAX_INPUT_LEAD_TICKS: u64 = 64;
+pub const MAX_INPUT_LEAD_TICKS: Ticks = Ticks(64);
 
 /// Stores player inputs indexed by tick and player UUID.
 ///
@@ -43,7 +44,7 @@ pub const MAX_INPUT_LEAD_TICKS: u64 = 64;
 #[derive(Resource)]
 pub struct InputQueue<T: TickedInput> {
     /// tick -> (player_uuid -> input)
-    pub inputs: BTreeMap<u64, BTreeMap<u128, T>>,
+    pub inputs: BTreeMap<Tick, BTreeMap<u128, T>>,
 }
 
 impl<T: TickedInput> Default for InputQueue<T> {
@@ -56,7 +57,7 @@ impl<T: TickedInput> Default for InputQueue<T> {
 
 impl<T: TickedInput> InputQueue<T> {
     /// Store an input for a player at a specific tick.
-    pub fn insert(&mut self, tick: u64, player_uuid: u128, input: T) {
+    pub fn insert(&mut self, tick: Tick, player_uuid: u128, input: T) {
         self.inputs
             .entry(tick)
             .or_default()
@@ -64,12 +65,12 @@ impl<T: TickedInput> InputQueue<T> {
     }
 
     /// Get a specific player's input at a specific tick.
-    pub fn get(&self, tick: u64, player_uuid: u128) -> Option<&T> {
+    pub fn get(&self, tick: Tick, player_uuid: u128) -> Option<&T> {
         self.inputs.get(&tick)?.get(&player_uuid)
     }
 
     /// Get all players' inputs at a specific tick, in ascending uuid order.
-    pub fn at_tick(&self, tick: u64) -> Option<&BTreeMap<u128, T>> {
+    pub fn at_tick(&self, tick: Tick) -> Option<&BTreeMap<u128, T>> {
         self.inputs.get(&tick)
     }
 
@@ -80,7 +81,7 @@ impl<T: TickedInput> InputQueue<T> {
     /// With nothing, a remote body stopped dead at every replay boundary and snapped back when
     /// the snapshot arrived. `None` only if the player has never sent an input at or before
     /// `tick`.
-    pub fn get_or_last(&self, tick: u64, player_uuid: u128) -> Option<&T> {
+    pub fn get_or_last(&self, tick: Tick, player_uuid: u128) -> Option<&T> {
         self.inputs
             .range(..=tick)
             .rev()
@@ -95,7 +96,7 @@ impl<T: TickedInput> InputQueue<T> {
     /// background, a frozen machine whose connection the transport still keeps alive — who would
     /// otherwise go on running, or firing, for as long as they were away. The age is what tells
     /// the two apart.
-    pub fn get_or_last_with_tick(&self, tick: u64, player_uuid: u128) -> Option<(u64, &T)> {
+    pub fn get_or_last_with_tick(&self, tick: Tick, player_uuid: u128) -> Option<(Tick, &T)> {
         self.inputs
             .range(..=tick)
             .rev()
@@ -104,7 +105,7 @@ impl<T: TickedInput> InputQueue<T> {
 
     /// Every player's input at `tick`, each falling back to their newest earlier one, in
     /// ascending uuid order. Players with nothing at or before `tick` are absent.
-    pub fn at_tick_or_last(&self, tick: u64) -> BTreeMap<u128, T> {
+    pub fn at_tick_or_last(&self, tick: Tick) -> BTreeMap<u128, T> {
         let mut out: BTreeMap<u128, T> = BTreeMap::new();
         for (_, players) in self.inputs.range(..=tick).rev() {
             for (player, input) in players {
@@ -135,7 +136,7 @@ impl<T: TickedInput> InputQueue<T> {
     }
 
     /// Remove all inputs before a given tick (cleanup old history).
-    pub fn prune_before(&mut self, tick: u64) {
+    pub fn prune_before(&mut self, tick: Tick) {
         self.inputs = self.inputs.split_off(&tick);
     }
 }
@@ -204,7 +205,7 @@ fn prune_input_queue<T: TickedInput>(
     mut queue: ResMut<InputQueue<T>>,
 ) {
     let oldest = tick.0.saturating_sub(buffer.0);
-    if oldest > 0 {
+    if oldest > Tick::ZERO {
         queue.prune_before(oldest);
     }
 }
@@ -219,13 +220,26 @@ mod tests {
     #[test]
     fn the_newest_input_comes_with_its_tick() {
         let mut queue = InputQueue::<Press>::default();
-        queue.insert(10, 1, Press(1));
-        queue.insert(10, 2, Press(2));
-        queue.insert(30, 2, Press(3));
+        queue.insert(Tick(10), 1, Press(1));
+        queue.insert(Tick(10), 2, Press(2));
+        queue.insert(Tick(30), 2, Press(3));
 
-        assert_eq!(queue.get_or_last_with_tick(27, 1), Some((10, &Press(1))));
-        assert_eq!(queue.get_or_last_with_tick(40, 2), Some((30, &Press(3))));
-        assert_eq!(queue.get_or_last_with_tick(29, 2), Some((10, &Press(2))));
-        assert_eq!(queue.get_or_last_with_tick(9, 1), None, "nothing before it");
+        assert_eq!(
+            queue.get_or_last_with_tick(Tick(27), 1),
+            Some((Tick(10), &Press(1)))
+        );
+        assert_eq!(
+            queue.get_or_last_with_tick(Tick(40), 2),
+            Some((Tick(30), &Press(3)))
+        );
+        assert_eq!(
+            queue.get_or_last_with_tick(Tick(29), 2),
+            Some((Tick(10), &Press(2)))
+        );
+        assert_eq!(
+            queue.get_or_last_with_tick(Tick(9), 1),
+            None,
+            "nothing before it"
+        );
     }
 }

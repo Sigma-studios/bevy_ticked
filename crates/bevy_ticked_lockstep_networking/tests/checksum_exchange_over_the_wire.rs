@@ -23,7 +23,7 @@ use bevy::time::TimeUpdateStrategy;
 use bevy_ensemble::{EnsemblePlugin, LocalMultiplayerPlayerId, PlayerUUID};
 use bevy_ensemble_loopback::{LoopbackNetwork, LoopbackTransportPlugin};
 use bevy_ticked::prelude::{
-    CurrentTick, TickHoldReason, TickHolds, TickSource, TickedPlugin, TickedSimulation,
+    CurrentTick, Tick, TickHoldReason, TickHolds, TickSource, TickedPlugin, TickedSimulation, Ticks,
 };
 use bevy_ticked_lockstep_networking::{
     ActionTracker, ApplyJoinSnapshot, CaptureJoinSnapshot, ChecksumExchangePlugin, ChecksumLog,
@@ -118,8 +118,8 @@ fn peer(uuid: PlayerUUID) -> App {
             LoopbackTransportPlugin,
             LockstepPlugin::<Action, Snapshot> {
                 config: LockstepConfig {
-                    host_tick_buffer: 6,
-                    client_tick_buffer: 6,
+                    host_tick_buffer: Ticks(6),
+                    client_tick_buffer: Ticks(6),
                     ..default()
                 },
                 ..default()
@@ -133,7 +133,7 @@ fn peer(uuid: PlayerUUID) -> App {
         // trails the host by whatever its join cost — so what gets compared is what each recorded
         // *at tick N*, and that needs both of them to have recorded every N.
         .insert_resource(ChecksumLog::<CounterHash> {
-            interval: 1,
+            interval: Ticks(1),
             capacity: 4096,
             samples: Vec::new(),
         })
@@ -165,7 +165,7 @@ fn desync_on(net: &LoopbackNetwork, peer: usize) -> Option<Desync<CounterHash>> 
         .cloned()
 }
 
-fn current_tick(net: &LoopbackNetwork, peer: usize) -> u64 {
+fn current_tick(net: &LoopbackNetwork, peer: usize) -> Tick {
     net.app(bevy_ensemble_loopback::PeerId(peer))
         .world()
         .resource::<CurrentTick>()
@@ -178,7 +178,7 @@ fn two_peers_that_agree_are_never_reported() {
     net.run(300);
 
     assert!(
-        current_tick(&net, 1) > 100,
+        current_tick(&net, 1) > Tick(100),
         "the client has to actually be simulating, or this asserts nothing at all"
     );
     assert!(
@@ -218,7 +218,7 @@ fn a_client_that_diverges_learns_of_it_and_so_does_the_host() {
     );
     assert!(
         on_client.divergence.tick >= poisoned_at,
-        "reported tick {} is before the world was poisoned at {poisoned_at}",
+        "reported {} is before the world was poisoned at {poisoned_at}",
         on_client.divergence.tick
     );
 
@@ -285,13 +285,13 @@ fn a_user_pause_is_not_lifted_by_an_arriving_authoritative_tick() {
         .release(TickHoldReason::Manual);
     net.run(200);
     assert!(
-        current_tick(&net, 1) > paused_at + 50,
+        current_tick(&net, 1) > paused_at + Ticks(50),
         "released, the client runs again ({} -> {})",
         paused_at,
         current_tick(&net, 1)
     );
     assert!(
-        current_tick(&net, 0) > host_while_paused + 50,
+        current_tick(&net, 0) > host_while_paused + Ticks(50),
         "and the host with it"
     );
 }

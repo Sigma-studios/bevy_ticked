@@ -91,7 +91,7 @@ fn pos(app: &App, id: u64) -> i64 {
         .0
 }
 
-fn delay_on(app: &App) -> u64 {
+fn delay_on(app: &App) -> Ticks {
     app.world().resource::<InterpolationDelay>().0
 }
 
@@ -156,7 +156,7 @@ fn a_remote_body_is_never_simulated_with_zero_input() {
 
     let truth = pos(net.app(host), a_body);
     let behind = truth - last;
-    let delay = delay_on(net.app(b)) as i64;
+    let delay = delay_on(net.app(b)).0 as i64;
     assert!(
         (0..=delay + 4).contains(&behind),
         "B shows A's body at {last}, the host has it at {truth}: {behind} behind, expected \
@@ -168,7 +168,7 @@ fn a_remote_body_is_never_simulated_with_zero_input() {
 /// What every interpolated entity was set to after each snapshot's replay, by the tick it was
 /// set from: `(display tick, tracked id, Pos)`.
 #[derive(Resource, Default)]
-struct Restored(Vec<(u64, u64, i64)>);
+struct Restored(Vec<(Tick, u64, i64)>);
 
 /// Reads the interpolated entities right after the restore, still inside `PreTick`, before the
 /// tick moves them by one step of simulation.
@@ -232,7 +232,7 @@ fn an_interpolated_entity_is_never_replayed() {
     }
 
     let restored = std::mem::take(&mut net.world_mut(b).resource_mut::<Restored>().0);
-    let of_a: Vec<&(u64, u64, i64)> = restored.iter().filter(|(_, id, _)| *id == a_body).collect();
+    let of_a: Vec<&(Tick, u64, i64)> = restored.iter().filter(|(_, id, _)| *id == a_body).collect();
     assert!(
         of_a.len() >= 48,
         "the probe saw A's body restored {} times in 64 frames",
@@ -240,7 +240,8 @@ fn an_interpolated_entity_is_never_replayed() {
     );
     for (display, id, shown) in of_a {
         // The newest record at or before, as the plugin does; on a cable every tick has one.
-        let truth = (0..=*display)
+        let truth = Tick::ZERO
+            .through(*display)
             .rev()
             .take(4)
             .find_map(|tick| component_at::<Pos>(net.app(host), *id, tick))
@@ -284,7 +285,7 @@ fn an_interpolated_entity_is_drawn_between_the_two_latest_authoritative_states_w
     assert!(largest_step > 0.5, "the drawn transform never moved");
 
     let truth = pos(net.app(host), a_body) as f32;
-    let delay = delay_on(net.app(b)) as f32;
+    let delay = delay_on(net.app(b)).0 as f32;
     let lag = truth - last;
     assert!(
         (delay - 1.0..=delay + 3.0).contains(&lag),
@@ -328,7 +329,7 @@ fn a_predicted_remote_body_holds_its_last_input_during_replay() {
         let ticks = now.0 - last.0;
         let moved = now.1 - last.1;
         assert_eq!(
-            moved, ticks as i64,
+            moved, ticks.0 as i64,
             "frame {frame}: B ran {ticks} tick(s) and its predicted copy of A's body moved \
              {moved}; with A's last input held it moves once per tick, replay or not"
         );
@@ -436,9 +437,9 @@ fn relayed_inputs_cover_the_first_margin_of_the_replay() {
     );
     // The margin is the host's newest measurement; the relayed set travelled a frame or two
     // earlier, so allow that much.
-    let floor = applied as i64 + margin - 2;
+    let floor = applied.0 as i64 + margin - 2;
     assert!(
-        newest as i64 >= floor,
+        newest.0 as i64 >= floor,
         "B holds A's inputs up to tick {newest}; the snapshot tick is {applied} and A's margin \
          {margin}, so at least tick {floor} should have been relayed"
     );
@@ -629,7 +630,7 @@ fn remote_bodies_no_longer_snap_at_every_snapshot() {
     for frame in 0..100 {
         press(&mut net, a, Input::RIGHT);
         let now = shown_x(net.app(b), a_body);
-        let ticks = (tick(net.app(b)) - last_tick).max(1) as f32;
+        let ticks = (tick(net.app(b)) - last_tick).max(Ticks::ONE).0 as f32;
         let per_tick = (now - last).abs() / ticks;
         *steps.entry(per_tick.round() as i64).or_default() += 1;
         if per_tick > largest_per_tick {
@@ -665,27 +666,35 @@ fn remote_bodies_no_longer_snap_at_every_snapshot() {
 #[test]
 fn get_or_last_holds_the_last_known_input() {
     let mut queue = InputQueue::<Input>::default();
-    queue.insert(3, 7, Input::RIGHT);
+    queue.insert(Tick(3), 7, Input::RIGHT);
     assert_eq!(
-        queue.get_or_last(7, 7),
+        queue.get_or_last(Tick(7), 7),
         Some(&Input::RIGHT),
         "tick 7 falls back to tick 3"
     );
     assert_eq!(
-        queue.get_or_last(3, 7),
+        queue.get_or_last(Tick(3), 7),
         Some(&Input::RIGHT),
         "the tick itself"
     );
-    assert_eq!(queue.get_or_last(2, 7), None, "nothing at or before tick 2");
-    assert_eq!(queue.get_or_last(7, 8), None, "another player has nothing");
-    queue.insert(5, 7, Input::LEFT);
     assert_eq!(
-        queue.get_or_last(7, 7),
+        queue.get_or_last(Tick(2), 7),
+        None,
+        "nothing at or before tick 2"
+    );
+    assert_eq!(
+        queue.get_or_last(Tick(7), 8),
+        None,
+        "another player has nothing"
+    );
+    queue.insert(Tick(5), 7, Input::LEFT);
+    assert_eq!(
+        queue.get_or_last(Tick(7), 7),
         Some(&Input::LEFT),
         "the newest earlier one wins"
     );
-    assert_eq!(queue.get_or_last(4, 7), Some(&Input::RIGHT));
-    let all = queue.at_tick_or_last(9);
+    assert_eq!(queue.get_or_last(Tick(4), 7), Some(&Input::RIGHT));
+    let all = queue.at_tick_or_last(Tick(9));
     assert_eq!(all.get(&7), Some(&Input::LEFT));
     assert_eq!(all.len(), 1);
 }

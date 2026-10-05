@@ -79,7 +79,7 @@ fn peer() -> App {
     app
 }
 
-fn capture(app: &mut App, tick: u64) {
+fn capture(app: &mut App, tick: Tick) {
     let registry = app.world().resource::<TickedComponentRegistry>().clone();
     registry.capture_all(app.world_mut(), tick);
 }
@@ -96,7 +96,7 @@ fn world_with_bodies(n: u64) -> App {
         ));
     }
     app.insert_resource(Round(7));
-    capture(&mut app, 1);
+    capture(&mut app, Tick(1));
     app
 }
 
@@ -118,12 +118,12 @@ fn components(app: &mut App) -> Vec<(u64, Pos, Vel, Kind)> {
 fn the_same_world_encodes_to_the_same_bytes_twice() {
     let mut app = world_with_bodies(5);
     let a = encode_packet(&SnapshotPacket::full(
-        1,
-        build_full_body(app.world_mut(), 1),
+        Tick(1),
+        build_full_body(app.world_mut(), Tick(1)),
     ));
     let b = encode_packet(&SnapshotPacket::full(
-        1,
-        build_full_body(app.world_mut(), 1),
+        Tick(1),
+        build_full_body(app.world_mut(), Tick(1)),
     ));
     assert_eq!(
         a, b,
@@ -135,24 +135,24 @@ fn the_same_world_encodes_to_the_same_bytes_twice() {
 fn a_snapshot_round_trips() {
     let mut host = world_with_bodies(4);
     let mut client = peer();
-    let body = build_full_body(host.world_mut(), 1);
-    let packet = SnapshotPacket::full(1, body);
+    let body = build_full_body(host.world_mut(), Tick(1));
+    let packet = SnapshotPacket::full(Tick(1), body);
     let decoded = decode_packet(&encode_packet(&packet)).expect("decodes");
     assert_eq!(decoded, packet);
 
-    let applied = apply_full_body(client.world_mut(), 1, decoded.full_body().unwrap());
+    let applied = apply_full_body(client.world_mut(), Tick(1), decoded.full_body().unwrap());
     assert_eq!(applied.spawned.len(), 4);
     assert!(applied.undecodable.is_empty());
     assert_eq!(components(&mut host), components(&mut client));
     assert_eq!(client.world().resource::<Round>(), &Round(7));
-    assert_eq!(client.world().resource::<CurrentTick>().0, 1);
+    assert_eq!(client.world().resource::<CurrentTick>().0, Tick(1));
 }
 
 #[test]
 fn records_are_sorted_and_indices_follow_the_names() {
     let mut app = world_with_bodies(3);
     let registry = app.world().resource::<TickedComponentRegistry>().clone();
-    let body = build_full_body(app.world_mut(), 1);
+    let body = build_full_body(app.world_mut(), Tick(1));
     let ids: Vec<u64> = body.ids().collect();
     assert_eq!(ids, vec![1, 2, 3]);
     // "Counted" < "Kind" < "Pos" < "Vel"
@@ -172,7 +172,7 @@ fn records_are_sorted_and_indices_follow_the_names() {
 #[test]
 fn entity_major_encoding_has_no_length_prefixes() {
     let mut app = world_with_bodies(1);
-    let body = build_full_body(app.world_mut(), 1);
+    let body = build_full_body(app.world_mut(), Tick(1));
     let record = body.record(1).unwrap();
     let expected = postcard::to_allocvec(&Counted(1)).unwrap().len()
         + postcard::to_allocvec(&Kind(1)).unwrap().len()
@@ -189,9 +189,9 @@ fn entity_major_encoding_has_no_length_prefixes() {
 fn apply_snapshot_decodes_each_component_once() {
     let mut host = world_with_bodies(6);
     let mut client = peer();
-    let body = build_full_body(host.world_mut(), 1);
+    let body = build_full_body(host.world_mut(), Tick(1));
     DECODES.with(|count| count.set(0));
-    apply_full_body(client.world_mut(), 1, &body);
+    apply_full_body(client.world_mut(), Tick(1), &body);
     assert_eq!(
         DECODES.with(|count| count.get()),
         6,
@@ -207,7 +207,7 @@ fn a_duplicate_id_in_a_body_is_applied_once_and_reported() {
     let mut body = FullBody::default();
     body.entities.push(EntityRecord::new(1).with(pos, &Pos(1)));
     body.entities.push(EntityRecord::new(1).with(pos, &Pos(2)));
-    let applied = apply_full_body(client.world_mut(), 1, &body);
+    let applied = apply_full_body(client.world_mut(), Tick(1), &body);
     assert_eq!(applied.duplicate_ids, vec![1]);
     let mut q = client.world_mut().query::<&Pos>();
     assert_eq!(
@@ -228,7 +228,7 @@ fn a_record_with_garbage_bytes_is_reported_not_panicked() {
         entities: vec![record],
         ..Default::default()
     };
-    let applied = apply_full_body(client.world_mut(), 1, &body);
+    let applied = apply_full_body(client.world_mut(), Tick(1), &body);
     assert_eq!(applied.undecodable, vec![(9, pos)]);
 }
 
@@ -246,7 +246,7 @@ fn a_delta_against_an_unknown_baseline_is_dropped_and_a_full_body_asked_for() {
     let mut app = client_app();
     let packet = SnapshotPacket {
         seq: 1,
-        tick: 3,
+        tick: Tick(3),
         your_margin: 2,
         body: SnapshotBody::Delta(DeltaBody {
             baseline_seq: 0,
@@ -287,27 +287,27 @@ fn relayed_inputs_reach_the_clients_queue_and_its_own_are_ignored() {
     body.inputs_ahead = vec![
         RelayedInput {
             player: 9,
-            tick: 5,
+            tick: Tick(5),
             bytes: postcard::to_allocvec(&Input { dx: 1 }).unwrap(),
         },
         RelayedInput {
             player: 7,
-            tick: 5,
+            tick: Tick(5),
             bytes: postcard::to_allocvec(&Input { dx: -1 }).unwrap(),
         },
     ];
     app.world_mut()
-        .trigger(ReceivedNetworkSnapshot(SnapshotPacket::full(2, body)));
+        .trigger(ReceivedNetworkSnapshot(SnapshotPacket::full(Tick(2), body)));
     app.update();
 
     let queue = app.world().resource::<InputQueue<Input>>();
     assert_eq!(
-        queue.get(5, 9),
+        queue.get(Tick(5), 9),
         Some(&Input { dx: 1 }),
         "another player's input arrived"
     );
     assert_eq!(
-        queue.get(5, 7),
+        queue.get(Tick(5), 7),
         None,
         "the local player's own is not overwritten by a relay"
     );
@@ -327,7 +327,7 @@ fn a_client_acks_the_newest_seq_on_its_input() {
     let pos = registry.wire_index_of::<Pos>().unwrap();
     let mut body = FullBody::default();
     body.put(EntityRecord::new(1).with(pos, &Pos(0)));
-    let mut packet = SnapshotPacket::full(0, body);
+    let mut packet = SnapshotPacket::full(Tick(0), body);
     packet.seq = 41;
     app.world_mut().trigger(ReceivedNetworkSnapshot(packet));
     app.update();
@@ -337,7 +337,7 @@ fn a_client_acks_the_newest_seq_on_its_input() {
         let tick = app.world().resource::<CurrentTick>().0;
         app.world_mut()
             .resource_mut::<InputQueue<Input>>()
-            .insert(tick + 1, 7, Input { dx: 1 });
+            .insert(tick.next(), 7, Input { dx: 1 });
         app.update();
     }
     let acks = &app.world().resource::<Acks>().0;
@@ -408,7 +408,7 @@ fn each_packet_carries_the_recipients_seq_and_margin() {
 
     // A margin the host measured too long ago is not a margin: past `MARGIN_STALE_TICKS`
     // the packet says so, and the client leaves its target alone.
-    for _ in 0..(MARGIN_STALE_TICKS + 2) {
+    for _ in 0..(MARGIN_STALE_TICKS + Ticks(2)).0 {
         app.update();
     }
     let last = app

@@ -35,6 +35,7 @@
 use std::collections::BTreeMap;
 
 use bevy::prelude::*;
+use bevy_ticked::tick_types::{Tick, Ticks};
 use bevy_ticked::{
     TickedLoop, registry::TickedComponentRegistry, tracked_entity::TickTrackedEntity,
 };
@@ -69,16 +70,16 @@ pub struct Owner(pub u128);
 /// link, or when the host sends less often than every tick (the send-rate phase sets it to
 /// twice `send_every`).
 #[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
-pub struct InterpolationDelay(pub u64);
+pub struct InterpolationDelay(pub Ticks);
 
 impl Default for InterpolationDelay {
     fn default() -> Self {
-        Self(2)
+        Self(Ticks(2))
     }
 }
 
 /// How far behind its target the display tick may fall before it snaps rather than crawls.
-const CATCH_UP_SNAP: u64 = 16;
+const CATCH_UP_SNAP: Ticks = Ticks(16);
 
 /// The tick an interpolated entity is currently shown at.
 ///
@@ -87,7 +88,7 @@ const CATCH_UP_SNAP: u64 = 16;
 /// applied tick one for one moved a remote body by three ticks in one frame and none in the
 /// next. Only a clock more than [`CATCH_UP_SNAP`] ticks behind snaps.
 #[derive(Resource, Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct DisplayTick(pub Option<u64>);
+pub struct DisplayTick(pub Option<Tick>);
 
 /// The last few snapshots' entity records, verbatim, by tick then id.
 ///
@@ -96,9 +97,9 @@ pub struct DisplayTick(pub Option<u64>);
 /// when a newer arrives.
 #[derive(Resource, Debug, Clone)]
 pub struct AuthoritativeHistory {
-    ticks: BTreeMap<u64, BTreeMap<u64, EntityRecord>>,
+    ticks: BTreeMap<Tick, BTreeMap<u64, EntityRecord>>,
     /// Whole bodies by packet `seq`: what a delta is rebuilt against.
-    bodies: BTreeMap<u32, (u64, crate::snapshot::FullBody)>,
+    bodies: BTreeMap<u32, (Tick, crate::snapshot::FullBody)>,
     /// How many snapshot ticks to keep.
     pub max_ticks: usize,
 }
@@ -124,7 +125,7 @@ impl bevy_ticked::session::SessionReset for AuthoritativeHistory {
 
 impl AuthoritativeHistory {
     /// Remember a snapshot's records at `tick`.
-    pub fn record(&mut self, tick: u64, records: impl IntoIterator<Item = EntityRecord>) {
+    pub fn record(&mut self, tick: Tick, records: impl IntoIterator<Item = EntityRecord>) {
         let by_id: BTreeMap<u64, EntityRecord> = records
             .into_iter()
             .map(|record| (record.id, record))
@@ -136,7 +137,7 @@ impl AuthoritativeHistory {
     }
 
     /// Remember a whole body under the packet `seq` that carried it, for deltas against it.
-    pub fn record_body(&mut self, seq: u32, tick: u64, body: &crate::snapshot::FullBody) {
+    pub fn record_body(&mut self, seq: u32, tick: Tick, body: &crate::snapshot::FullBody) {
         self.bodies.insert(seq, (tick, body.clone()));
         while self.bodies.len() > self.max_ticks {
             self.bodies.pop_first();
@@ -149,7 +150,7 @@ impl AuthoritativeHistory {
     }
 
     /// The record for `id` at the newest tick at or before `tick`, with that tick.
-    pub fn newest_at_or_before(&self, tick: u64, id: u64) -> Option<(u64, &EntityRecord)> {
+    pub fn newest_at_or_before(&self, tick: Tick, id: u64) -> Option<(Tick, &EntityRecord)> {
         self.ticks
             .range(..=tick)
             .rev()
@@ -157,17 +158,17 @@ impl AuthoritativeHistory {
     }
 
     /// Whether a snapshot for `tick` is held.
-    pub fn has_tick(&self, tick: u64) -> bool {
+    pub fn has_tick(&self, tick: Tick) -> bool {
         self.ticks.contains_key(&tick)
     }
 
     /// The record for `id` at exactly `tick`.
-    pub fn at(&self, tick: u64, id: u64) -> Option<&EntityRecord> {
+    pub fn at(&self, tick: Tick, id: u64) -> Option<&EntityRecord> {
         self.ticks.get(&tick)?.get(&id)
     }
 
     /// Every id the snapshot at `tick` named.
-    pub fn ids_at(&self, tick: u64) -> impl Iterator<Item = u64> + '_ {
+    pub fn ids_at(&self, tick: Tick) -> impl Iterator<Item = u64> + '_ {
         self.ticks
             .get(&tick)
             .into_iter()
@@ -175,12 +176,12 @@ impl AuthoritativeHistory {
     }
 
     /// The newest tick held.
-    pub fn newest_tick(&self) -> Option<u64> {
+    pub fn newest_tick(&self) -> Option<Tick> {
         self.ticks.keys().next_back().copied()
     }
 
     /// The oldest tick held.
-    pub fn oldest_tick(&self) -> Option<u64> {
+    pub fn oldest_tick(&self) -> Option<Tick> {
         self.ticks.keys().next().copied()
     }
 
@@ -303,10 +304,10 @@ fn mark_owned_on_role(
 /// further behind than `InterpolationDelay` says, from the first snapshot or the first stall on,
 /// for good. It went unnoticed at the start of a session because the join used to happen while
 /// the host's clock was below two, where the subtraction saturated to the target anyway.
-fn next_display_tick(shown: Option<u64>, target: u64) -> u64 {
+fn next_display_tick(shown: Option<Tick>, target: Tick) -> Tick {
     match shown {
         Some(shown) if shown + CATCH_UP_SNAP < target => target,
-        Some(shown) => (shown + 1).min(target),
+        Some(shown) => shown.next().min(target),
         None => target,
     }
 }
@@ -367,22 +368,30 @@ mod tests {
 
     #[test]
     fn the_display_starts_on_its_target_and_snaps_onto_it() {
-        assert_eq!(next_display_tick(None, 40), 40, "the first of a session");
-        assert_eq!(next_display_tick(Some(39), 40), 40, "one tick per tick");
         assert_eq!(
-            next_display_tick(Some(30), 40),
-            31,
+            next_display_tick(None, Tick(40)),
+            Tick(40),
+            "the first of a session"
+        );
+        assert_eq!(
+            next_display_tick(Some(Tick(39)), Tick(40)),
+            Tick(40),
+            "one tick per tick"
+        );
+        assert_eq!(
+            next_display_tick(Some(Tick(30)), Tick(40)),
+            Tick(31),
             "a small gap is crawled"
         );
         assert_eq!(
-            next_display_tick(Some(10), 40),
-            40,
+            next_display_tick(Some(Tick(10)), Tick(40)),
+            Tick(40),
             "after a stall it snaps onto the target, not two ticks short of it for good"
         );
         // Snapshot every tick: the target moves one a tick, so a display that lands short never
         // catches up. Landing on it, it stays on it.
-        let mut shown = next_display_tick(Some(10), 40);
-        for target in 41..60 {
+        let mut shown = next_display_tick(Some(Tick(10)), Tick(40));
+        for target in Tick(41).through(Tick(59)) {
             shown = next_display_tick(Some(shown), target);
             assert_eq!(shown, target);
         }

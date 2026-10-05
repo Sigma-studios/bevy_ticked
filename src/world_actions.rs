@@ -3,7 +3,7 @@ use std::collections::{HashMap, VecDeque};
 use bevy::ecs::query::QueryState;
 use bevy::prelude::*;
 
-use crate::{registry::TickedComponent, tracked_entity::TickTrackedEntity};
+use crate::{registry::TickedComponent, tick_types::Tick, tracked_entity::TickTrackedEntity};
 
 /// How many emptied per-tick maps are kept for reuse.
 ///
@@ -21,7 +21,7 @@ const POOL_CAPACITY: usize = 128;
 ///
 /// # Why a deque and a pool, not a map of maps
 ///
-/// This used to be a `BTreeMap<u64, HashMap<u64, T>>`, with a fresh `HashMap` built for every
+/// This used to be a `BTreeMap<u64, HashMap<u64, T>>` (tick, then entity id), with a fresh `HashMap` built for every
 /// capture and dropped by every prune. Per registered type, per tick, that was one map
 /// allocation, a rehash as it grew past each power of two, and — because a `BTreeMap` splits and
 /// merges nodes as keys march through it — a node allocation every few ticks on top. Sixty-four
@@ -40,7 +40,7 @@ const POOL_CAPACITY: usize = 128;
 #[derive(Resource)]
 pub struct WorldActions<T: TickedComponent> {
     /// `(tick, state)` in ascending tick order. Ticks need not be contiguous.
-    history: VecDeque<(u64, HashMap<u64, T>)>,
+    history: VecDeque<(Tick, HashMap<u64, T>)>,
     /// Emptied maps waiting to be filled by the next capture.
     pool: Vec<HashMap<u64, T>>,
     /// The capture query, built once and cached. `None` only until the first capture, and
@@ -60,23 +60,23 @@ impl<T: TickedComponent> Default for WorldActions<T> {
 
 impl<T: TickedComponent> WorldActions<T> {
     /// Position of `tick` in `history`, or where it would be inserted.
-    fn position(&self, tick: u64) -> Result<usize, usize> {
+    fn position(&self, tick: Tick) -> Result<usize, usize> {
         self.history.binary_search_by_key(&tick, |(t, _)| *t)
     }
 
     /// Get the state of all entities at a given tick.
-    pub fn at_tick(&self, tick: u64) -> Option<&HashMap<u64, T>> {
+    pub fn at_tick(&self, tick: Tick) -> Option<&HashMap<u64, T>> {
         let index = self.position(tick).ok()?;
         self.history.get(index).map(|(_, state)| state)
     }
 
     /// The oldest tick still retained in history, if any.
-    pub fn oldest_recorded_tick(&self) -> Option<u64> {
+    pub fn oldest_recorded_tick(&self) -> Option<Tick> {
         self.history.front().map(|(tick, _)| *tick)
     }
 
     /// The newest tick recorded in history, if any.
-    pub fn newest_recorded_tick(&self) -> Option<u64> {
+    pub fn newest_recorded_tick(&self) -> Option<Tick> {
         self.history.back().map(|(tick, _)| *tick)
     }
 
@@ -84,17 +84,17 @@ impl<T: TickedComponent> WorldActions<T> {
     ///
     /// Useful for sizing a scrub bar precisely instead of guessing from
     /// `CurrentTick - HISTORY_BUFFER_TICKS`.
-    pub fn recorded_range(&self) -> Option<(u64, u64)> {
+    pub fn recorded_range(&self) -> Option<(Tick, Tick)> {
         Some((self.oldest_recorded_tick()?, self.newest_recorded_tick()?))
     }
 
     /// Iterate over all recorded ticks in ascending order.
-    pub fn recorded_ticks(&self) -> impl DoubleEndedIterator<Item = u64> + '_ {
+    pub fn recorded_ticks(&self) -> impl DoubleEndedIterator<Item = Tick> + '_ {
         self.history.iter().map(|(tick, _)| *tick)
     }
 
     /// Insert state for a specific entity at a specific tick.
-    pub fn insert(&mut self, tick: u64, entity_network_id: u64, component: T) {
+    pub fn insert(&mut self, tick: Tick, entity_network_id: u64, component: T) {
         let index = match self.position(tick) {
             Ok(index) => index,
             Err(index) => {
@@ -115,7 +115,7 @@ impl<T: TickedComponent> WorldActions<T> {
     }
 
     /// Replace all state at a given tick.
-    pub fn set_tick(&mut self, tick: u64, state: HashMap<u64, T>) {
+    pub fn set_tick(&mut self, tick: Tick, state: HashMap<u64, T>) {
         match self.position(tick) {
             Ok(index) => {
                 let old = std::mem::replace(&mut self.history[index].1, state);
@@ -127,7 +127,7 @@ impl<T: TickedComponent> WorldActions<T> {
 
     /// Remove all history after a given tick (exclusive).
     /// Used after rollback to discard invalidated future state.
-    pub fn truncate_after(&mut self, tick: u64) {
+    pub fn truncate_after(&mut self, tick: Tick) {
         while self.history.back().is_some_and(|(t, _)| *t > tick) {
             let (_, state) = self.history.pop_back().expect("checked non-empty");
             self.recycle(state);
@@ -136,7 +136,7 @@ impl<T: TickedComponent> WorldActions<T> {
 
     /// Remove all history before a given tick.
     /// Used to bound memory growth during long sessions.
-    pub fn prune_before(&mut self, tick: u64) {
+    pub fn prune_before(&mut self, tick: Tick) {
         while self.history.front().is_some_and(|(t, _)| *t < tick) {
             let (_, state) = self.history.pop_front().expect("checked non-empty");
             self.recycle(state);

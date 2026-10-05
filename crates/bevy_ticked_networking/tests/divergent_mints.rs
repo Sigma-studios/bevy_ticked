@@ -16,6 +16,7 @@ use bevy::prelude::*;
 use bevy_ticked::lifetimes::TrackedEntityLifetimes;
 use bevy_ticked::registry::TickedComponentRegistry;
 use bevy_ticked::tick::CurrentTick;
+use bevy_ticked::tick_types::Tick;
 use bevy_ticked::tracked_entity::{
     SpawnerSlot, TickTrackedEntity, TrackedIdAllocator, TrackedWorldExt,
 };
@@ -71,7 +72,7 @@ fn peer() -> App {
     app
 }
 
-fn sync(host: &mut App, client: &mut App, tick: u64) {
+fn sync(host: &mut App, client: &mut App, tick: Tick) {
     let registry = host.world().resource::<TickedComponentRegistry>().clone();
     registry.capture_all(host.world_mut(), tick);
     let body = build_full_body(host.world_mut(), tick);
@@ -111,7 +112,7 @@ fn a_spawn_only_the_authority_makes_does_not_shift_the_ids_the_client_predicts()
         "the blast is minted under the same id on both peers, the pad in between notwithstanding"
     );
 
-    sync(&mut host, &mut client, 1);
+    sync(&mut host, &mut client, Tick(1));
     client.world_mut().flush();
 
     assert_eq!(
@@ -149,7 +150,7 @@ fn a_mispredicted_spawn_is_not_decoded_onto_by_what_the_authority_spawned() {
     client.world_mut().flush();
     client.world_mut().entity_mut(guessed).insert(Kept);
 
-    sync(&mut host, &mut client, 1);
+    sync(&mut host, &mut client, Tick(1));
     client.world_mut().flush();
 
     assert!(

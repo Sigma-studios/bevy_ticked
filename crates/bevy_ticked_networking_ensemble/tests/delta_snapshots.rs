@@ -414,7 +414,7 @@ fn a_nacked_client_gets_a_full_body_next() {
     );
     assert!(
         applied_tick(net.app(client))
-            .is_some_and(|t| t + 8 >= bevy_ticked_testing::view::tick(net.app(host))),
+            .is_some_and(|t| t + Ticks(8) >= bevy_ticked_testing::view::tick(net.app(host))),
         "the client is back on the stream"
     );
 }
@@ -450,17 +450,17 @@ fn a_lossy_link_never_leaves_a_client_on_a_stale_baseline() {
         app.add_systems(PreUpdate, walk_right);
     });
     let (host, clients) = (net.host(), net.clients());
-    let mut worst_gap = 0u64;
+    let mut worst_gap = Ticks::ZERO;
     for _ in 0..100 {
         net.run(100);
         for client in &clients {
-            let applied = applied_tick(net.app(*client)).unwrap_or(0);
+            let applied = applied_tick(net.app(*client)).unwrap_or(Tick::ZERO);
             let host_tick = bevy_ticked_testing::view::tick(net.app(host));
-            worst_gap = worst_gap.max(host_tick.saturating_sub(applied));
+            worst_gap = worst_gap.max(host_tick.since(applied));
         }
     }
     assert!(
-        worst_gap < 64,
+        worst_gap < Ticks(64),
         "a client fell {worst_gap} ticks behind the host's snapshots"
     );
     for client in &clients {
@@ -517,7 +517,7 @@ fn walk_right(
     mut queue: ResMut<bevy_ticked_networking::input::InputQueue<Input>>,
 ) {
     if let Some(local) = local {
-        queue.insert(tick.0 + 1, local.0, Input::RIGHT);
+        queue.insert(tick.0.next(), local.0, Input::RIGHT);
     }
 }
 

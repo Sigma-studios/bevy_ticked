@@ -130,7 +130,7 @@ fn keyboard_controls(
     }
     if keys.just_pressed(KeyCode::KeyR) {
         holds.hold(TickHoldReason::Manual);
-        reset.write(ResetToTick(0));
+        reset.write(ResetToTick(Tick::ZERO));
     }
 }
 

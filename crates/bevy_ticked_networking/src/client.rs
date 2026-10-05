@@ -9,6 +9,7 @@ use bevy_ticked::{
     resource_registry::TickedResourceRegistry,
     session::{SessionAppExt, SessionReset, SessionScope},
     tick::{CurrentTick, HistoryBufferTicks, TickHoldReason, TickHolds},
+    tick_types::{Tick, Ticks},
     time::{TickRateDilation, run_tick_schedule},
     tracked_entity::{SpawnerSlot, TickTrackedEntity, TrackedIdAllocator},
 };
@@ -59,12 +60,12 @@ pub(crate) struct PendingSnapshot(pub(crate) Option<SnapshotPacket>);
 /// the clock restarts at zero, so a tick remembered from the last session would
 /// make every snapshot of the next one look old.
 #[derive(Resource, Default, Debug, Clone, Copy)]
-pub struct AppliedSnapshotTick(pub Option<u64>);
+pub struct AppliedSnapshotTick(pub Option<Tick>);
 
 /// The tick of the snapshot waiting to be applied this pass, if any. Read by measurements
 /// that want to sample the prediction for that tick before it is overwritten.
 #[derive(Resource, Default, Debug, Clone, Copy)]
-pub struct PendingSnapshotTick(pub Option<u64>);
+pub struct PendingSnapshotTick(pub Option<Tick>);
 
 /// Set when a delta arrived against a baseline this client no longer holds; the next input
 /// packet asks the host for a full body and clears it.
@@ -105,7 +106,7 @@ pub struct LastAppliedSeq(pub Option<u32>);
 pub struct ClientTickBuffer {
     /// Target replay distance, in ticks: what `current_tick - snapshot_tick`
     /// converges to. See the note on the type — this is not the lead.
-    pub target_replay_distance: u64,
+    pub target_replay_distance: Ticks,
     /// Desired input-arrival margin: inputs should reach the server this many
     /// ticks early, to absorb jitter and once-per-frame delivery.
     ///
@@ -127,7 +128,7 @@ pub struct ClientTickBuffer {
     /// given back. Fed to the target, those reports pulled it down by the whole excess and
     /// the next snapshots snapped the lead forward again — a two-second oscillation, measured
     /// on a satellite link, that never settled.
-    settling_until: u64,
+    settling_until: Tick,
 }
 
 impl Default for ClientTickBuffer {
@@ -136,11 +137,11 @@ impl Default for ClientTickBuffer {
         // ticks of replay distance is a 62 ms round trip — see `seed_from_rtt`
         // for why guessing here is survivable but not free.
         Self {
-            target_replay_distance: 6,
+            target_replay_distance: Ticks(6),
             target_margin: Self::DEFAULT_MARGIN,
             smoothed: 6.0,
             excess_streak: 0,
-            settling_until: 0,
+            settling_until: Tick::ZERO,
         }
     }
 }
@@ -164,9 +165,9 @@ impl ClientTickBuffer {
     /// the whole prediction budget on headroom.
     pub const MAX_MARGIN: i64 = 12;
     /// Never target less replay distance than this.
-    const MIN_TICKS: u64 = 2;
+    const MIN_TICKS: Ticks = Ticks(2);
     /// Cap it so a pathological connection can't make prediction explode.
-    const MAX_TICKS: u64 = crate::input::MAX_INPUT_LEAD_TICKS;
+    const MAX_TICKS: Ticks = crate::input::MAX_INPUT_LEAD_TICKS;
     /// EWMA weight for new observations.
     const SMOOTHING: f64 = 0.1;
 
@@ -186,10 +187,10 @@ impl ClientTickBuffer {
     /// forever, because being behind is self-sustaining.
     fn observe(&mut self, replay_distance: i64, margin: i64) {
         let raw = (replay_distance - margin + self.target_margin)
-            .clamp(Self::MIN_TICKS as i64, Self::MAX_TICKS as i64) as f64;
+            .clamp(Self::MIN_TICKS.0 as i64, Self::MAX_TICKS.0 as i64) as f64;
         self.smoothed = (1.0 - Self::SMOOTHING) * self.smoothed + Self::SMOOTHING * raw;
         self.target_replay_distance =
-            (self.smoothed.round() as u64).clamp(Self::MIN_TICKS, Self::MAX_TICKS);
+            Ticks(self.smoothed.round() as u64).clamp(Self::MIN_TICKS, Self::MAX_TICKS);
     }
 
     /// Size the target from a measured round trip and round-trip jitter, before
@@ -222,9 +223,9 @@ impl ClientTickBuffer {
         self.target_margin =
             (in_ticks(round_trip_jitter) as i64).clamp(Self::MIN_MARGIN, Self::MAX_MARGIN);
         let raw = (in_ticks(round_trip) + self.target_margin as f64)
-            .clamp(Self::MIN_TICKS as f64, Self::MAX_TICKS as f64);
+            .clamp(Self::MIN_TICKS.0 as f64, Self::MAX_TICKS.0 as f64);
         self.smoothed = raw;
-        self.target_replay_distance = raw.round() as u64;
+        self.target_replay_distance = Ticks(raw.round() as u64);
     }
 }
 
@@ -270,7 +271,7 @@ impl<T: TickedInput> Plugin for TickedClientPlugin<T> {
             .world()
             .contains_resource::<bevy_ticked::HistoryWindowChosen>()
         {
-            app.insert_resource(HistoryBufferTicks(2 * ClientTickBuffer::MAX_TICKS));
+            app.insert_resource(HistoryBufferTicks(ClientTickBuffer::MAX_TICKS * 2));
         }
         crate::session::install(app);
         // Everything the client side learns about one link and one clock, registered with the
@@ -405,7 +406,7 @@ fn receive_snapshot(
 #[derive(Message, Clone, Copy, Debug)]
 pub struct SnapshotApplied {
     /// The tick the snapshot described.
-    pub tick: u64,
+    pub tick: Tick,
     /// True for the initial sync, false for a steady-state correction.
     pub first: bool,
 }
@@ -415,7 +416,7 @@ pub struct SnapshotApplied {
 /// more of it. A new snapshot supersedes it.
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AwaitingReplay {
-    pub end_tick: u64,
+    pub end_tick: Tick,
 }
 
 /// Run ticks `from + 1 ..= end_tick`, at most `budget` of them, capturing each. Returns the
@@ -423,12 +424,12 @@ pub struct AwaitingReplay {
 fn replay_ticks(
     world: &mut World,
     registry: &TickedComponentRegistry,
-    from: u64,
-    end_tick: u64,
-    budget: u64,
-) -> u64 {
+    from: Tick,
+    end_tick: Tick,
+    budget: Ticks,
+) -> Tick {
     let stop = end_tick.min(from + budget);
-    for tick in (from + 1)..=stop {
+    for tick in from.next().through(stop) {
         world.resource_mut::<CurrentTick>().0 = tick;
         run_tick_schedule(world, tick, TickedSimulation);
         registry.capture_all(world, tick);
@@ -439,13 +440,15 @@ fn replay_ticks(
 
 /// Replay toward `end_tick` from the current tick, within this frame's budget; if it is not
 /// finished, leave [`AwaitingReplay`] and hold the clock so the next pass continues it.
-fn replay_bounded(world: &mut World, registry: &TickedComponentRegistry, end_tick: u64) {
+fn replay_bounded(world: &mut World, registry: &TickedComponentRegistry, end_tick: Tick) {
     let from = world.resource::<CurrentTick>().0;
-    let budget = u64::from(world.resource::<bevy_ticked::MaxTicksPerFrame>().0);
+    let budget = Ticks(u64::from(
+        world.resource::<bevy_ticked::MaxTicksPerFrame>().0,
+    ));
     let reached = replay_ticks(world, registry, from, end_tick, budget);
     {
         let mut stats = world.resource_mut::<ReplayStats>();
-        stats.ticks_replayed += reached.saturating_sub(from);
+        stats.ticks_replayed += reached.since(from).0;
     }
     let mut holds = world.resource_mut::<TickHolds>();
     if reached < end_tick {
@@ -558,7 +561,7 @@ fn handle_server_snapshot<T: TickedInput>(world: &mut World) {
     {
         let mut stats = world.resource_mut::<ReplayStats>();
         stats.snapshots_applied += 1;
-        stats.last_replay_distance = current_tick as i64 - snapshot_tick as i64;
+        stats.last_replay_distance = current_tick.offset_from(snapshot_tick);
     }
     // `was_paused` is exactly "this is the initial sync". It used to be computed
     // here, used to decide whether to skip ahead, and thrown away; consumers were
@@ -589,7 +592,7 @@ fn handle_server_snapshot<T: TickedInput>(world: &mut World) {
     // long as the problem lasted. Skipped on the initial sync, where the tick
     // difference is "however long this peer has been running" rather than a
     // measurement, and no input has been sent for the server to have timed.
-    let replay_distance = current_tick as i64 - snapshot_tick as i64;
+    let replay_distance = current_tick.offset_from(snapshot_tick);
     let margin = (packet.your_margin != MARGIN_UNMEASURED).then_some(i64::from(packet.your_margin));
     if !was_paused
         && let Some(margin) = margin
@@ -681,7 +684,13 @@ fn handle_server_snapshot<T: TickedInput>(world: &mut World) {
 
     let target = world.resource::<ClientTickBuffer>().target_replay_distance;
     world.resource_mut::<ReplayStats>().rollbacks += 1;
-    match converge_lead(world, current_tick, replay_distance as u64, target, margin) {
+    match converge_lead(
+        world,
+        current_tick,
+        Ticks(replay_distance as u64),
+        target,
+        margin,
+    ) {
         LeadStep::ReplayTo(end_tick) => replay_bounded(world, &registry, end_tick),
         // The world is already at the snapshot's tick with everything after it forgotten: the
         // rewind is a shorter replay, and the inputs past its end go with the ticks they were
@@ -702,8 +711,8 @@ fn handle_server_snapshot<T: TickedInput>(world: &mut World) {
 fn snap_back<T: TickedInput>(
     world: &mut World,
     registry: &TickedComponentRegistry,
-    from_tick: u64,
-    end_tick: u64,
+    from_tick: Tick,
+    end_tick: Tick,
 ) {
     forget_local_inputs_after::<T>(world, end_tick);
     if let Some(mut dilation) = world.get_resource_mut::<TickRateDilation>() {
@@ -713,18 +722,18 @@ fn snap_back<T: TickedInput>(
     bevy::log::info!(
         "lead excess: rewound from tick {from_tick} to {end_tick}, {} ticks the host never \
          produced",
-        from_tick.saturating_sub(end_tick)
+        from_tick.since(end_tick).0
     );
     replay_bounded(world, registry, end_tick);
 }
 
 /// Drop the local player's queued inputs for every tick after `tick`.
-fn forget_local_inputs_after<T: TickedInput>(world: &mut World, tick: u64) {
+fn forget_local_inputs_after<T: TickedInput>(world: &mut World, tick: Tick) {
     let Some(local) = world.get_resource::<LocalClientPlayer>().map(|p| p.0) else {
         return;
     };
     let mut queue = world.resource_mut::<InputQueue<T>>();
-    for (_, players) in queue.inputs.range_mut(tick + 1..) {
+    for (_, players) in queue.inputs.range_mut(tick.next()..) {
         players.remove(&local);
     }
     queue.inputs.retain(|_, players| !players.is_empty());
@@ -742,7 +751,7 @@ fn prediction_matches(
     world: &mut World,
     registry: &TickedComponentRegistry,
     body: &FullBody,
-    tick: u64,
+    tick: Tick,
 ) -> bool {
     let local: std::collections::HashMap<u64, bool> = {
         let mut query = world.query::<(
@@ -794,7 +803,7 @@ fn accept_identical<T: TickedInput>(
     world: &mut World,
     packet: &SnapshotPacket,
     body: &FullBody,
-    current_tick: u64,
+    current_tick: Tick,
 ) {
     let snapshot_tick = packet.tick;
     world
@@ -807,7 +816,7 @@ fn accept_identical<T: TickedInput>(
         let mut stats = world.resource_mut::<ReplayStats>();
         stats.snapshots_applied += 1;
         stats.skipped_identical += 1;
-        stats.last_replay_distance = current_tick as i64 - snapshot_tick as i64;
+        stats.last_replay_distance = current_tick.offset_from(snapshot_tick);
     }
     world.write_message(SnapshotApplied {
         tick: snapshot_tick,
@@ -817,7 +826,7 @@ fn accept_identical<T: TickedInput>(
     if world.resource::<crate::pause::SessionPause>().0.is_some() {
         return;
     }
-    let replay_distance = current_tick as i64 - snapshot_tick as i64;
+    let replay_distance = current_tick.offset_from(snapshot_tick);
     // No input timed lately means no measurement, not a margin of zero: the target stays
     // where the last measurement left it, and the lead is steered to that.
     let margin = (packet.your_margin != MARGIN_UNMEASURED).then_some(i64::from(packet.your_margin));
@@ -829,7 +838,13 @@ fn accept_identical<T: TickedInput>(
             .observe(replay_distance, margin);
     }
     let target = world.resource::<ClientTickBuffer>().target_replay_distance;
-    match converge_lead(world, current_tick, replay_distance as u64, target, margin) {
+    match converge_lead(
+        world,
+        current_tick,
+        Ticks(replay_distance as u64),
+        target,
+        margin,
+    ) {
         // A lead deficit is taken forward, as a plain simulation of the missing ticks; a
         // small excess is left to the rate trim.
         LeadStep::ReplayTo(end_tick) if end_tick > current_tick => {
@@ -930,10 +945,10 @@ const SNAP_BACK_STREAK: u32 = 2;
 enum LeadStep {
     /// Replay, or simulate forward, to this tick: at the current one, past it, or one short
     /// of it when there is no rate to trim.
-    ReplayTo(u64),
+    ReplayTo(Tick),
     /// Rewind. The ticks past this one were predicted against a host that never produced
     /// them; the world goes back to the snapshot's tick and is replayed to here, no further.
-    SnapBack(u64),
+    SnapBack(Tick),
 }
 
 /// Tick-rate multiplier that corrects a lead error of `error` ticks.
@@ -965,12 +980,12 @@ fn dilation_for(error: f64) -> f64 {
 /// [`TickSource::Manual`]: bevy_ticked::TickSource::Manual
 fn converge_lead(
     world: &mut World,
-    current_tick: u64,
-    replay_distance: u64,
-    target: u64,
+    current_tick: Tick,
+    replay_distance: Ticks,
+    target: Ticks,
     margin: Option<i64>,
 ) -> LeadStep {
-    let error = replay_distance as f64 - target as f64;
+    let error = replay_distance.0 as f64 - target.0 as f64;
 
     // Too far ahead by both readings, and not for the first time: the host's clock is behind
     // this one and the trim would take seconds. Give the excess back in one step.
@@ -1012,10 +1027,10 @@ fn converge_lead(
 
     // Deadband [target, target+1]; never drop below target, which would risk
     // inputs arriving after the server has passed their tick.
-    LeadStep::ReplayTo(if replay_distance > target + 1 {
-        current_tick - 1
+    LeadStep::ReplayTo(if replay_distance > target + Ticks::ONE {
+        current_tick.prev()
     } else if replay_distance < target {
-        current_tick + 1
+        current_tick.next()
     } else {
         current_tick
     })
@@ -1071,7 +1086,7 @@ fn watch_for_client_minted_ids(
 /// Number of recent ticks of input included in each packet. Input for tick T
 /// also rides in the packets sent at T+1 and T+2, so up to two consecutive
 /// packet losses cost nothing.
-const INPUT_REDUNDANCY: u64 = 3;
+const INPUT_REDUNDANCY: Ticks = Ticks(3);
 
 /// The acknowledgement this client last put on the wire, so that a client at rest sends one
 /// packet per new ack rather than one per tick.
@@ -1100,7 +1115,8 @@ fn send_local_input<T: TickedInput>(
     let Some(local_player) = local_player else {
         return;
     };
-    let inputs: Vec<(u64, T)> = (tick.0.saturating_sub(INPUT_REDUNDANCY - 1)..=tick.0)
+    let inputs: Vec<(Tick, T)> = (tick.0.saturating_sub(INPUT_REDUNDANCY - Ticks::ONE))
+        .through(tick.0)
         .filter_map(|t| queue.get(t, local_player.0).map(|input| (t, input.clone())))
         .collect();
     // A client at rest has no input to send, but it still acknowledges what it applied: the
@@ -1192,7 +1208,7 @@ mod tests {
             buffer.observe(replay_distance, margin);
         }
         // 2 * one_way + margin.
-        assert_eq!(buffer.target_replay_distance, 14);
+        assert_eq!(buffer.target_replay_distance, Ticks(14));
     }
 
     #[test]
@@ -1269,21 +1285,23 @@ mod tests {
         app.update();
 
         let world = app.world_mut();
-        world.insert_resource(CurrentTick(38_400));
+        world.insert_resource(CurrentTick(Tick(38_400)));
         {
             let mut buffer = world.resource_mut::<ClientTickBuffer>();
-            buffer.target_replay_distance = 40;
+            buffer.target_replay_distance = Ticks(40);
             buffer.target_margin = 9;
             buffer.smoothed = 40.0;
             buffer.excess_streak = 2;
-            buffer.settling_until = 38_450;
+            buffer.settling_until = Tick(38_450);
         }
         world.insert_resource(TickRateDilation(0.98));
-        world.insert_resource(AwaitingReplay { end_tick: 38_420 });
+        world.insert_resource(AwaitingReplay {
+            end_tick: Tick(38_420),
+        });
         world
             .resource_mut::<TickHolds>()
             .hold(TickHoldReason::Replaying);
-        world.resource_mut::<PendingSnapshotTick>().0 = Some(38_399);
+        world.resource_mut::<PendingSnapshotTick>().0 = Some(Tick(38_399));
         app
     }
 
@@ -1292,7 +1310,8 @@ mod tests {
         let buffer = world.resource::<ClientTickBuffer>();
         let fresh = ClientTickBuffer::default();
         assert_eq!(
-            buffer.settling_until, 0,
+            buffer.settling_until,
+            Tick::ZERO,
             "{door}: the last session's settling tick would freeze the lead of the next one until \
              its clock caught up"
         );
@@ -1347,9 +1366,11 @@ mod tests {
     /// Dirty the client state again, without a role, so only the join can be what clears it.
     fn a_while_into(app: &mut App) {
         let world = app.world_mut();
-        world.resource_mut::<ClientTickBuffer>().settling_until = 38_450;
+        world.resource_mut::<ClientTickBuffer>().settling_until = Tick(38_450);
         world.insert_resource(TickRateDilation(1.02));
-        world.insert_resource(AwaitingReplay { end_tick: 38_420 });
+        world.insert_resource(AwaitingReplay {
+            end_tick: Tick(38_420),
+        });
         world
             .resource_mut::<TickHolds>()
             .hold(TickHoldReason::Replaying);

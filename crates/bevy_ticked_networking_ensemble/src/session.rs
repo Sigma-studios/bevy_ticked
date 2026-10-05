@@ -490,18 +490,12 @@ fn seed_tick_buffer(
         return;
     };
     seeded.0 = true;
-    buffer.seed_from_rtt(
-        Duration::from_secs_f64(rtt.0.max(0.0)),
-        Duration::from_secs_f64(jitter.map_or(0.0, |jitter| jitter.0.max(0.0))),
-        ticked.timestep(),
-    );
+    let jitter = jitter.map_or(Duration::ZERO, |jitter| jitter.0);
+    buffer.seed_from_rtt(rtt.0, jitter, ticked.timestep());
     debug!(
-        "sized the prediction buffer from the link: rtt {:.0}ms, jitter {:.0}ms -> \
+        "sized the prediction buffer from the link: rtt {:.0?}, jitter {:.0?} -> \
          replay distance {} ticks, margin {} ticks",
-        rtt.0 * 1000.0,
-        jitter.map_or(0.0, |jitter| jitter.0) * 1000.0,
-        buffer.target_replay_distance,
-        buffer.target_margin,
+        rtt.0, jitter, buffer.target_replay_distance, buffer.target_margin,
     );
 }
 

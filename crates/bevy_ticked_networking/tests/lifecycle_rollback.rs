@@ -64,7 +64,7 @@ fn wire<T: bevy_ticked::registry::TickedComponent>(app: &App) -> u16 {
 }
 
 /// A body with the local player's body only.
-fn body_with_player(app: &mut App, tick: u64) -> SnapshotPacket {
+fn body_with_player(app: &mut App, tick: Tick) -> SnapshotPacket {
     let mut body = build_full_body(app.world_mut(), tick);
     let (pos, owner) = (wire::<Pos>(app), wire::<Owner>(app));
     body.entities.clear();
@@ -83,7 +83,7 @@ fn deliver(app: &mut App, packet: SnapshotPacket) {
 }
 
 fn sync(app: &mut App) {
-    let packet = body_with_player(app, 0);
+    let packet = body_with_player(app, Tick::ZERO);
     deliver(app, packet);
     app.update();
     for _ in 0..12 {
@@ -101,14 +101,14 @@ fn pellets(app: &mut App) -> Vec<(Entity, u64)> {
 fn press_fire(app: &mut App) {
     let tick = app.world().resource::<CurrentTick>().0;
     app.world_mut().resource_mut::<InputQueue<Input>>().insert(
-        tick + 1,
+        tick.next(),
         LOCAL,
         Input { fire: true },
     );
     app.update();
 }
 
-fn lead(app: &App) -> u64 {
+fn lead(app: &App) -> Ticks {
     app.world()
         .resource::<ClientTickBuffer>()
         .target_replay_distance
@@ -150,7 +150,7 @@ fn absence_is_authoritative_only_for_ids_spawned_at_or_before_the_snapshot_tick(
     for _ in 0..8 {
         app.update();
     }
-    let packet = body_with_player(&mut app, fired_at + 2);
+    let packet = body_with_player(&mut app, fired_at + Ticks(2));
     deliver(&mut app, packet);
     app.update();
     assert!(
@@ -286,6 +286,6 @@ fn an_entity_carried_by_the_snapshot_is_born_at_or_before_its_tick() {
     let born = lifetimes
         .born_at(1 << 8)
         .expect("the player is in the lifetimes");
-    assert_eq!(born, 0, "the initial sync named it at tick 0");
+    assert_eq!(born, Tick::ZERO, "the initial sync named it at tick 0");
     let _ = FullBody::default();
 }

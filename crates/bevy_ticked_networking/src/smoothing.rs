@@ -353,7 +353,7 @@ struct PredictionDistance<T>(fn(&T, &T) -> f32);
 
 /// Prediction at the pending snapshot's tick, captured before the snapshot overwrites it.
 #[derive(Resource, Default)]
-struct PredictedAt<T: TickedComponent>(Option<(u64, HashMap<u64, T>)>);
+struct PredictedAt<T: TickedComponent>(Option<(bevy_ticked::tick_types::Tick, HashMap<u64, T>)>);
 
 fn sample_prediction_before<T: TickedComponent>(world: &mut World) {
     let pending_tick = world

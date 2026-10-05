@@ -47,13 +47,13 @@ fn an_avian_body_under_interpolation_keeps_its_speed() {
     ));
 
     let mut frames = 0;
-    while app.world().resource::<CurrentTick>().0 < 99 {
+    while app.world().resource::<CurrentTick>().0 < Tick(99) {
         app.update();
         frames += 1;
         assert!(frames < 1000);
     }
     // A frame can run two ticks, so land on 99 or 100 and expect that many units.
-    let ticks = app.world().resource::<CurrentTick>().0 as f32;
+    let ticks = app.world().resource::<CurrentTick>().0.0 as f32;
 
     let mut q = app.world_mut().query::<(&Position, &TickedInterpolation)>();
     let (position, interpolation) = q.single(app.world()).unwrap();

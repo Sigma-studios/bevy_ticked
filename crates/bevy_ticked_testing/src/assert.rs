@@ -7,6 +7,7 @@
 //! without measuring anything is worse than none: it is the green light on the dashboard of a
 //! session that has already desynced.
 
+use bevy_ticked::tick_types::{Tick, Ticks};
 use std::any::type_name;
 
 use bevy::prelude::*;
@@ -42,11 +43,11 @@ pub fn compared_ticks_since<H: WorldHash>(
     net: &TickedNetwork,
     a: PeerId,
     b: PeerId,
-    since: u64,
-) -> Vec<u64> {
+    since: Tick,
+) -> Vec<Tick> {
     let left = checksum_log::<H>(net.app(a), a);
     let right = checksum_log::<H>(net.app(b), b);
-    let mut ticks: Vec<u64> = left
+    let mut ticks: Vec<Tick> = left
         .samples
         .iter()
         .map(|(tick, _)| *tick)
@@ -58,8 +59,8 @@ pub fn compared_ticks_since<H: WorldHash>(
 }
 
 /// Every tick both `a` and `b` sampled.
-pub fn compared_ticks<H: WorldHash>(net: &TickedNetwork, a: PeerId, b: PeerId) -> Vec<u64> {
-    compared_ticks_since::<H>(net, a, b, 0)
+pub fn compared_ticks<H: WorldHash>(net: &TickedNetwork, a: PeerId, b: PeerId) -> Vec<Tick> {
+    compared_ticks_since::<H>(net, a, b, Tick::ZERO)
 }
 
 /// The earliest tick at or after `since` that `a` and `b` both sampled and disagree on.
@@ -74,7 +75,7 @@ pub fn first_divergence_since<H: WorldHash>(
     net: &TickedNetwork,
     a: PeerId,
     b: PeerId,
-    since: u64,
+    since: Tick,
 ) -> Option<Divergence<H>> {
     let left = checksum_log::<H>(net.app(a), a);
     let right = checksum_log::<H>(net.app(b), b);
@@ -101,7 +102,7 @@ pub fn first_divergence<H: WorldHash>(
     a: PeerId,
     b: PeerId,
 ) -> Option<Divergence<H>> {
-    first_divergence_since::<H>(net, a, b, 0)
+    first_divergence_since::<H>(net, a, b, Tick::ZERO)
 }
 
 /// Every client's log agrees with the host's on every tick at or after `since` that both
@@ -120,7 +121,7 @@ pub fn first_divergence<H: WorldHash>(
 /// Naming the tick, both hashes and the differing sections of the first disagreement — or, if
 /// there is no client, or some client sampled no tick in common with the host, saying so: an
 /// agreement check with nothing to compare has checked nothing.
-pub fn assert_all_peers_agree_since<H: WorldHash>(net: &TickedNetwork, since: u64) {
+pub fn assert_all_peers_agree_since<H: WorldHash>(net: &TickedNetwork, since: Tick) {
     let host = net.host();
     let clients = net.clients();
     assert!(
@@ -152,7 +153,7 @@ pub fn assert_all_peers_agree_since<H: WorldHash>(net: &TickedNetwork, since: u6
 
 /// Every attached client's log agrees with the host's on every tick both sampled.
 pub fn assert_all_peers_agree<H: WorldHash>(net: &TickedNetwork) {
-    assert_all_peers_agree_since::<H>(net, 0);
+    assert_all_peers_agree_since::<H>(net, Tick::ZERO);
 }
 
 // ---- replay purity ---------------------------------------------------------------------------
@@ -171,7 +172,7 @@ pub fn assert_all_peers_agree<H: WorldHash>(net: &TickedNetwork) {
 /// `Transform` is moved to `(999, 999, 999)`. A registered transform is restored over it; an
 /// unregistered one that the simulation reads is now visibly wrong. See
 /// [`assert_replays_identically_with`] to poison something else.
-pub fn assert_replays_identically<H: WorldHash>(app: &mut App, from: u64, ticks: u64) {
+pub fn assert_replays_identically<H: WorldHash>(app: &mut App, from: Tick, ticks: Ticks) {
     assert_replays_identically_with::<H>(app, from, ticks, poison_transforms);
 }
 
@@ -197,12 +198,12 @@ fn poison_transforms(world: &mut World) {
 /// evidence; or if a frame turned into anything but one tick.
 pub fn assert_replays_identically_with<H: WorldHash>(
     app: &mut App,
-    from: u64,
-    ticks: u64,
+    from: Tick,
+    ticks: Ticks,
     poison: impl Fn(&mut World),
 ) {
     assert!(
-        ticks >= 2,
+        ticks >= Ticks(2),
         "a replay of fewer than two ticks cannot show a change"
     );
     assert_ne!(
@@ -224,7 +225,7 @@ pub fn assert_replays_identically_with<H: WorldHash>(
         app.update();
         frames += 1;
         assert!(
-            frames <= from + 64,
+            frames <= from.0 + 64,
             "after {frames} frames this peer is at tick {}, not {from}: is it paused, or on a \
              source other than Hz fed one TICK per frame?",
             tick(app)
@@ -232,8 +233,8 @@ pub fn assert_replays_identically_with<H: WorldHash>(
     }
 
     // The live run, one tick per frame, sampled after each.
-    let mut live: Vec<(u64, H)> = Vec::with_capacity(ticks as usize);
-    for expected in (from + 1)..=(from + ticks) {
+    let mut live: Vec<(Tick, H)> = Vec::with_capacity(ticks.0 as usize);
+    for expected in from.next().through(from + ticks) {
         app.update();
         let now = tick(app);
         assert_eq!(
@@ -247,8 +248,8 @@ pub fn assert_replays_identically_with<H: WorldHash>(
         live.windows(2).any(|pair| pair[0].1 != pair[1].1),
         "the hash never changed over ticks {}..={}: nothing was simulated, so a replay that \
          agrees proves nothing",
-        from + 1,
-        from + ticks
+        from.next().0,
+        (from + ticks).0
     );
 
     // Roll back, poison, replay — the client's rollback path, with a sample after each tick.
@@ -271,7 +272,7 @@ pub fn assert_replays_identically_with<H: WorldHash>(
                 "the replay diverged at tick {replayed} ({} ticks into a replay from {from}): \
                  live {:#018x}, replayed {:#018x}, differing in: {}. Something the simulation \
                  reads at that tick is not restored by rollback",
-                replayed - from,
+                (replayed - from).0,
                 expected.value(),
                 got.value(),
                 if sections.is_empty() {
@@ -357,10 +358,10 @@ pub fn assert_bandwidth_within(
     let bytes = net.bytes_sent(from, to) - bytes_before;
     let ticks = tick(net.app(from)) - tick_before;
     assert!(
-        ticks > 0,
+        ticks > Ticks::ZERO,
         "peer {from:?} ran no tick in {frames} frames, so there is no per-tick figure to budget"
     );
-    let per_tick = bytes as f64 / ticks as f64;
+    let per_tick = bytes as f64 / ticks.0 as f64;
     assert!(
         per_tick <= max_bytes_per_tick as f64,
         "{from:?} -> {to:?} sent {bytes} bytes over {ticks} ticks: {per_tick:.1} bytes per tick, \

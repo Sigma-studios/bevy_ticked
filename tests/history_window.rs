@@ -25,11 +25,11 @@ fn the_core_default_is_a_hundred_seconds_for_scrubbing() {
 fn a_games_own_window_wins() {
     let mut app = App::new();
     app.add_plugins(MinimalPlugins).add_plugins(TickedPlugin {
-        history_ticks: Some(32),
+        history_ticks: Some(Ticks(32)),
         ..default()
     });
     app.finish();
-    assert_eq!(app.world().resource::<HistoryBufferTicks>().0, 32);
+    assert_eq!(app.world().resource::<HistoryBufferTicks>().0, Ticks(32));
 }
 
 /// A plugin with a better default for its role replaces the core's, and only the core's.
@@ -37,7 +37,7 @@ struct Knows;
 impl Plugin for Knows {
     fn build(&self, app: &mut App) {
         if !app.world().contains_resource::<HistoryWindowChosen>() {
-            app.insert_resource(HistoryBufferTicks(128));
+            app.insert_resource(HistoryBufferTicks(Ticks(128)));
         }
     }
 }
@@ -48,7 +48,7 @@ fn a_plugin_that_knows_better_replaces_the_default_window() {
     app.add_plugins(MinimalPlugins)
         .add_plugins(TickedPlugin::default())
         .add_plugins(Knows);
-    assert_eq!(app.world().resource::<HistoryBufferTicks>().0, 128);
+    assert_eq!(app.world().resource::<HistoryBufferTicks>().0, Ticks(128));
 }
 
 #[test]
@@ -56,11 +56,11 @@ fn a_plugin_that_knows_better_does_not_override_the_games_choice() {
     let mut app = App::new();
     app.add_plugins(MinimalPlugins)
         .add_plugins(TickedPlugin {
-            history_ticks: Some(32),
+            history_ticks: Some(Ticks(32)),
             ..default()
         })
         .add_plugins(Knows);
-    assert_eq!(app.world().resource::<HistoryBufferTicks>().0, 32);
+    assert_eq!(app.world().resource::<HistoryBufferTicks>().0, Ticks(32));
 }
 
 #[test]

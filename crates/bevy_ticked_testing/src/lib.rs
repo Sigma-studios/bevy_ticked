@@ -53,4 +53,5 @@ pub mod prelude {
     pub use crate::view::*;
     pub use bevy_ensemble::HostMigratable;
     pub use bevy_ensemble_loopback::{HostDeparture, Link, PacketFate, PeerId, SentPacket};
+    pub use bevy_ticked::tick_types::{Tick, Ticks};
 }

@@ -81,7 +81,7 @@ fn wire<T: bevy_ticked::registry::TickedComponent>(app: &App) -> u16 {
 }
 
 /// A body per player at `local`/`remote` positions.
-fn body(app: &App, tick: u64, local: i32, remote: i32) -> SnapshotPacket {
+fn body(app: &App, tick: Tick, local: i32, remote: i32) -> SnapshotPacket {
     let (pos, owner) = (wire::<Pos>(app), wire::<Owner>(app));
     let mut body = FullBody::default();
     // "Pos" < "bevy_ticked::Owner": Pos goes first.
@@ -120,7 +120,7 @@ fn entity_of(app: &mut App, id: u64) -> Entity {
 }
 
 fn sync(app: &mut App) {
-    let packet = body(app, 0, 0, 0);
+    let packet = body(app, Tick::ZERO, 0, 0);
     deliver(app, packet);
     app.update();
 }
@@ -150,7 +150,7 @@ fn an_interpolated_entity_shows_the_authority_a_few_ticks_back() {
     let mut app = client();
     sync(&mut app);
     // Three snapshots, the remote body walking; the local one still.
-    for (tick, remote) in [(1, 10), (2, 20), (3, 30)] {
+    for (tick, remote) in [(Tick(1), 10), (Tick(2), 20), (Tick(3), 30)] {
         let packet = body(&app, tick, 0, remote);
         deliver(&mut app, packet);
         app.update();
@@ -183,7 +183,7 @@ fn a_predicted_entity_is_not_touched_by_the_interpolation_restore() {
     for _ in 0..8 {
         let tick = app.world().resource::<CurrentTick>().0;
         app.world_mut().resource_mut::<InputQueue<Input>>().insert(
-            tick + 1,
+            tick.next(),
             LOCAL,
             Input { dx: 1 },
         );
@@ -211,9 +211,11 @@ fn a_predicted_remote_body_holds_its_last_input_during_replay() {
         .insert(ReplicationMode::Predicted);
     // The remote player's last known input arrived via a relay for one tick only.
     let tick = app.world().resource::<CurrentTick>().0;
-    app.world_mut()
-        .resource_mut::<InputQueue<Input>>()
-        .insert(tick + 1, REMOTE, Input { dx: 2 });
+    app.world_mut().resource_mut::<InputQueue<Input>>().insert(
+        tick.next(),
+        REMOTE,
+        Input { dx: 2 },
+    );
     for _ in 0..5 {
         app.update();
     }
@@ -227,12 +229,12 @@ fn a_predicted_remote_body_holds_its_last_input_during_replay() {
 #[test]
 fn get_or_last_holds_the_last_known_input() {
     let mut queue = InputQueue::<Input>::default();
-    queue.insert(3, REMOTE, Input { dx: 4 });
-    assert_eq!(queue.get_or_last(7, REMOTE), Some(&Input { dx: 4 }));
-    assert_eq!(queue.get_or_last(3, REMOTE), Some(&Input { dx: 4 }));
-    assert_eq!(queue.get_or_last(2, REMOTE), None);
-    assert_eq!(queue.get_or_last(7, LOCAL), None);
-    let all = queue.at_tick_or_last(9);
+    queue.insert(Tick(3), REMOTE, Input { dx: 4 });
+    assert_eq!(queue.get_or_last(Tick(7), REMOTE), Some(&Input { dx: 4 }));
+    assert_eq!(queue.get_or_last(Tick(3), REMOTE), Some(&Input { dx: 4 }));
+    assert_eq!(queue.get_or_last(Tick(2), REMOTE), None);
+    assert_eq!(queue.get_or_last(Tick(7), LOCAL), None);
+    let all = queue.at_tick_or_last(Tick(9));
     assert_eq!(all.get(&REMOTE), Some(&Input { dx: 4 }));
     assert_eq!(all.len(), 1);
 }
@@ -431,15 +433,15 @@ fn a_snapshot_too_late_for_the_rollback_is_still_recorded_for_interpolation() {
     for _ in 0..8 {
         app.update();
     }
-    let newer = body(&app, 6, 0, 60);
-    let late = body(&app, 4, 0, 40);
+    let newer = body(&app, Tick(6), 0, 60);
+    let late = body(&app, Tick(4), 0, 40);
     deliver(&mut app, newer);
     deliver(&mut app, late);
     app.update();
     let history = app.world().resource::<AuthoritativeHistory>();
-    assert!(history.has_tick(6));
+    assert!(history.has_tick(Tick(6)));
     assert!(
-        history.has_tick(4),
+        history.has_tick(Tick(4)),
         "the late packet was dropped for the rollback and kept for the drawn path"
     );
     let stats = *app
@@ -456,13 +458,13 @@ fn a_snapshot_superseded_before_it_was_applied_is_still_recorded() {
         app.update();
     }
     // Three snapshots in one frame: only the newest is applied, none is lost to the drawn path.
-    for (tick, remote) in [(4, 40), (5, 50), (6, 60)] {
+    for (tick, remote) in [(Tick(4), 40), (Tick(5), 50), (Tick(6), 60)] {
         let packet = body(&app, tick, 0, remote);
         deliver(&mut app, packet);
     }
     app.update();
     let history = app.world().resource::<AuthoritativeHistory>();
-    for tick in [4, 5, 6] {
+    for tick in [Tick(4), Tick(5), Tick(6)] {
         assert!(history.has_tick(tick), "tick {tick} is in the history");
     }
     let stats = *app

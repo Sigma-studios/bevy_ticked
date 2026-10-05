@@ -44,6 +44,7 @@
 //! sampled, so peers that disagree about the interval will find nothing to compare.
 
 use crate::tick::CurrentTick;
+use crate::tick_types::{Tick, Ticks};
 use bevy::ecs::intern::Interned;
 use bevy::prelude::*;
 use std::marker::PhantomData;
@@ -78,9 +79,9 @@ pub trait WorldHash: Copy + PartialEq + Send + Sync + 'static {
 #[derive(Resource, Debug)]
 pub struct ChecksumLog<H: WorldHash> {
     /// How many ticks between samples. Every tick is affordable in a test and wasteful in play.
-    pub interval: u64,
+    pub interval: Ticks,
     /// `(tick, hash)`, oldest first, capped at `capacity`.
-    pub samples: Vec<(u64, H)>,
+    pub samples: Vec<(Tick, H)>,
     /// How many samples to keep before dropping the oldest.
     pub capacity: usize,
 }
@@ -88,7 +89,7 @@ pub struct ChecksumLog<H: WorldHash> {
 impl<H: WorldHash> Default for ChecksumLog<H> {
     fn default() -> Self {
         Self {
-            interval: 64,
+            interval: Ticks(64),
             samples: Vec::new(),
             capacity: 256,
         }
@@ -99,27 +100,27 @@ impl<H: WorldHash> ChecksumLog<H> {
     /// One sample per tick, for tests that want the exact tick of a divergence.
     pub fn every_tick() -> Self {
         Self {
-            interval: 1,
+            interval: Ticks::ONE,
             ..Default::default()
         }
     }
 
     /// One sample every `interval` ticks.
-    pub fn every(interval: u64) -> Self {
+    pub fn every(interval: Ticks) -> Self {
         Self {
             interval,
             ..Default::default()
         }
     }
 
-    pub fn at(&self, tick: u64) -> Option<H> {
+    pub fn at(&self, tick: Tick) -> Option<H> {
         self.samples
             .iter()
             .find(|(sample_tick, _)| *sample_tick == tick)
             .map(|(_, hash)| *hash)
     }
 
-    pub fn latest(&self) -> Option<(u64, H)> {
+    pub fn latest(&self) -> Option<(Tick, H)> {
         self.samples.last().copied()
     }
 
@@ -129,7 +130,7 @@ impl<H: WorldHash> ChecksumLog<H> {
     /// another peer has to ask: a tick *below* this one was sampled and then forgotten, which is
     /// a different thing from a tick that was never sampled at all. Reading the first as the
     /// second turns ordinary housekeeping into a warning about a mismatched interval.
-    pub fn oldest(&self) -> Option<(u64, H)> {
+    pub fn oldest(&self) -> Option<(Tick, H)> {
         self.samples.first().copied()
     }
 
@@ -165,7 +166,7 @@ impl<H: WorldHash> ChecksumLog<H> {
         self.samples.clear();
     }
 
-    fn record(&mut self, tick: u64, hash: H) {
+    fn record(&mut self, tick: Tick, hash: H) {
         self.samples.push((tick, hash));
         if self.samples.len() > self.capacity {
             self.samples.remove(0);
@@ -176,7 +177,7 @@ impl<H: WorldHash> ChecksumLog<H> {
 /// Two peers disagreeing about one tick, and what about.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Divergence<H: WorldHash> {
-    pub tick: u64,
+    pub tick: Tick,
     pub left: H,
     pub right: H,
     /// Which sections of the world differ, per [`WorldHash::differences`].
@@ -246,7 +247,7 @@ impl<H: WorldHash> Plugin for ChecksumLogPlugin<H> {
 pub fn record_checksum<H: WorldHash>(world: &mut World) {
     let interval = world.resource::<ChecksumLog<H>>().interval;
     let tick = world.resource::<CurrentTick>().0;
-    if interval == 0 || !tick.is_multiple_of(interval) {
+    if interval.is_zero() || !tick.is_multiple_of(interval) {
         return;
     }
 
@@ -292,7 +293,7 @@ mod tests {
         let mut log = ChecksumLog::every_tick();
         for (tick, buildings, players) in samples {
             log.record(
-                *tick,
+                Tick(*tick),
                 TestHash {
                     buildings: *buildings,
                     players: *players,
@@ -312,7 +313,8 @@ mod tests {
             .expect("these logs disagree on two ticks");
 
         assert_eq!(
-            divergence.tick, 2,
+            divergence.tick,
+            Tick(2),
             "reporting the newest difference points at a symptom hundreds of ticks after the \
              cause, which is the entire reason this search exists"
         );
@@ -345,7 +347,7 @@ mod tests {
         log.capacity = 3;
         for tick in 0..10 {
             log.record(
-                tick,
+                Tick(tick),
                 TestHash {
                     buildings: tick,
                     players: 0,
@@ -354,7 +356,11 @@ mod tests {
         }
 
         assert_eq!(log.samples.len(), 3);
-        assert_eq!(log.latest().map(|(tick, _)| tick), Some(9));
-        assert_eq!(log.at(0), None, "the oldest samples are the ones dropped");
+        assert_eq!(log.latest().map(|(tick, _)| tick), Some(Tick(9)));
+        assert_eq!(
+            log.at(Tick(0)),
+            None,
+            "the oldest samples are the ones dropped"
+        );
     }
 }

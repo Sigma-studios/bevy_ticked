@@ -49,7 +49,7 @@ fn step(app: &mut App) {
     app.update();
 }
 
-fn restore(app: &mut App, tick: u64) {
+fn restore(app: &mut App, tick: Tick) {
     let registry = app.world().resource::<TickedComponentRegistry>().clone();
     registry.restore_all(app.world_mut(), tick);
 }
@@ -73,7 +73,7 @@ fn rewinding_past_a_spawn_despawns_it() {
     step(&mut app);
     assert_eq!(tracked_ids(&mut app).len(), 2);
 
-    restore(&mut app, 1);
+    restore(&mut app, Tick(1));
 
     assert_eq!(
         tracked_ids(&mut app).len(),
@@ -109,7 +109,7 @@ fn a_despawn_rolled_back_resurrects_the_same_entity_id() {
         "and unindexed"
     );
 
-    restore(&mut app, 2);
+    restore(&mut app, Tick(2));
 
     assert_eq!(
         tracked_ids(&mut app).len(),
@@ -134,7 +134,7 @@ fn a_tombstone_reused_by_a_replayed_spawn_keeps_the_entity_id() {
 
     // Rewind past the bullet's spawn, then replay the spawn: the allocator was rolled back
     // too, so it mints the same id and revives the tombstone.
-    rollback_to_tick(app.world_mut(), 1);
+    rollback_to_tick(app.world_mut(), Tick(1));
     assert!(app.world().get::<Disabled>(bullet).is_some());
     let again = app.world_mut().spawn_tracked((Height(6), Tag));
     assert_eq!(
@@ -165,7 +165,7 @@ fn a_tombstone_handed_to_a_different_spawn_is_dressed_again() {
     // the id the bullet had is handed to the next thing minted, and its tombstone is reused.
     // `Tag` is what makes it a different thing rather than the same spawn replayed -- a pellet's
     // id going to a piece of a ragdoll, which carries components a pellet never had.
-    rollback_to_tick(app.world_mut(), 1);
+    rollback_to_tick(app.world_mut(), Tick(1));
     let again = app.world_mut().spawn_tracked((Height(6), Tag));
 
     assert_eq!(
@@ -190,7 +190,7 @@ fn a_tombstone_handed_to_a_different_spawn_starts_from_nothing() {
     let bullet = app.world_mut().spawn_tracked((Height(5), Tag));
     step(&mut app);
 
-    rollback_to_tick(app.world_mut(), 1);
+    rollback_to_tick(app.world_mut(), Tick(1));
     let again = app.world_mut().spawn_tracked(Height(6));
 
     assert_eq!(
@@ -231,7 +231,7 @@ fn a_tombstone_reused_by_the_same_spawn_keeps_its_local_only_state() {
         "the observer dressed it at its first spawn"
     );
 
-    rollback_to_tick(app.world_mut(), 1);
+    rollback_to_tick(app.world_mut(), Tick(1));
     // The very same bundle type: the replay running the same spawn again.
     let again = app.world_mut().spawn_tracked((Height(6), Tag));
 
@@ -265,11 +265,11 @@ fn restoring_a_tick_where_an_entity_was_alive_rebuilds_it_through_the_spawn_path
         .expect("still in the lifetimes");
     assert_eq!(
         lifetime.died,
-        Some(3),
+        Some(Tick(3)),
         "alive at tick 2 (captured), gone from tick 3"
     );
 
-    restore(&mut app, 2);
+    restore(&mut app, Tick(2));
 
     let mut q = app
         .world_mut()
@@ -297,10 +297,10 @@ fn a_plain_despawn_on_a_tracked_entity_is_recorded_and_warns_once() {
     let lifetimes = app.world().resource::<TrackedEntityLifetimes>();
     assert_eq!(
         lifetimes.lifetime(a).unwrap().died,
-        Some(2),
+        Some(Tick(2)),
         "captured alive at 1"
     );
-    assert_eq!(lifetimes.lifetime(b).unwrap().died, Some(2));
+    assert_eq!(lifetimes.lifetime(b).unwrap().died, Some(Tick(2)));
     // The warning is `warn_once!`; this test asserts the recording, the log is for the eye.
 }
 
@@ -317,11 +317,11 @@ fn an_entity_with_no_registered_components_still_exists_in_the_lifetimes() {
     assert_eq!(
         app.world()
             .resource::<TrackedEntityLifetimes>()
-            .alive_at(1, bare_id),
+            .alive_at(Tick(1), bare_id),
         Some(true),
         "no saved state is not no entity"
     );
-    restore(&mut app, 1);
+    restore(&mut app, Tick(1));
     assert!(
         app.world().get_entity(bare).is_ok() && app.world().get::<Disabled>(bare).is_none(),
         "the bare entity existed at tick 1 and still does"
@@ -334,7 +334,7 @@ fn a_tombstone_is_reaped_once_the_window_has_passed() {
     app.add_plugins(MinimalPlugins)
         .add_plugins(TickedPlugin {
             source: TickSource::Manual,
-            history_ticks: Some(4),
+            history_ticks: Some(Ticks(4)),
             ..default()
         })
         .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
@@ -366,7 +366,7 @@ fn reaping_app() -> App {
     app.add_plugins(MinimalPlugins)
         .add_plugins(TickedPlugin {
             source: TickSource::Manual,
-            history_ticks: Some(4),
+            history_ticks: Some(Ticks(4)),
             ..default()
         })
         .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(

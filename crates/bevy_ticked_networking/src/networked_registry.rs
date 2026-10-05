@@ -6,6 +6,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use bevy_ticked::{
     registry::{ReplicationClass, TickedComponent, TickedComponentRegistry, WireFns},
     resource_registry::{ResourceActions, TickedResource, TickedResourceRegistry},
+    tick_types::Tick,
     tracked_entity::TickTrackedEntity,
     world_actions::WorldActions,
 };
@@ -129,7 +130,7 @@ impl NetworkedTickedResourceAppExt for App {
     }
 }
 
-fn serialize_resource<R: NetworkedTickedResource>(world: &World, tick: u64) -> Option<Vec<u8>> {
+fn serialize_resource<R: NetworkedTickedResource>(world: &World, tick: Tick) -> Option<Vec<u8>> {
     let value = world.get_resource::<ResourceActions<R>>()?.at_tick(tick)?;
     match postcard::to_allocvec(value) {
         Ok(bytes) => Some(bytes),
@@ -145,7 +146,7 @@ fn serialize_resource<R: NetworkedTickedResource>(world: &World, tick: u64) -> O
 
 fn deserialize_and_apply_resource<R: NetworkedTickedResource>(
     world: &mut World,
-    tick: u64,
+    tick: Tick,
     bytes: &[u8],
 ) {
     match postcard::from_bytes::<R>(bytes) {
@@ -166,7 +167,7 @@ fn deserialize_and_apply_resource<R: NetworkedTickedResource>(
 
 // --- Wire dispatch, one value at a time ---
 
-fn has_at<T: NetworkedTickedComponent>(world: &World, tick: u64, id: u64) -> bool {
+fn has_at<T: NetworkedTickedComponent>(world: &World, tick: Tick, id: u64) -> bool {
     world
         .resource::<WorldActions<T>>()
         .at_tick(tick)
@@ -175,7 +176,7 @@ fn has_at<T: NetworkedTickedComponent>(world: &World, tick: u64, id: u64) -> boo
 
 fn encode_one<T: NetworkedTickedComponent>(
     world: &World,
-    tick: u64,
+    tick: Tick,
     id: u64,
     out: &mut Vec<u8>,
 ) -> bool {
@@ -203,7 +204,7 @@ fn encode_one<T: NetworkedTickedComponent>(
 
 fn decode_one<T: NetworkedTickedComponent>(
     world: &mut World,
-    tick: u64,
+    tick: Tick,
     entity: Entity,
     id: u64,
     bytes: &[u8],
@@ -248,7 +249,7 @@ fn remove_one<T: NetworkedTickedComponent>(world: &mut World, entity: Entity) {
 /// mismatch the caller stops walking the record, so `consumed` is only meaningful when equal.
 fn matches_at<T: NetworkedTickedComponent>(
     world: &World,
-    tick: u64,
+    tick: Tick,
     id: u64,
     bytes: &[u8],
 ) -> Option<(bool, usize)> {
@@ -269,7 +270,7 @@ fn decode_len<T: NetworkedTickedComponent>(bytes: &[u8]) -> Option<usize> {
     Some(bytes.len() - rest.len())
 }
 
-fn begin_tick<T: NetworkedTickedComponent>(world: &mut World, tick: u64) {
+fn begin_tick<T: NetworkedTickedComponent>(world: &mut World, tick: Tick) {
     let mut actions = world.resource_mut::<WorldActions<T>>();
     let map = actions.take_map();
     actions.set_tick(tick, map);
@@ -281,7 +282,7 @@ fn begin_tick<T: NetworkedTickedComponent>(world: &mut World, tick: u64) {
 ///
 /// One query filtered on `With<T>` per type: most tracked entities never carry most types,
 /// and a remove per (entity, type) pair would cost `entities x types` archetype moves.
-fn finish_tick<T: NetworkedTickedComponent>(world: &mut World, tick: u64) {
+fn finish_tick<T: NetworkedTickedComponent>(world: &mut World, tick: Tick) {
     let mut carriers = world.query_filtered::<(Entity, &TickTrackedEntity), With<T>>();
     let stale: Vec<Entity> = {
         let actions = world.resource::<WorldActions<T>>();

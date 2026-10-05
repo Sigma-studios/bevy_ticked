@@ -29,6 +29,7 @@ use bevy::prelude::*;
 use bevy_ticked::lifetimes::{TrackedEntityLifetimes, reset, tombstone};
 use bevy_ticked::registry::TickedComponentRegistry;
 use bevy_ticked::tick::CurrentTick;
+use bevy_ticked::tick_types::Tick;
 use bevy_ticked::tracked_entity::{TickTrackedEntity, TrackedIdAllocator};
 use bevy_ticked::tracked_index::TrackedEntityIndex;
 use bevy_ticked_networking::prelude::*;
@@ -77,14 +78,14 @@ fn peer() -> App {
     app
 }
 
-fn capture(app: &mut App, tick: u64) {
+fn capture(app: &mut App, tick: Tick) {
     let registry = app.world().resource::<TickedComponentRegistry>().clone();
     registry.capture_all(app.world_mut(), tick);
 }
 
 /// One snapshot, host to client, as `apply_snapshot` does it. `reborn` is what the authority says
 /// has been handed to a different thing since the world this client acknowledged.
-fn sync_reborn(host: &mut App, client: &mut App, tick: u64, reborn: &[u64]) {
+fn sync_reborn(host: &mut App, client: &mut App, tick: Tick, reborn: &[u64]) {
     capture(host, tick);
     let mut body = build_full_body(host.world_mut(), tick);
     body.reborn = reborn.to_vec();
@@ -92,7 +93,7 @@ fn sync_reborn(host: &mut App, client: &mut App, tick: u64, reborn: &[u64]) {
 }
 
 /// A snapshot in which nothing changed hands, which is almost all of them.
-fn sync(host: &mut App, client: &mut App, tick: u64) {
+fn sync(host: &mut App, client: &mut App, tick: Tick) {
     sync_reborn(host, client, tick, &[]);
 }
 
@@ -121,7 +122,7 @@ fn reset_records_the_rebirth_and_the_query_is_baseline_relative() {
     let mut app = peer();
     app.world_mut()
         .spawn((TickTrackedEntity(ID), Pos(0), Pellet(5)));
-    app.world_mut().resource_mut::<CurrentTick>().0 = 7;
+    app.world_mut().resource_mut::<CurrentTick>().0 = Tick(7);
 
     let entity = entity_of(&mut app, ID);
     let world = app.world_mut();
@@ -129,12 +130,12 @@ fn reset_records_the_rebirth_and_the_query_is_baseline_relative() {
 
     let lifetimes = app.world().resource::<TrackedEntityLifetimes>();
     assert_eq!(
-        lifetimes.reborn_since(6).collect::<Vec<_>>(),
+        lifetimes.reborn_since(Tick(6)).collect::<Vec<_>>(),
         vec![ID],
         "a recipient whose world predates the change of hands has to be told about it"
     );
     assert!(
-        lifetimes.reborn_since(7).next().is_none(),
+        lifetimes.reborn_since(Tick(7)).next().is_none(),
         "and one whose baseline is the tick it happened on already has it. A needless reset is \
          not free: it would throw away local-only state and re-dress an entity already right"
     );
@@ -148,17 +149,17 @@ fn an_id_revived_from_a_tombstone_as_something_else_is_reset_and_redressed() {
     let mut client = peer();
     host.world_mut()
         .spawn((TickTrackedEntity(ID), Pos(0), Pellet(5)));
-    sync(&mut host, &mut client, 1);
+    sync(&mut host, &mut client, Tick(1));
 
     // What an earlier snapshot would have done to a prediction the authority never had: the id is
     // not in that body, so the client tombstones it.
     let before = entity_of(&mut client, ID);
     client.world_mut().entity_mut(before).insert(Kept);
     let world = client.world_mut();
-    tombstone(world, before, ID, 1);
+    tombstone(world, before, ID, Tick(1));
 
     hand_the_id_over(&mut host);
-    sync(&mut host, &mut client, 2);
+    sync(&mut host, &mut client, Tick(2));
 
     let after = entity_of(&mut client, ID);
     assert_eq!(
@@ -193,7 +194,7 @@ fn a_live_id_the_authority_names_as_reborn_is_reset_and_redressed() {
     let mut client = peer();
     host.world_mut()
         .spawn((TickTrackedEntity(ID), Pos(0), Pellet(5)));
-    sync(&mut host, &mut client, 1);
+    sync(&mut host, &mut client, Tick(1));
 
     let entity = entity_of(&mut client, ID);
     assert!(
@@ -206,7 +207,7 @@ fn a_live_id_the_authority_names_as_reborn_is_reset_and_redressed() {
     client.world_mut().entity_mut(entity).insert(Kept);
 
     hand_the_id_over(&mut host);
-    sync_reborn(&mut host, &mut client, 2, &[ID]);
+    sync_reborn(&mut host, &mut client, Tick(2), &[ID]);
 
     let after = entity_of(&mut client, ID);
     assert_eq!(after, entity, "the same entity: the id is what is reused");
@@ -240,7 +241,7 @@ fn a_live_id_nobody_named_is_left_alone() {
     let mut client = peer();
     host.world_mut()
         .spawn((TickTrackedEntity(ID), Pos(0), Pellet(5)));
-    sync(&mut host, &mut client, 1);
+    sync(&mut host, &mut client, Tick(1));
 
     let entity = entity_of(&mut client, ID);
     client.world_mut().entity_mut(entity).insert(Kept);
@@ -248,7 +249,7 @@ fn a_live_id_nobody_named_is_left_alone() {
     // The same thing, moved: what almost every snapshot is.
     let on_host = entity_of(&mut host, ID);
     host.world_mut().entity_mut(on_host).insert(Pos(1));
-    sync(&mut host, &mut client, 2);
+    sync(&mut host, &mut client, Tick(2));
 
     let after = entity_of(&mut client, ID);
     assert_eq!(

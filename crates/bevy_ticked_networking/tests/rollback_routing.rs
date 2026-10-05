@@ -30,7 +30,7 @@ struct Pos(i32);
 struct TicksSeen(u64);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Footstep(u64);
+struct Footstep(Tick);
 
 const LOCAL: u128 = 7;
 const TICK: Duration = Duration::from_micros(15_625);
@@ -57,7 +57,7 @@ fn step_each_tick(
 }
 
 #[derive(Resource, Default)]
-struct Presented(Vec<u64>);
+struct Presented(Vec<Tick>);
 
 fn present(mut steps: TickedEventReader<Footstep>, mut out: ResMut<Presented>) {
     for (tick, _) in steps.read() {
@@ -89,7 +89,7 @@ fn client() -> App {
 /// tick, so the correction agrees with the prediction and only the rollback's bookkeeping is
 /// under test. From history, not a fresh capture: capturing now would overwrite the tick's
 /// history with the current world, which is the very thing the rollback must not see.
-fn deliver(app: &mut App, tick: u64) {
+fn deliver(app: &mut App, tick: Tick) {
     let mut packet = SnapshotPacket::full(tick, build_full_body(app.world_mut(), tick));
     packet.your_margin = 2;
     app.world_mut().trigger(ReceivedNetworkSnapshot(packet));
@@ -104,8 +104,8 @@ fn sync(app: &mut App) {
         bevy_ticked_networking::replication::ReplicationMode::Predicted,
     ));
     let registry = app.world().resource::<TickedComponentRegistry>().clone();
-    registry.capture_all(app.world_mut(), 0);
-    deliver(app, 0);
+    registry.capture_all(app.world_mut(), Tick::ZERO);
+    deliver(app, Tick::ZERO);
     app.update();
 }
 
@@ -127,7 +127,7 @@ fn a_client_rollback_restores_rollback_only_components() {
         .target_replay_distance;
     let current = app.world().resource::<CurrentTick>().0;
     let before = ticks_seen(&mut app);
-    assert_eq!(before, current, "one increment per tick, so far");
+    assert_eq!(before, current.0, "one increment per tick, so far");
 
     // A snapshot that agrees with the prediction, so the only thing that can go wrong is the
     // rollback's own bookkeeping.
@@ -137,7 +137,7 @@ fn a_client_rollback_restores_rollback_only_components() {
     let current = app.world().resource::<CurrentTick>().0;
     assert_eq!(
         ticks_seen(&mut app),
-        current,
+        current.0,
         "after a rollback the rollback-only counter should still equal the tick: it was \
          not restored to the snapshot tick's value before the replay re-counted {lead} ticks"
     );
@@ -180,7 +180,7 @@ fn a_client_rollback_unpublishes_events_from_ticks_the_authority_erased() {
     app.update();
 
     let log = app.world().resource::<TickedEvents<Footstep>>();
-    for tick in (current - lead + 1)..=current {
+    for tick in (current - lead).next().through(current) {
         assert!(
             log.at_tick(tick).is_empty(),
             "tick {tick} was replayed without a footstep, but the log still holds {:?}: the \
@@ -189,12 +189,12 @@ fn a_client_rollback_unpublishes_events_from_ticks_the_authority_erased() {
         );
     }
     let mut ticks_with_steps = 0;
-    for tick in 0..=current {
+    for tick in Tick::ZERO.through(current) {
         ticks_with_steps += usize::from(!log.at_tick(tick).is_empty());
     }
     assert_eq!(
         ticks_with_steps as u64,
-        current - lead,
+        (current - lead).0,
         "the footsteps up to the snapshot's tick are the ones that survive"
     );
     // And nothing new was presented for the replayed range.
@@ -217,7 +217,7 @@ fn the_client_plugin_sizes_the_history_window() {
     app.finish();
     let window = app.world().resource::<HistoryBufferTicks>().0;
     assert!(
-        (2 * 64..HISTORY_BUFFER_TICKS).contains(&window),
+        (Ticks(2 * 64)..HISTORY_BUFFER_TICKS).contains(&window),
         "a client keeps what a rollback can reach, not a hundred seconds: {window}"
     );
 }

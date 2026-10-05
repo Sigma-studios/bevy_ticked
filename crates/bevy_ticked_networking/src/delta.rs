@@ -48,7 +48,7 @@ pub type Layout = Vec<(u16, Range<usize>)>;
 #[derive(Clone, Debug)]
 pub struct Baseline {
     pub seq: u32,
-    pub tick: u64,
+    pub tick: bevy_ticked::tick_types::Tick,
     pub body: FullBody,
     /// One layout per record in `body.entities`.
     pub layouts: Vec<Layout>,

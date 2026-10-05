@@ -38,7 +38,7 @@ struct Probe {
     /// Frame `AwaitingSync` was first seen held (observed in `Last`): the join door ran.
     reset_at: Option<u32>,
     /// Every snapshot about to be applied: (frame, awaiting_sync_held, current_tick before).
-    applies: Vec<(u32, bool, u64)>,
+    applies: Vec<(u32, bool, Tick)>,
 }
 
 fn before_apply(
@@ -72,12 +72,12 @@ fn end_of_frame(
     probe.frame += 1;
 }
 
-fn snapshot(tick: u64) -> ReceivedEnsembleMessage<EnsembleSnapshotMessage> {
+fn snapshot(tick: Tick) -> ReceivedEnsembleMessage<EnsembleSnapshotMessage> {
     ReceivedEnsembleMessage {
         sender: Some(HOST_UUID),
         message: EnsembleSnapshotMessage {
             bytes: encode_packet(&SnapshotPacket {
-                seq: tick as u32,
+                seq: tick.0 as u32,
                 tick,
                 your_margin: 0,
                 body: SnapshotBody::Full(FullBody::default()),
@@ -112,7 +112,7 @@ fn one_join(single_threaded: bool, solo: bool) -> Probe {
     app.insert_resource(RegistryVerified);
     app.world_mut().spawn(Lobby);
     for i in 0..6 {
-        app.world_mut().write_message(snapshot(1000 + i));
+        app.world_mut().write_message(snapshot(Tick(1000 + i)));
         app.update();
     }
     let mut probe = std::mem::take(&mut *app.world_mut().resource_mut::<Probe>());

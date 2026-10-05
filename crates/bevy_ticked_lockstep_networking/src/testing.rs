@@ -25,6 +25,7 @@
 use bevy::prelude::*;
 use bevy_ensemble::LobbyParticipant;
 use bevy_ticked::prelude::{CurrentTick, TickHolds};
+use bevy_ticked::tick_types::{Tick, Ticks};
 
 use crate::{
     ActionTracker, LastScheduledTick, LocalPendingActions, LockstepAction, LockstepConfig,
@@ -32,7 +33,7 @@ use crate::{
 };
 
 /// The tick this peer has simulated up to.
-pub fn current_tick(app: &App) -> u64 {
+pub fn current_tick(app: &App) -> Tick {
     app.world().resource::<CurrentTick>().0
 }
 
@@ -41,7 +42,7 @@ pub fn current_tick(app: &App) -> u64 {
 ///
 /// On the host it is the number the joiner's grace window is measured from, which is what a
 /// test of the window asserts about; a second `ClientLoaded` used to move it.
-pub fn participant_joined_at(app: &App, player_uuid: u128) -> Option<u64> {
+pub fn participant_joined_at(app: &App, player_uuid: u128) -> Option<Tick> {
     let world = app.world();
     // `try_query` rather than `query`: it needs no `&mut World`, so this composes with a
     // network's `run_until`, and a world that has never seen the component has nobody on it.
@@ -61,12 +62,12 @@ pub fn is_paused(app: &App) -> bool {
 }
 
 /// What the client-side buffer has settled on, in ticks.
-pub fn client_tick_buffer(app: &App) -> u64 {
+pub fn client_tick_buffer(app: &App) -> Ticks {
     app.world().resource::<LockstepConfig>().client_tick_buffer
 }
 
 /// What the host-side buffer has settled on, in ticks.
-pub fn host_tick_buffer(app: &App) -> u64 {
+pub fn host_tick_buffer(app: &App) -> Ticks {
     app.world().resource::<LockstepConfig>().host_tick_buffer
 }
 
@@ -74,13 +75,16 @@ pub fn host_tick_buffer(app: &App) -> u64 {
 ///
 /// Sits `buffer` ahead of its current tick. What matters is that the sequence leading up to it
 /// has no holes — see [`tracker_gap`].
-pub fn last_scheduled_tick(app: &App) -> u64 {
-    app.world().resource::<LastScheduledTick>().0.unwrap_or(0)
+pub fn last_scheduled_tick(app: &App) -> Tick {
+    app.world()
+        .resource::<LastScheduledTick>()
+        .0
+        .unwrap_or(Tick::ZERO)
 }
 
 /// Which ticks this peer has any action data for, ascending.
-pub fn tracked_ticks<A: LockstepAction>(app: &App) -> Vec<u64> {
-    let mut ticks: Vec<u64> = app
+pub fn tracked_ticks<A: LockstepAction>(app: &App) -> Vec<Tick> {
+    let mut ticks: Vec<Tick> = app
         .world()
         .resource::<ActionTracker<A>>()
         .ticks
@@ -98,15 +102,15 @@ pub fn tracked_ticks<A: LockstepAction>(app: &App) -> Vec<u64> {
 ///
 /// Old ticks are pruned from the front as they are simulated, so only a gap *inside* the retained
 /// window counts — this reports `None` for a window that simply starts late.
-pub fn tracker_gap<A: LockstepAction>(app: &App) -> Option<u64> {
+pub fn tracker_gap<A: LockstepAction>(app: &App) -> Option<Tick> {
     tracked_ticks::<A>(app)
         .windows(2)
-        .find(|pair| pair[1] != pair[0] + 1)
-        .map(|pair| pair[0] + 1)
+        .find(|pair| pair[1] != pair[0].next())
+        .map(|pair| pair[0].next())
 }
 
 /// Every action recorded for `tick`, flattened across players in the tracker's own order.
-pub fn actions_at<A: LockstepAction>(app: &App, tick: u64) -> Vec<A> {
+pub fn actions_at<A: LockstepAction>(app: &App, tick: Tick) -> Vec<A> {
     app.world()
         .resource::<ActionTracker<A>>()
         .actions_for_tick(tick)
@@ -121,17 +125,17 @@ pub fn migration_state(app: &App) -> crate::LockstepMigration {
 
 /// The last tick this peer ruled or was told was ruled: past its clock on a host that took over
 /// and has not caught up.
-pub fn last_broadcast_tick(app: &App) -> u64 {
+pub fn last_broadcast_tick(app: &App) -> Tick {
     app.world().resource::<crate::LastBroadcastTick>().0
 }
 
 /// The newest tick this peer holds a ruling for.
-pub fn newest_ruled_tick<A: LockstepAction>(app: &App) -> Option<u64> {
+pub fn newest_ruled_tick<A: LockstepAction>(app: &App) -> Option<Tick> {
     app.world().resource::<ActionTracker<A>>().newest_tick()
 }
 
 /// The actions this client scheduled that no ruling has covered yet, by tick.
-pub fn unruled_local_actions<A: LockstepAction>(app: &App) -> Vec<(u64, Vec<A>)> {
+pub fn unruled_local_actions<A: LockstepAction>(app: &App) -> Vec<(Tick, Vec<A>)> {
     app.world()
         .resource::<crate::UnruledLocalActions<A>>()
         .0
@@ -169,7 +173,7 @@ mod tests {
         let mut app = App::new();
         let mut tracker = ActionTracker::<u8>::default();
         for tick in ticks {
-            tracker.ticks.entry(*tick).or_default();
+            tracker.ticks.entry(Tick(*tick)).or_default();
         }
         app.insert_resource(tracker);
         app
@@ -179,7 +183,7 @@ mod tests {
     fn a_contiguous_sequence_has_no_gap() {
         let app = app_with(&[4, 5, 6, 7]);
         assert_eq!(tracker_gap::<u8>(&app), None);
-        assert_eq!(tracked_ticks::<u8>(&app), vec![4, 5, 6, 7]);
+        assert_eq!(tracked_ticks::<u8>(&app), [4, 5, 6, 7].map(Tick).to_vec());
     }
 
     #[test]
@@ -187,7 +191,7 @@ mod tests {
         let app = app_with(&[4, 5, 9, 10]);
         assert_eq!(
             tracker_gap::<u8>(&app),
-            Some(6),
+            Some(Tick(6)),
             "the hole starts at 6; reporting 9 would name the tick that arrived rather than the \
              one the host is about to wait on for ever"
         );

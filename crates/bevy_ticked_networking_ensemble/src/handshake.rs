@@ -148,8 +148,8 @@ fn name_difference(kind: &str, ours: &[String], theirs: &[String]) -> Option<Str
 #[derive(Message, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TickedSessionWelcome {
     pub slot: u8,
-    pub server_tick: u64,
-    pub send_every: u64,
+    pub server_tick: bevy_ticked::tick_types::Tick,
+    pub send_every: bevy_ticked::tick_types::Ticks,
 }
 
 /// Set when a peer's registries turned out not to match this one's.
@@ -424,10 +424,12 @@ fn verify_client(world: &mut World, uuid: u128) {
         return;
     };
     world.entity_mut(client).insert(TickedPeerVerified);
-    let server_tick = world.get_resource::<CurrentTick>().map_or(0, |tick| tick.0);
+    let server_tick = world
+        .get_resource::<CurrentTick>()
+        .map_or(bevy_ticked::tick_types::Tick::ZERO, |tick| tick.0);
     let send_every = world
         .get_resource::<bevy_ticked_networking::server::SendEvery>()
-        .map_or(1, |every| every.0);
+        .map_or(bevy_ticked::tick_types::Ticks::ONE, |every| every.0);
     world.trigger(LobbyClientMessage {
         entity: client,
         message: TickedSessionWelcome {
@@ -470,7 +472,7 @@ pub(crate) fn apply_welcome(
     if let Some(welcome) = pending.0.take() {
         commands.insert_resource(LocalSpawnerSlot(SpawnerSlot(welcome.slot)));
         commands.insert_resource(bevy_ticked_networking::replication::InterpolationDelay(
-            (2 * welcome.send_every).max(2),
+            (welcome.send_every * 2).max(bevy_ticked::tick_types::Ticks(2)),
         ));
     }
 }

@@ -752,7 +752,7 @@ fn sync_visuals(
 // --- UI ---
 
 fn format_in_game_ui(
-    tick: u64,
+    tick: Tick,
     is_paused: bool,
     is_host: bool,
     lobby_entity: Entity,

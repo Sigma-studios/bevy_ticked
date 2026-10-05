@@ -47,6 +47,7 @@ use bevy_ensemble::{
     LocalMultiplayerPlayerId, ReceivedEnsembleMessage, VerifiedHost,
 };
 use bevy_ticked::tick::{CurrentTick, TickHoldReason, TickHolds};
+use bevy_ticked::tick_types::{Tick, Ticks};
 use serde::{Deserialize, Serialize};
 
 use crate::session::AnnouncedJoins;
@@ -69,7 +70,7 @@ pub struct HostMigrationPolicy {
     /// rules a tick only once every client's actions for it are in, and a client schedules at
     /// most its buffer ahead of the rulings it holds. The default, 128, is above the largest
     /// buffer the adaptive tuner sizes.
-    pub trust_window: u64,
+    pub trust_window: Ticks,
     /// How long a new host waits for every survivor to report before deciding without the ones
     /// that have not. Normally never reached: a survivor that cannot reach the new host is
     /// dropped from the lobby by `bevy_ensemble` first.
@@ -79,7 +80,7 @@ pub struct HostMigrationPolicy {
 impl Default for HostMigrationPolicy {
     fn default() -> Self {
         Self {
-            trust_window: 128,
+            trust_window: Ticks(128),
             report_timeout: Duration::from_secs(30),
         }
     }
@@ -106,7 +107,7 @@ pub enum LockstepMigration {
     /// already ruled, before the session goes on as before.
     Resuming {
         previous_host: u128,
-        resume_after: u64,
+        resume_after: Tick,
     },
 }
 
@@ -131,7 +132,7 @@ impl LockstepMigration {
 /// Kept because a batch sent to a host that is gone is gone with it, and the new host must be
 /// sent it again. Forgotten once a ruling for its tick arrives.
 #[derive(Resource)]
-pub struct UnruledLocalActions<A>(pub BTreeMap<u64, Vec<A>>);
+pub struct UnruledLocalActions<A>(pub BTreeMap<Tick, Vec<A>>);
 
 impl<A> Default for UnruledLocalActions<A> {
     fn default() -> Self {
@@ -144,7 +145,7 @@ impl<A> Default for UnruledLocalActions<A> {
 #[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LastMigration {
     pub previous_host: u128,
-    pub resume_after: u64,
+    pub resume_after: Tick,
 }
 
 /// Host side: join snapshot requests that arrived while a migration was under way, to be served
@@ -157,7 +158,7 @@ pub struct DeferredJoinSnapshotRequests(pub Vec<u128>);
 #[derive(Resource)]
 pub(crate) struct MigrationCollection<A> {
     reports: BTreeMap<u128, MigrationReport>,
-    rulings: BTreeMap<u64, AuthoritativeTick<A>>,
+    rulings: BTreeMap<Tick, AuthoritativeTick<A>>,
 }
 
 impl<A> Default for MigrationCollection<A> {
@@ -180,9 +181,9 @@ pub(crate) struct ParkedVerdict(MigrationResume);
 pub struct MigrationReport {
     /// The host that was lost, so a report cannot be read into a different migration.
     pub previous_host: u128,
-    pub current_tick: u64,
+    pub current_tick: Tick,
     /// The newest tick this survivor holds a ruling for.
-    pub newest_ruled: u64,
+    pub newest_ruled: Tick,
 }
 
 /// A survivor to its new host: one ruling it holds from the old host. Sent for every ruling it
@@ -197,7 +198,7 @@ pub struct MigrationRuling<A> {
 #[derive(Message, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MigrationResume {
     pub previous_host: u128,
-    pub resume_after: u64,
+    pub resume_after: Tick,
     pub verdict: ResumeVerdict,
 }
 
@@ -215,7 +216,7 @@ pub enum ResumeVerdict {
 #[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LockstepResumed {
     pub previous_host: u128,
-    pub resume_after: u64,
+    pub resume_after: Tick,
     pub verdict: ResumeVerdict,
 }
 
@@ -422,7 +423,7 @@ pub(crate) fn report_to_new_host<A: LockstepAction, S: JoinSnapshot>(world: &mut
     let current = world.resource::<CurrentTick>().0;
     let rulings: Vec<AuthoritativeTick<A>> = {
         let tracker = world.resource::<ActionTracker<A>>();
-        let mut ticks: Vec<u64> = tracker.ticks.keys().copied().collect();
+        let mut ticks: Vec<Tick> = tracker.ticks.keys().copied().collect();
         ticks.sort_unstable();
         ticks
             .into_iter()
@@ -463,7 +464,7 @@ pub(crate) fn report_to_new_host<A: LockstepAction, S: JoinSnapshot>(world: &mut
 }
 
 /// The ruling for `tick` as this peer holds it, in the shape it travels in.
-fn ruling_from<A: LockstepAction>(tracker: &ActionTracker<A>, tick: u64) -> AuthoritativeTick<A> {
+fn ruling_from<A: LockstepAction>(tracker: &ActionTracker<A>, tick: Tick) -> AuthoritativeTick<A> {
     AuthoritativeTick {
         tick,
         players_actions: tracker
@@ -529,7 +530,10 @@ pub(crate) fn apply_migration_verdict<A: LockstepAction, S: JoinSnapshot>(
             let current = world.resource::<CurrentTick>().0;
             let complete = {
                 let tracker = world.resource::<ActionTracker<A>>();
-                (current + 1..=resume_after).all(|tick| tracker.ticks.contains_key(&tick))
+                current
+                    .next()
+                    .through(resume_after)
+                    .all(|tick| tracker.ticks.contains_key(&tick))
             };
             if !complete {
                 return;
@@ -546,11 +550,11 @@ pub(crate) fn apply_migration_verdict<A: LockstepAction, S: JoinSnapshot>(
             let scheduled_through = world
                 .resource::<LastScheduledTick>()
                 .0
-                .unwrap_or(0)
-                .max(resume_after + 1 + buffer);
+                .unwrap_or(Tick::ZERO)
+                .max(resume_after.next() + buffer);
             // Everything this peer had said about the ticks after `resume_after` went to a host
             // that is gone. Said again, every tick of it: the new host waits for each.
-            for tick in resume_after + 1..=scheduled_through {
+            for tick in resume_after.next().through(scheduled_through) {
                 let actions = unruled.get(&tick).cloned().unwrap_or_default();
                 world.trigger(LobbyMessage::new_no_delay(
                     lobby,
@@ -709,7 +713,7 @@ pub(crate) fn decide_resume_tick<A: LockstepAction>(world: &mut World) {
         .unwrap_or_default();
 
     // Everyone in the simulation but this peer: whose word the decision waits for.
-    let participants: BTreeMap<u128, (Entity, u64)> = world
+    let participants: BTreeMap<u128, (Entity, Tick)> = world
         .query::<(
             Entity,
             &LobbyParticipant,
@@ -743,7 +747,7 @@ pub(crate) fn decide_resume_tick<A: LockstepAction>(world: &mut World) {
         let own_newest = tracker.newest_tick().unwrap_or(current).max(current);
         let mut resume_after = own_newest;
         while resume_after < own_newest + policy.trust_window {
-            let next = resume_after + 1;
+            let next = resume_after.next();
             if !tracker.ticks.contains_key(&next) {
                 let Some(ruling) = rulings.get(&next) else {
                     break;
@@ -760,7 +764,7 @@ pub(crate) fn decide_resume_tick<A: LockstepAction>(world: &mut World) {
     let roster_at_resume: BTreeSet<u128> = {
         let tracker = world.resource::<ActionTracker<A>>();
         let mut roster = world.resource::<LockstepRoster>().0.clone();
-        for tick in current + 1..=resume_after {
+        for tick in current.next().through(resume_after) {
             for action in tracker.system_actions_for_tick(tick) {
                 match *action {
                     SystemAction::ParticipantJoined(uuid) => {
@@ -788,10 +792,14 @@ pub(crate) fn decide_resume_tick<A: LockstepAction>(world: &mut World) {
         let Some(&seat) = seats.get(uuid) else {
             continue;
         };
-        let missing = report.newest_ruled.max(report.current_tick) + 1..=resume_after;
-        let fillable = missing
-            .clone()
-            .all(|tick| tracker.ticks.contains_key(&tick));
+        let missing = || {
+            report
+                .newest_ruled
+                .max(report.current_tick)
+                .next()
+                .through(resume_after)
+        };
+        let fillable = missing().all(|tick| tracker.ticks.contains_key(&tick));
         let joins_later = participants
             .get(uuid)
             .is_some_and(|(_, joined_at)| *joined_at > resume_after);
@@ -809,7 +817,7 @@ pub(crate) fn decide_resume_tick<A: LockstepAction>(world: &mut World) {
         };
         if continues {
             continuing.insert(*uuid);
-            let fill = missing.map(|tick| ruling_from(tracker, tick)).collect();
+            let fill = missing().map(|tick| ruling_from(tracker, tick)).collect();
             verdicts.push((seat, fill, verdict));
         } else {
             warn!(

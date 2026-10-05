@@ -58,6 +58,18 @@ fn guard() -> SourceGuard {
                 expires: None,
             },
             Exception {
+                path: "src/tick.rs",
+                needle: "DEFAULT_TIMESTEP",
+                reason: "the definition, and the deprecated alias defined from it",
+                expires: None,
+            },
+            Exception {
+                path: "src/prelude.rs",
+                needle: "DEFAULT_TIMESTEP",
+                reason: "the re-export of the definition in src/tick.rs",
+                expires: None,
+            },
+            Exception {
                 path: "examples/bouncing_ball.rs",
                 needle: "ButtonInput",
                 reason: "`keyboard_controls` runs in Update and pauses, resumes and steps the \

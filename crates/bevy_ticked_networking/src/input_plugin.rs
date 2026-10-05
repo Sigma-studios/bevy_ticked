@@ -119,6 +119,6 @@ fn file_sampled<I: TickedInput, O: Sampled<I>>(
         return;
     }
     if let Some(input) = sampled.into_sampled() {
-        queue.insert(tick.0 + 1, local.0, input);
+        queue.insert(tick.0.next(), local.0, input);
     }
 }

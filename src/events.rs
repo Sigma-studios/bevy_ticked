@@ -67,6 +67,7 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
 use crate::tick::{CurrentTick, HistoryBufferTicks};
+use crate::tick_types::Tick;
 
 /// Trait bound for anything that can be logged per tick.
 ///
@@ -83,24 +84,24 @@ impl<T> TickedEvent for T where T: Send + Sync + Clone + PartialEq + 'static {}
 #[derive(Resource)]
 pub struct TickedEvents<T: TickedEvent> {
     /// tick -> everything that happened at that tick, in the order it was written.
-    log: BTreeMap<u64, Vec<T>>,
+    log: BTreeMap<Tick, Vec<T>>,
     /// The highest tick already handed to a reader. Rewound by a rollback, so the
     /// replayed ticks are read again — through [`Self::heard`].
-    presented: u64,
+    presented: Tick,
     /// tick -> what has already been handed to a reader for that tick. A rollback
     /// leaves this alone: it is what the reader was told, whatever the log now
     /// says, and it is how a replay that repeats a tick is kept from being
     /// presented twice.
-    heard: BTreeMap<u64, Vec<T>>,
+    heard: BTreeMap<Tick, Vec<T>>,
     /// The tick currently being written, so the first write of a replay clears it.
-    writing: Option<u64>,
+    writing: Option<Tick>,
 }
 
 impl<T: TickedEvent> Default for TickedEvents<T> {
     fn default() -> Self {
         Self {
             log: BTreeMap::new(),
-            presented: 0,
+            presented: Tick::ZERO,
             heard: BTreeMap::new(),
             writing: None,
         }
@@ -114,7 +115,7 @@ impl<T: TickedEvent> TickedEvents<T> {
     /// previously, which is what makes a replay idempotent rather than cumulative.
     /// A tick that produced two events the first time and two events the second
     /// time holds two, not four.
-    pub fn write(&mut self, tick: u64, event: T) {
+    pub fn write(&mut self, tick: Tick, event: T) {
         if self.writing != Some(tick) {
             self.writing = Some(tick);
             self.log.insert(tick, Vec::new());
@@ -123,7 +124,7 @@ impl<T: TickedEvent> TickedEvents<T> {
     }
 
     /// Everything recorded at `tick`.
-    pub fn at_tick(&self, tick: u64) -> &[T] {
+    pub fn at_tick(&self, tick: Tick) -> &[T] {
         self.log.get(&tick).map(Vec::as_slice).unwrap_or(&[])
     }
 
@@ -135,24 +136,24 @@ impl<T: TickedEvent> TickedEvents<T> {
     /// corrected version of a tick would be silently swallowed as "already shown".
     /// What was shown is kept (see [`Self::heard`]), so rewinding does not show it
     /// again.
-    pub fn truncate_after(&mut self, tick: u64) {
-        self.log.split_off(&(tick + 1));
+    pub fn truncate_after(&mut self, tick: Tick) {
+        self.log.split_off(&tick.next());
         self.presented = self.presented.min(tick);
         self.writing = None;
     }
 
     /// Drop everything before `tick`.
-    pub fn prune_before(&mut self, tick: u64) {
+    pub fn prune_before(&mut self, tick: Tick) {
         self.log = self.log.split_off(&tick);
         self.heard = self.heard.split_off(&tick);
-        self.presented = self.presented.max(tick.saturating_sub(1));
+        self.presented = self.presented.max(tick.prev());
     }
 
     /// Clear the whole log, for a session reset.
     pub fn clear(&mut self) {
         self.log.clear();
         self.heard.clear();
-        self.presented = 0;
+        self.presented = Tick::ZERO;
         self.writing = None;
     }
 
@@ -161,7 +162,7 @@ impl<T: TickedEvent> TickedEvents<T> {
     /// A tick read again after a rollback gives only what it did not say the first
     /// time, counted: a tick that was heard with two of the same event and now has
     /// three gives one.
-    fn drain_unpresented(&mut self, up_to: u64) -> Vec<(u64, T)> {
+    fn drain_unpresented(&mut self, up_to: Tick) -> Vec<(Tick, T)> {
         // The tick is behind what has been presented: the clock was set back
         // without this log being told — a session reset that did not clear it.
         // Nothing a rollback does gets here, since a rollback rewinds the
@@ -169,16 +170,16 @@ impl<T: TickedEvent> TickedEvents<T> {
         // passed the old watermark would count as already shown: silence, for
         // as long as the last session ran. Start over from the tick it is.
         if self.presented > up_to {
-            self.log.split_off(&(up_to + 1));
+            self.log.split_off(&up_to.next());
             self.heard.clear();
-            self.presented = 0;
+            self.presented = Tick::ZERO;
             self.writing = None;
         }
         let mut out = Vec::new();
         // `BTreeMap::range` panics on an inverted range rather than yielding
         // nothing, and "everything is already presented" inverts it — which is the
         // common case, once per frame, on every frame where nothing happened.
-        let from = self.presented.saturating_add(1);
+        let from = Tick(self.presented.0.saturating_add(1));
         if from <= up_to {
             for (&tick, events) in self.log.range(from..=up_to) {
                 let heard = self.heard.entry(tick).or_default();
@@ -212,7 +213,7 @@ pub struct TickedEventWriter<'w, T: TickedEvent> {
 
 impl<T: TickedEvent> TickedEventWriter<'_, T> {
     /// Record that `event` happened at `tick`. Safe to call from a replayed tick.
-    pub fn write(&mut self, tick: u64, event: T) {
+    pub fn write(&mut self, tick: Tick, event: T) {
         self.events.write(tick, event);
     }
 }
@@ -230,7 +231,7 @@ impl<T: TickedEvent> TickedEventReader<'_, T> {
     /// One reader per event type. Two systems reading the same `T` would race for
     /// the watermark and each see roughly half — read once and fan out from there,
     /// which is what a presentation layer wants anyway.
-    pub fn read(&mut self) -> Vec<(u64, T)> {
+    pub fn read(&mut self) -> Vec<(Tick, T)> {
         let now = self.tick.0;
         self.events.drain_unpresented(now)
     }
@@ -267,7 +268,7 @@ fn prune_ticked_events<T: TickedEvent>(
     mut events: ResMut<TickedEvents<T>>,
 ) {
     let oldest = tick.0.saturating_sub(buffer.0);
-    if oldest > 0 {
+    if oldest > Tick::ZERO {
         events.prune_before(oldest);
     }
 }
@@ -281,12 +282,12 @@ fn prune_ticked_events<T: TickedEvent>(
 /// writes nothing, so there is no first-write to clear the stale entry with. The
 /// prediction that never happened would be presented anyway.
 #[derive(Resource, Default)]
-pub struct TickedEventRegistry(Vec<(fn(&mut World, u64), fn(&mut World))>);
+pub struct TickedEventRegistry(Vec<(fn(&mut World, Tick), fn(&mut World))>);
 
 impl TickedEventRegistry {
     /// Discard every registered log's events after `tick`, and rewind their
     /// presentation watermarks to match.
-    pub fn truncate_all_after(world: &mut World, tick: u64) {
+    pub fn truncate_all_after(world: &mut World, tick: Tick) {
         let Some(registry) = world.get_resource::<Self>() else {
             return;
         };
@@ -319,7 +320,7 @@ fn clear_one<T: TickedEvent>(world: &mut World) {
     }
 }
 
-fn truncate_one<T: TickedEvent>(world: &mut World, tick: u64) {
+fn truncate_one<T: TickedEvent>(world: &mut World, tick: Tick) {
     if let Some(mut events) = world.get_resource_mut::<TickedEvents<T>>() {
         events.truncate_after(tick);
     }
@@ -341,16 +342,16 @@ mod tests {
         // The property the whole design rests on. Without it, a client that
         // replays six ticks a frame reports six times as much as happened.
         let mut events = log();
-        events.write(5, Thunk(1));
-        events.write(5, Thunk(2));
-        assert_eq!(events.at_tick(5), &[Thunk(1), Thunk(2)]);
+        events.write(Tick(5), Thunk(1));
+        events.write(Tick(5), Thunk(2));
+        assert_eq!(events.at_tick(Tick(5)), &[Thunk(1), Thunk(2)]);
 
         // Tick 5 runs again, as a rollback replay. Same two events.
-        events.write(6, Thunk(9)); // moving on...
-        events.write(5, Thunk(1)); // ...then back, which starts 5 over
-        events.write(5, Thunk(2));
+        events.write(Tick(6), Thunk(9)); // moving on...
+        events.write(Tick(5), Thunk(1)); // ...then back, which starts 5 over
+        events.write(Tick(5), Thunk(2));
         assert_eq!(
-            events.at_tick(5),
+            events.at_tick(Tick(5)),
             &[Thunk(1), Thunk(2)],
             "a replay must not accumulate"
         );
@@ -359,20 +360,20 @@ mod tests {
     #[test]
     fn each_event_is_presented_exactly_once() {
         let mut events = log();
-        events.write(1, Thunk(1));
-        events.write(2, Thunk(2));
+        events.write(Tick(1), Thunk(1));
+        events.write(Tick(2), Thunk(2));
 
         assert_eq!(
-            events.drain_unpresented(2),
-            vec![(1, Thunk(1)), (2, Thunk(2))]
+            events.drain_unpresented(Tick(2)),
+            vec![(Tick(1), Thunk(1)), (Tick(2), Thunk(2))]
         );
         assert!(
-            events.drain_unpresented(2).is_empty(),
+            events.drain_unpresented(Tick(2)).is_empty(),
             "a second read must see nothing"
         );
 
-        events.write(3, Thunk(3));
-        assert_eq!(events.drain_unpresented(3), vec![(3, Thunk(3))]);
+        events.write(Tick(3), Thunk(3));
+        assert_eq!(events.drain_unpresented(Tick(3)), vec![(Tick(3), Thunk(3))]);
     }
 
     #[test]
@@ -380,10 +381,10 @@ mod tests {
         // Ticks the simulation has run but the reader has not caught up to yet
         // must wait, or a rollback could unpresent something already shown.
         let mut events = log();
-        events.write(1, Thunk(1));
-        events.write(5, Thunk(5));
-        assert_eq!(events.drain_unpresented(3), vec![(1, Thunk(1))]);
-        assert_eq!(events.drain_unpresented(5), vec![(5, Thunk(5))]);
+        events.write(Tick(1), Thunk(1));
+        events.write(Tick(5), Thunk(5));
+        assert_eq!(events.drain_unpresented(Tick(3)), vec![(Tick(1), Thunk(1))]);
+        assert_eq!(events.drain_unpresented(Tick(5)), vec![(Tick(5), Thunk(5))]);
     }
 
     #[test]
@@ -393,15 +394,15 @@ mod tests {
         // swallowed as "already shown" and the player hears the guess and never
         // the truth.
         let mut events = log();
-        events.write(1, Thunk(1));
-        events.write(2, Thunk(2));
-        assert_eq!(events.drain_unpresented(2).len(), 2);
+        events.write(Tick(1), Thunk(1));
+        events.write(Tick(2), Thunk(2));
+        assert_eq!(events.drain_unpresented(Tick(2)).len(), 2);
 
-        events.truncate_after(1);
-        events.write(2, Thunk(99));
+        events.truncate_after(Tick(1));
+        events.write(Tick(2), Thunk(99));
         assert_eq!(
-            events.drain_unpresented(2),
-            vec![(2, Thunk(99))],
+            events.drain_unpresented(Tick(2)),
+            vec![(Tick(2), Thunk(99))],
             "the corrected tick 2 must be presented, and tick 1 must not repeat"
         );
     }
@@ -413,16 +414,16 @@ mod tests {
         // exactly. Rewinding the watermark must not present them a second time, or
         // every misprediction anywhere plays every recent sound twice.
         let mut events = log();
-        events.write(1, Thunk(1));
-        events.write(2, Thunk(2));
-        events.write(3, Thunk(3));
-        assert_eq!(events.drain_unpresented(3).len(), 3);
+        events.write(Tick(1), Thunk(1));
+        events.write(Tick(2), Thunk(2));
+        events.write(Tick(3), Thunk(3));
+        assert_eq!(events.drain_unpresented(Tick(3)).len(), 3);
 
-        events.truncate_after(1);
-        events.write(2, Thunk(2));
-        events.write(3, Thunk(3));
+        events.truncate_after(Tick(1));
+        events.write(Tick(2), Thunk(2));
+        events.write(Tick(3), Thunk(3));
         assert!(
-            events.drain_unpresented(3).is_empty(),
+            events.drain_unpresented(Tick(3)).is_empty(),
             "a replay that says the same thing says nothing new"
         );
     }
@@ -432,51 +433,51 @@ mod tests {
         // Two identical events heard; the corrected tick has three of them and
         // something else. One of each is new.
         let mut events = log();
-        events.write(2, Thunk(7));
-        events.write(2, Thunk(7));
-        assert_eq!(events.drain_unpresented(2).len(), 2);
+        events.write(Tick(2), Thunk(7));
+        events.write(Tick(2), Thunk(7));
+        assert_eq!(events.drain_unpresented(Tick(2)).len(), 2);
 
-        events.truncate_after(1);
-        events.write(2, Thunk(7));
-        events.write(2, Thunk(8));
-        events.write(2, Thunk(7));
-        events.write(2, Thunk(7));
+        events.truncate_after(Tick(1));
+        events.write(Tick(2), Thunk(7));
+        events.write(Tick(2), Thunk(8));
+        events.write(Tick(2), Thunk(7));
+        events.write(Tick(2), Thunk(7));
         assert_eq!(
-            events.drain_unpresented(2),
-            vec![(2, Thunk(8)), (2, Thunk(7))]
+            events.drain_unpresented(Tick(2)),
+            vec![(Tick(2), Thunk(8)), (Tick(2), Thunk(7))]
         );
 
         // And that is now what tick 2 was heard to say, for the next rollback.
-        events.truncate_after(1);
+        events.truncate_after(Tick(1));
         for thunk in [7, 7, 8, 7] {
-            events.write(2, Thunk(thunk));
+            events.write(Tick(2), Thunk(thunk));
         }
-        assert!(events.drain_unpresented(2).is_empty());
+        assert!(events.drain_unpresented(Tick(2)).is_empty());
     }
 
     #[test]
     fn a_rollback_before_the_reader_caught_up_still_presents_the_rest() {
         // Ticks the reader never reached are new, whatever the rollback did.
         let mut events = log();
-        events.write(1, Thunk(1));
-        events.write(2, Thunk(2));
-        assert_eq!(events.drain_unpresented(1), vec![(1, Thunk(1))]);
+        events.write(Tick(1), Thunk(1));
+        events.write(Tick(2), Thunk(2));
+        assert_eq!(events.drain_unpresented(Tick(1)), vec![(Tick(1), Thunk(1))]);
 
-        events.truncate_after(0);
-        events.write(1, Thunk(1));
-        events.write(2, Thunk(2));
-        assert_eq!(events.drain_unpresented(2), vec![(2, Thunk(2))]);
+        events.truncate_after(Tick(0));
+        events.write(Tick(1), Thunk(1));
+        events.write(Tick(2), Thunk(2));
+        assert_eq!(events.drain_unpresented(Tick(2)), vec![(Tick(2), Thunk(2))]);
     }
 
     #[test]
     fn clearing_forgets_what_was_heard_too() {
         let mut events = log();
-        events.write(5, Thunk(1));
-        assert_eq!(events.drain_unpresented(5).len(), 1);
+        events.write(Tick(5), Thunk(1));
+        assert_eq!(events.drain_unpresented(Tick(5)).len(), 1);
         events.clear();
         // The next session's tick 5 is not the last one's.
-        events.write(5, Thunk(1));
-        assert_eq!(events.drain_unpresented(5), vec![(5, Thunk(1))]);
+        events.write(Tick(5), Thunk(1));
+        assert_eq!(events.drain_unpresented(Tick(5)), vec![(Tick(5), Thunk(1))]);
     }
 
     #[test]
@@ -485,38 +486,38 @@ mod tests {
         // did not clear this log. Before, nothing was presented again until the
         // new session reached tick 900.
         let mut events = log();
-        events.write(900, Thunk(1));
-        assert_eq!(events.drain_unpresented(900).len(), 1);
+        events.write(Tick(900), Thunk(1));
+        assert_eq!(events.drain_unpresented(Tick(900)).len(), 1);
 
-        events.write(3, Thunk(2));
-        assert_eq!(events.drain_unpresented(3), vec![(3, Thunk(2))]);
-        events.write(4, Thunk(3));
-        assert_eq!(events.drain_unpresented(4), vec![(4, Thunk(3))]);
+        events.write(Tick(3), Thunk(2));
+        assert_eq!(events.drain_unpresented(Tick(3)), vec![(Tick(3), Thunk(2))]);
+        events.write(Tick(4), Thunk(3));
+        assert_eq!(events.drain_unpresented(Tick(4)), vec![(Tick(4), Thunk(3))]);
         // And the old session's tick 900 is gone, not waiting to be presented.
-        assert_eq!(events.at_tick(900), &[] as &[Thunk]);
+        assert_eq!(events.at_tick(Tick(900)), &[] as &[Thunk]);
     }
 
     #[test]
     fn truncation_drops_the_ticks_that_never_happened() {
         let mut events = log();
-        events.write(1, Thunk(1));
-        events.write(2, Thunk(2));
-        events.write(3, Thunk(3));
-        events.truncate_after(1);
-        assert_eq!(events.at_tick(2), &[] as &[Thunk]);
-        assert_eq!(events.at_tick(3), &[] as &[Thunk]);
-        assert_eq!(events.at_tick(1), &[Thunk(1)]);
+        events.write(Tick(1), Thunk(1));
+        events.write(Tick(2), Thunk(2));
+        events.write(Tick(3), Thunk(3));
+        events.truncate_after(Tick(1));
+        assert_eq!(events.at_tick(Tick(2)), &[] as &[Thunk]);
+        assert_eq!(events.at_tick(Tick(3)), &[] as &[Thunk]);
+        assert_eq!(events.at_tick(Tick(1)), &[Thunk(1)]);
     }
 
     #[test]
     fn pruning_does_not_resurrect_what_was_already_presented() {
         let mut events = log();
-        events.write(1, Thunk(1));
-        events.write(2, Thunk(2));
-        assert_eq!(events.drain_unpresented(2).len(), 2);
-        events.prune_before(2);
+        events.write(Tick(1), Thunk(1));
+        events.write(Tick(2), Thunk(2));
+        assert_eq!(events.drain_unpresented(Tick(2)).len(), 2);
+        events.prune_before(Tick(2));
         assert!(
-            events.drain_unpresented(2).is_empty(),
+            events.drain_unpresented(Tick(2)).is_empty(),
             "pruning must not move the watermark backwards"
         );
     }

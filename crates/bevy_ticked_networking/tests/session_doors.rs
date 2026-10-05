@@ -124,10 +124,12 @@ fn leaving_a_session_clears_the_input_queue_and_the_tick() {
     app.world_mut().insert_resource(LocalServerPlayer(1));
     app.update();
 
-    app.world_mut()
-        .resource_mut::<InputQueue<Input>>()
-        .insert(40, 1, Input { forward: true });
-    app.world_mut().insert_resource(CurrentTick(40));
+    app.world_mut().resource_mut::<InputQueue<Input>>().insert(
+        Tick(40),
+        1,
+        Input { forward: true },
+    );
+    app.world_mut().insert_resource(CurrentTick(Tick(40)));
 
     app.world_mut().remove_resource::<LocalServerPlayer>();
     app.update();
@@ -139,7 +141,7 @@ fn leaving_a_session_clears_the_input_queue_and_the_tick() {
             .is_empty(),
         "inputs from the last session must not be applied to the next one"
     );
-    assert_eq!(app.world().resource::<CurrentTick>().0, 0);
+    assert_eq!(app.world().resource::<CurrentTick>().0, Tick::ZERO);
 }
 
 /// A peer that leaves before its first snapshot would otherwise stay paused for ever, waiting on a
@@ -247,8 +249,8 @@ fn a_role_taken_again_in_the_same_frame_runs_its_doors() {
     app.update();
     app.world_mut().spawn((TickTrackedEntity(1), Pos(5)));
     app.world_mut()
-        .insert_resource(AppliedSnapshotTick(Some(400)));
-    app.world_mut().insert_resource(CurrentTick(400));
+        .insert_resource(AppliedSnapshotTick(Some(Tick(400))));
+    app.world_mut().insert_resource(CurrentTick(Tick(400)));
     app.update();
 
     app.world_mut().remove_resource::<LocalClientPlayer>();
@@ -258,5 +260,5 @@ fn a_role_taken_again_in_the_same_frame_runs_its_doors() {
     let mut tracked = app.world_mut().query::<&TickTrackedEntity>();
     assert_eq!(tracked.iter(app.world()).count(), 0, "the old world went");
     assert_eq!(app.world().resource::<AppliedSnapshotTick>().0, None);
-    assert_eq!(app.world().resource::<CurrentTick>().0, 0);
+    assert_eq!(app.world().resource::<CurrentTick>().0, Tick::ZERO);
 }

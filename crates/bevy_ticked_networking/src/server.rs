@@ -9,6 +9,7 @@ use bevy_ticked::{
     registry::TickedComponentRegistry,
     session::{PerPeer, SessionAppExt, SessionReset, SessionScope},
     tick::{CurrentTick, HistoryBufferTicks, TickHoldReason, TickHolds},
+    tick_types::{Tick, Ticks},
 };
 
 use crate::{
@@ -60,7 +61,7 @@ pub struct MeasuredMargin {
     /// How many ticks ahead of the server the input arrived; negative is late.
     pub ticks: i64,
     /// The server tick at which it arrived.
-    pub at: u64,
+    pub at: Tick,
 }
 
 /// A margin older than this, in server ticks, is not reported. Inputs come every tick with
@@ -68,7 +69,7 @@ pub struct MeasuredMargin {
 /// stopped sending — no body to drive, a menu up — and its last margin describes a lead it may
 /// no longer hold. Reporting it as current let the client's target wander; reporting zero
 /// instead was worse (see [`MARGIN_UNMEASURED`]).
-pub const MARGIN_STALE_TICKS: u64 = 16;
+pub const MARGIN_STALE_TICKS: Ticks = Ticks(16);
 
 /// The highest input tick seen from each client so far.
 ///
@@ -76,7 +77,7 @@ pub const MARGIN_STALE_TICKS: u64 = 16;
 /// tick — see [`collect_network_inputs`]. Kept per sender because "newest" is a
 /// question about one client's stream, not about the session.
 #[derive(Resource, Default, Debug)]
-pub struct NewestInputTick(pub HashMap<u128, u64>);
+pub struct NewestInputTick(pub HashMap<u128, Tick>);
 
 impl SessionReset for SnapshotSeq {}
 impl PerPeer for SnapshotSeq {
@@ -129,7 +130,7 @@ pub struct TickedServerPlugin<T: TickedInput> {
     /// A client that agrees with the authority costs nothing per snapshot now, so the rate is
     /// a bandwidth knob and no longer a smoothness one; a remote body is interpolated across
     /// the gap either way (the bridge sets `InterpolationDelay` to twice this).
-    pub send_every: u64,
+    pub send_every: Ticks,
     /// Every this many packets to a client, a full body rather than a delta.
     pub keyframe_every: u32,
     /// How many sent packets to keep per client as candidate delta baselines. Must cover a
@@ -147,7 +148,7 @@ pub struct TickedServerPlugin<T: TickedInput> {
 impl<T: TickedInput> TickedServerPlugin<T> {
     pub fn new() -> Self {
         Self {
-            send_every: 1,
+            send_every: Ticks::ONE,
             keyframe_every: 64,
             max_unacked_baselines: 32,
             compression: Compression::default(),
@@ -157,8 +158,8 @@ impl<T: TickedInput> TickedServerPlugin<T> {
         }
     }
 
-    pub fn send_every(mut self, ticks: u64) -> Self {
-        self.send_every = ticks.max(1);
+    pub fn send_every(mut self, ticks: Ticks) -> Self {
+        self.send_every = ticks.max(Ticks::ONE);
         self
     }
 
@@ -194,7 +195,7 @@ pub struct NackedFull(pub std::collections::HashSet<u128>);
 
 /// Runtime copy of [`TickedServerPlugin::send_every`].
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SendEvery(pub u64);
+pub struct SendEvery(pub Ticks);
 
 impl<T: TickedInput> Default for TickedServerPlugin<T> {
     fn default() -> Self {
@@ -208,7 +209,7 @@ impl<T: TickedInput> Plugin for TickedServerPlugin<T> {
         crate::replication::install_owner(app);
         crate::pause::install(app);
         crate::session::install(app);
-        app.insert_resource(SendEvery(self.send_every.max(1)))
+        app.insert_resource(SendEvery(self.send_every.max(Ticks::ONE)))
             .insert_resource(DeltaPolicy {
                 keyframe_every: self.keyframe_every.max(1),
                 max_unacked_baselines: self.max_unacked_baselines.max(1),
@@ -299,7 +300,7 @@ fn collect_network_inputs<T: TickedInput>(
     }
     // How many ticks ahead of the server this input arrived (negative = late).
     // Reported back to the client so it can adapt its prediction lead.
-    let margin = event.tick as i64 - tick.0 as i64;
+    let margin = event.tick.offset_from(tick.0);
     stats.received += 1;
     if margin < 0 {
         stats.late += 1;
@@ -313,13 +314,13 @@ fn collect_network_inputs<T: TickedInput>(
     );
     queue.insert(event.tick, event.sender, event.input.clone());
 
-    let seen = newest.0.entry(event.sender).or_insert(0);
+    let seen = newest.0.entry(event.sender).or_insert(Tick::ZERO);
     if event.tick <= *seen {
         return;
     }
     *seen = event.tick;
     if event.tick <= tick.0 {
-        queue.insert(tick.0 + 1, event.sender, event.input.clone());
+        queue.insert(tick.0.next(), event.sender, event.input.clone());
     }
 }
 
@@ -357,7 +358,7 @@ fn broadcast_snapshot<T: TickedInput>(
     if server_player.is_none() || holds.holds(TickHoldReason::AwaitingSync) {
         return;
     }
-    if !tick.0.is_multiple_of(send_every.0.max(1)) {
+    if !tick.0.is_multiple_of(send_every.0.max(Ticks::ONE)) {
         return;
     }
     // The first held pass always sends, so a pause reaches every client the tick it starts;
@@ -392,7 +393,7 @@ impl SessionReset for PassesHeld {}
 /// Passes of the loop between snapshots while the clock is held: half a second at 64 Hz.
 const HELD_BROADCAST_EVERY: u32 = 32;
 
-struct BroadcastSnapshotCommand<T>(u64, PhantomData<T>);
+struct BroadcastSnapshotCommand<T>(Tick, PhantomData<T>);
 
 impl<T: TickedInput> Command for BroadcastSnapshotCommand<T> {
     type Out = ();
@@ -432,7 +433,7 @@ impl<T: TickedInput> Command for BroadcastSnapshotCommand<T> {
             };
             let your_margin = recipient
                 .and_then(|uuid| world.resource::<InputMargins>().0.get(&uuid).copied())
-                .filter(|measured| tick.saturating_sub(measured.at) <= MARGIN_STALE_TICKS)
+                .filter(|measured| tick.since(measured.at) <= MARGIN_STALE_TICKS)
                 .map_or(MARGIN_UNMEASURED, |measured| {
                     // One above the sentinel, so a genuinely enormous lateness stays a number.
                     measured.ticks.clamp(i16::MIN as i64 + 1, i16::MAX as i64) as i16
@@ -524,10 +525,10 @@ impl<T: TickedInput> Command for BroadcastSnapshotCommand<T> {
 
 /// Every input the host holds for ticks after `tick`, for every player, encoded. A client
 /// drops its own on arrival; the rest let its replay use what other players pressed.
-fn inputs_ahead<T: TickedInput>(world: &World, tick: u64) -> Vec<RelayedInput> {
+fn inputs_ahead<T: TickedInput>(world: &World, tick: Tick) -> Vec<RelayedInput> {
     let queue = world.resource::<InputQueue<T>>();
     let mut out = Vec::new();
-    for at in (tick + 1)..=(tick + MAX_INPUT_LEAD_TICKS) {
+    for at in tick.next().through(tick + MAX_INPUT_LEAD_TICKS) {
         let Some(inputs) = queue.at_tick(at) else {
             continue;
         };

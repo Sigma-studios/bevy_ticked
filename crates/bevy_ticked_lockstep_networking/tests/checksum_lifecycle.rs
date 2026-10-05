@@ -90,8 +90,8 @@ fn the_checksum_log_is_cleared_on_join_and_on_leave() {
         .map(|(tick, _)| tick)
         .expect("the client is sampling the joined world");
     assert!(
-        oldest > 300,
-        "the log still holds a sample from tick {oldest}, which is the world the client ran \
+        oldest > bevy_ticked::prelude::Tick(300),
+        "the log still holds a sample from {oldest}, which is the world the client ran \
          alone, not the one it joined"
     );
 
