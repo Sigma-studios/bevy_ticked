@@ -87,6 +87,21 @@ impl<T: TickedInput> InputQueue<T> {
             .find_map(|(_, players)| players.get(&player_uuid))
     }
 
+    /// A player's input at `tick` or the newest one before it, with the tick it was for.
+    ///
+    /// [`get_or_last`](Self::get_or_last) says what a player was pressing; this also says how
+    /// long ago. "Still pressing what they last pressed" is the right guess for a packet that is
+    /// late, and the wrong one for a player whose game has stopped sending — a tab in the
+    /// background, a frozen machine whose connection the transport still keeps alive — who would
+    /// otherwise go on running, or firing, for as long as they were away. The age is what tells
+    /// the two apart.
+    pub fn get_or_last_with_tick(&self, tick: u64, player_uuid: u128) -> Option<(u64, &T)> {
+        self.inputs
+            .range(..=tick)
+            .rev()
+            .find_map(|(at, players)| players.get(&player_uuid).map(|input| (*at, input)))
+    }
+
     /// Every player's input at `tick`, each falling back to their newest earlier one, in
     /// ascending uuid order. Players with nothing at or before `tick` are absent.
     pub fn at_tick_or_last(&self, tick: u64) -> BTreeMap<u128, T> {
@@ -191,5 +206,26 @@ fn prune_input_queue<T: TickedInput>(
     let oldest = tick.0.saturating_sub(buffer.0);
     if oldest > 0 {
         queue.prune_before(oldest);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    struct Press(u8);
+
+    #[test]
+    fn the_newest_input_comes_with_its_tick() {
+        let mut queue = InputQueue::<Press>::default();
+        queue.insert(10, 1, Press(1));
+        queue.insert(10, 2, Press(2));
+        queue.insert(30, 2, Press(3));
+
+        assert_eq!(queue.get_or_last_with_tick(27, 1), Some((10, &Press(1))));
+        assert_eq!(queue.get_or_last_with_tick(40, 2), Some((30, &Press(3))));
+        assert_eq!(queue.get_or_last_with_tick(29, 2), Some((10, &Press(2))));
+        assert_eq!(queue.get_or_last_with_tick(9, 1), None, "nothing before it");
     }
 }
