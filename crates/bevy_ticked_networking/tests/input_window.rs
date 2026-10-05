@@ -45,13 +45,13 @@ fn host() -> App {
     app
 }
 
-fn current(app: &App) -> u64 {
+fn current(app: &App) -> Tick {
     app.world().resource::<CurrentTick>().0
 }
 
 /// Run frames until the host has simulated at least `tick`.
-fn run_to_tick(app: &mut App, tick: u64) {
-    for _ in 0..(tick as usize * 4 + 8) {
+fn run_to_tick(app: &mut App, tick: Tick) {
+    for _ in 0..(tick.0 as usize * 4 + 8) {
         if current(app) >= tick {
             return;
         }
@@ -63,7 +63,7 @@ fn run_to_tick(app: &mut App, tick: u64) {
     );
 }
 
-fn send(app: &mut App, sender: u128, tick: u64) {
+fn send(app: &mut App, sender: u128, tick: Tick) {
     app.world_mut().trigger(ReceivedNetworkInput {
         sender,
         tick,
@@ -83,7 +83,7 @@ fn margin(app: &App, uuid: u128) -> Option<i64> {
         .map(|margin| margin.ticks)
 }
 
-fn newest(app: &App, uuid: u128) -> Option<u64> {
+fn newest(app: &App, uuid: u128) -> Option<Tick> {
     app.world()
         .resource::<NewestInputTick>()
         .0
@@ -100,10 +100,10 @@ fn queue(app: &App) -> &InputQueue<Input> {
 #[test]
 fn an_input_stamped_far_in_the_future_is_dropped() {
     let mut app = host();
-    run_to_tick(&mut app, 8);
+    run_to_tick(&mut app, Tick(8));
     let now = current(&app);
 
-    send(&mut app, A, now + MAX_INPUT_LEAD_TICKS + 1);
+    send(&mut app, A, (now + MAX_INPUT_LEAD_TICKS).next());
     assert_eq!(stats(&app).dropped_out_of_window, 1);
     assert_eq!(
         stats(&app).received,
@@ -111,7 +111,9 @@ fn an_input_stamped_far_in_the_future_is_dropped() {
         "a dropped input is not a received one"
     );
     assert!(
-        queue(&app).get(now + MAX_INPUT_LEAD_TICKS + 1, A).is_none(),
+        queue(&app)
+            .get((now + MAX_INPUT_LEAD_TICKS).next(), A)
+            .is_none(),
         "one tick past the client's lead ceiling is one tick no client can be at"
     );
 
@@ -126,15 +128,15 @@ fn an_input_stamped_far_in_the_future_is_dropped() {
 #[test]
 fn an_input_older_than_the_window_is_dropped() {
     let mut app = host();
-    app.insert_resource(HistoryBufferTicks(4));
-    run_to_tick(&mut app, 10);
+    app.insert_resource(HistoryBufferTicks(Ticks(4)));
+    run_to_tick(&mut app, Tick(10));
     let now = current(&app);
 
-    send(&mut app, A, now - 5);
+    send(&mut app, A, now - Ticks(5));
     assert_eq!(stats(&app).dropped_out_of_window, 1);
-    assert!(queue(&app).get(now - 5, A).is_none());
+    assert!(queue(&app).get(now - Ticks(5), A).is_none());
     assert!(
-        queue(&app).get(now + 1, A).is_none(),
+        queue(&app).get(now.next(), A).is_none(),
         "a dropped input is not forward-filled either: it never entered"
     );
     assert_eq!(
@@ -143,26 +145,26 @@ fn an_input_older_than_the_window_is_dropped() {
         "and it did not become the newest thing heard from that sender"
     );
 
-    send(&mut app, A, now - 4);
+    send(&mut app, A, now - Ticks(4));
     assert_eq!(stats(&app).dropped_out_of_window, 1);
     assert!(
-        queue(&app).get(now - 4, A).is_some(),
+        queue(&app).get(now - Ticks(4), A).is_some(),
         "the oldest tick still in history is still replayable, so still accepted"
     );
     assert!(
-        queue(&app).get(now + 1, A).is_some(),
+        queue(&app).get(now.next(), A).is_some(),
         "and late-but-in-window still gets the next tick, as before"
     );
 }
 
 /// A minimal LCG: enough to spread ten thousand ticks over half of `u64`, and no dependency.
-fn random_ticks(seed: u64, count: usize) -> impl Iterator<Item = u64> {
+fn random_ticks(seed: u64, count: usize) -> impl Iterator<Item = Tick> {
     let mut state = seed;
     std::iter::repeat_with(move || {
         state = state
             .wrapping_mul(6364136223846793005)
             .wrapping_add(1442695040888963407);
-        (state >> 1) % (u64::MAX / 2)
+        Tick((state >> 1) % (u64::MAX / 2))
     })
     .take(count)
 }
@@ -170,7 +172,7 @@ fn random_ticks(seed: u64, count: usize) -> impl Iterator<Item = u64> {
 #[test]
 fn the_input_queue_cannot_grow_under_hostile_input() {
     let mut app = host();
-    run_to_tick(&mut app, 8);
+    run_to_tick(&mut app, Tick(8));
     let now = current(&app);
     let window = app.world().resource::<HistoryBufferTicks>().0;
     let oldest = now.saturating_sub(window);
@@ -184,7 +186,7 @@ fn the_input_queue_cannot_grow_under_hostile_input() {
         send(&mut app, A, tick);
     }
 
-    let bound = (window + MAX_INPUT_LEAD_TICKS + 2) as usize;
+    let bound = (window + MAX_INPUT_LEAD_TICKS + Ticks(2)).0 as usize;
     assert!(
         queue(&app).inputs.len() <= bound,
         "the queue holds {} ticks; the window allows at most {bound}",
@@ -207,26 +209,26 @@ fn the_input_queue_cannot_grow_under_hostile_input() {
 #[test]
 fn a_dropped_input_does_not_move_the_margin() {
     let mut app = host();
-    app.insert_resource(HistoryBufferTicks(4));
-    run_to_tick(&mut app, 10);
+    app.insert_resource(HistoryBufferTicks(Ticks(4)));
+    run_to_tick(&mut app, Tick(10));
     let now = current(&app);
 
-    send(&mut app, A, now + 2);
+    send(&mut app, A, now + Ticks(2));
     assert_eq!(margin(&app, A), Some(2));
-    assert_eq!(newest(&app, A), Some(now + 2));
+    assert_eq!(newest(&app, A), Some(now + Ticks(2)));
 
-    send(&mut app, A, now + 1_000);
+    send(&mut app, A, now + Ticks(1_000));
     assert_eq!(
         margin(&app, A),
         Some(2),
         "a margin of a thousand would have every snapshot telling the client to shed a lead it \
          does not have"
     );
-    assert_eq!(newest(&app, A), Some(now + 2));
+    assert_eq!(newest(&app, A), Some(now + Ticks(2)));
 
-    send(&mut app, A, now - 6);
+    send(&mut app, A, now - Ticks(6));
     assert_eq!(margin(&app, A), Some(2));
-    assert_eq!(newest(&app, A), Some(now + 2));
+    assert_eq!(newest(&app, A), Some(now + Ticks(2)));
     assert_eq!(stats(&app).dropped_out_of_window, 2);
     assert_eq!(
         stats(&app).late,
@@ -240,12 +242,12 @@ fn a_dropped_input_does_not_move_the_margin() {
 #[test]
 fn a_departed_players_inputs_and_margin_are_forgotten() {
     let mut app = host();
-    run_to_tick(&mut app, 8);
+    run_to_tick(&mut app, Tick(8));
     let now = current(&app);
 
-    send(&mut app, A, now + 1);
-    send(&mut app, A, now + 2);
-    send(&mut app, B, now + 1);
+    send(&mut app, A, now.next());
+    send(&mut app, A, now + Ticks(2));
+    send(&mut app, B, now.next());
     assert_eq!(queue(&app).players().collect::<Vec<_>>(), vec![A, B]);
 
     app.world_mut().trigger(PeerLeft(A));
@@ -255,10 +257,10 @@ fn a_departed_players_inputs_and_margin_are_forgotten() {
         vec![B],
         "the departed player's inputs are gone from every tick"
     );
-    assert!(queue(&app).get(now + 1, A).is_none());
-    assert!(queue(&app).get(now + 2, A).is_none());
+    assert!(queue(&app).get(now.next(), A).is_none());
+    assert!(queue(&app).get(now + Ticks(2), A).is_none());
     assert!(
-        queue(&app).get(now + 1, B).is_some(),
+        queue(&app).get(now.next(), B).is_some(),
         "and the other player's are untouched"
     );
     assert_eq!(
@@ -272,7 +274,7 @@ fn a_departed_players_inputs_and_margin_are_forgotten() {
         None,
         "a rejoin under the same uuid must not find its first inputs older than 'newest'"
     );
-    assert_eq!(newest(&app, B), Some(now + 1));
+    assert_eq!(newest(&app, B), Some(now.next()));
 }
 
 // ── Order ────────────────────────────────────────────────────────────────────
@@ -283,17 +285,17 @@ fn input_queue_at_tick_iterates_in_a_fixed_order() {
     let shuffled = [9u128, 3, 7, 1, 8, 2, 6, 4, 5];
     for (i, uuid) in shuffled.into_iter().enumerate() {
         queue.insert(
-            5,
+            Tick(5),
             uuid,
             Input {
                 forward: i % 2 == 0,
             },
         );
     }
-    queue.insert(6, 3, Input::default());
-    queue.insert(4, 11, Input::default());
+    queue.insert(Tick(6), 3, Input::default());
+    queue.insert(Tick(4), 11, Input::default());
 
-    let order: Vec<u128> = queue.at_tick(5).unwrap().keys().copied().collect();
+    let order: Vec<u128> = queue.at_tick(Tick(5)).unwrap().keys().copied().collect();
     assert_eq!(
         order,
         vec![1, 2, 3, 4, 5, 6, 7, 8, 9],

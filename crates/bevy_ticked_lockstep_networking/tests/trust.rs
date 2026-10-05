@@ -13,6 +13,7 @@ mod common;
 
 use bevy::prelude::*;
 use bevy_ensemble_loopback::{Link, LoopbackNetwork, PeerId};
+use bevy_ticked::prelude::Ticks;
 use bevy_ticked_lockstep_networking::testing::{actions_at, participant_joined_at, tracked_ticks};
 use bevy_ticked_lockstep_networking::{
     ChecksumReport, ClientLoaded, ClientScheduledActions, Desync, JoinSnapshotRequest,
@@ -105,7 +106,7 @@ fn a_late_client_action_for_a_simulated_tick_is_dropped_not_merged() {
     );
     net.run(2);
 
-    let simulated = tick(&net, HOST_PEER) - 1;
+    let simulated = tick(&net, HOST_PEER).prev();
     deliver(
         &mut net,
         CLIENT,
@@ -118,7 +119,7 @@ fn a_late_client_action_for_a_simulated_tick_is_dropped_not_merged() {
 
     assert!(
         tracked_ticks::<Action>(net.app(HOST_PEER)).contains(&simulated),
-        "the host keeps tick {simulated} for the pending join; if it does not, the assertion \
+        "the host keeps {simulated} for the pending join; if it does not, the assertion \
          below is vacuous"
     );
     assert!(
@@ -147,8 +148,8 @@ fn a_late_client_action_for_a_simulated_tick_is_dropped_not_merged() {
 fn a_client_scheduling_for_a_far_future_tick_is_ignored() {
     let mut net = joined_pair();
     let now = tick(&net, HOST_PEER);
-    let far = now + 10_000;
-    let near = now + 100;
+    let far = now + Ticks(10_000);
+    let near = now + Ticks(100);
 
     deliver(
         &mut net,
@@ -248,7 +249,7 @@ fn a_repeated_client_loaded_does_not_reset_the_grace_window() {
     let mut net = joined_pair();
     let joined_at = participant_joined_at(net.app(HOST_PEER), CLIENT).expect("joined");
 
-    deliver(&mut net, CLIENT, &ClientLoaded { buffer: 6 });
+    deliver(&mut net, CLIENT, &ClientLoaded { buffer: Ticks(6) });
     net.run(5);
 
     assert_eq!(
@@ -305,7 +306,7 @@ fn a_checksum_report_from_a_non_participant_does_not_latch_desync() {
 #[test]
 fn a_report_for_a_tick_the_host_has_not_sampled_is_ignored() {
     let mut net = joined_pair();
-    let future = tick(&net, HOST_PEER) + 20;
+    let future = tick(&net, HOST_PEER) + Ticks(20);
     deliver(
         &mut net,
         CLIENT,
@@ -314,7 +315,7 @@ fn a_report_for_a_tick_the_host_has_not_sampled_is_ignored() {
             hash: CounterHash { counter: 0 },
         },
     );
-    run_until_tick(&mut net, HOST_PEER, future + 5, 60);
+    run_until_tick(&mut net, HOST_PEER, future + Ticks(5), 60);
 
     assert!(
         desync_on_host(&net).is_none(),
@@ -325,7 +326,7 @@ fn a_report_for_a_tick_the_host_has_not_sampled_is_ignored() {
 #[test]
 fn actions_from_a_non_participant_are_dropped() {
     let mut net = host_participant_and_bystander();
-    let target = tick(&net, HOST_PEER) + 3;
+    let target = tick(&net, HOST_PEER) + Ticks(3);
 
     deliver(
         &mut net,
@@ -367,7 +368,7 @@ fn truncated_lockstep_actions_never_panic() {
     let packet = encode_as(
         net.app(HOST_PEER),
         &ClientScheduledActions::<Action> {
-            tick: tick(&net, HOST_PEER) + 3,
+            tick: tick(&net, HOST_PEER) + Ticks(3),
             actions: vec![1, 2, 3],
         },
     );
@@ -385,7 +386,7 @@ fn truncated_lockstep_actions_never_panic() {
     let before = tick(&net, HOST_PEER);
     net.run(100);
     assert!(
-        tick(&net, HOST_PEER) > before + 50,
+        tick(&net, HOST_PEER) > before + Ticks(50),
         "the host stopped advancing after being fed malformed packets"
     );
 }

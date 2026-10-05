@@ -8,6 +8,7 @@ use bevy_ensemble::{
     ReceivedEnsembleMessage,
 };
 use bevy_ticked::tick::{CurrentTick, TickHolds};
+use bevy_ticked::tick_types::Tick;
 
 /// Record a player's actions for a tick, joining them to anything already recorded.
 ///
@@ -20,7 +21,7 @@ use bevy_ticked::tick::{CurrentTick, TickHolds};
 /// is exactly what `insert` did.
 pub fn insert_actions_into_tracker<A>(
     tracker: &mut ActionTracker<A>,
-    tick: u64,
+    tick: Tick,
     player_uuid: u128,
     actions: Vec<A>,
 ) {
@@ -38,7 +39,7 @@ pub fn insert_actions_into_tracker<A>(
 /// `None` before the first flush and while a join snapshot is in flight; a client that has
 /// applied one restarts it at the snapshot's tick, so its first flush fills forward from there.
 #[derive(Resource, Default, Debug)]
-pub struct LastScheduledTick(pub Option<u64>);
+pub struct LastScheduledTick(pub Option<Tick>);
 
 /// Flush pending local actions into the tracker (host, solo) or send them to the host (client).
 ///
@@ -128,7 +129,7 @@ pub fn flush_pending_actions<A: LockstepAction, S: JoinSnapshot>(
     };
 
     // The next tick that will run is current_tick.0 + 1
-    let next_tick = current_tick.0 + 1;
+    let next_tick = current_tick.0.next();
 
     let Some(client_lobby) = client_lobby else {
         // Host or solo: into the tick about to run. Recorded only when there is something to
@@ -137,7 +138,7 @@ pub fn flush_pending_actions<A: LockstepAction, S: JoinSnapshot>(
         // Unless that tick is already ruled: a host that took over from another is simulating
         // its predecessor's rulings up to `LastBroadcastTick`, and its own actions go into the
         // first tick it rules.
-        let target = next_tick.max(last_broadcast.0 + 1);
+        let target = next_tick.max(last_broadcast.0.next());
         last_scheduled.0 = Some(target);
         if !actions.is_empty() {
             insert_actions_into_tracker(&mut tracker, target, local_player_uuid, actions);
@@ -153,17 +154,19 @@ pub fn flush_pending_actions<A: LockstepAction, S: JoinSnapshot>(
     // client holds lag the host, scheduling past them lands every batch on a tick the host has
     // already ruled, and the session crawls at the rate rulings echo back.
     let resume_floor = match *migration {
-        crate::LockstepMigration::Resuming { resume_after, .. } => resume_after + 1,
-        _ => 0,
+        crate::LockstepMigration::Resuming { resume_after, .. } => resume_after.next(),
+        _ => Tick::ZERO,
     };
     let scheduled_tick = (next_tick + config.client_tick_buffer).max(resume_floor);
     // Everything between the last flush and this one, so the sequence has no holes. Usually
     // empty: in the steady state `scheduled_tick` is exactly one past the last.
-    let filler = match last_scheduled.0 {
-        Some(last) if scheduled_tick > last + 1 => (last + 1)..scheduled_tick,
-        _ => scheduled_tick..scheduled_tick,
-    };
-    last_scheduled.0 = Some(scheduled_tick.max(last_scheduled.0.unwrap_or(0)));
+    let filler = last_scheduled
+        .0
+        .filter(|last| scheduled_tick > last.next())
+        .map(|last| last.next().through(scheduled_tick.prev()))
+        .into_iter()
+        .flatten();
+    last_scheduled.0 = Some(scheduled_tick.max(last_scheduled.0.unwrap_or(Tick::ZERO)));
 
     // `new_no_delay`, here and for the batch below: the host blocks until this arrives, so it
     // is the definition of a message something is waiting on. A coalescing send holds it for a
@@ -270,7 +273,7 @@ pub fn receive_client_actions<A: LockstepAction>(
         // about the link.
         if !catching_up {
             let margin =
-                (tick as i64 - current_tick.0 as i64).clamp(i16::MIN as i64, i16::MAX as i64);
+                (tick.0 as i64 - current_tick.0.0 as i64).clamp(i16::MIN as i64, i16::MAX as i64);
             margins.0.insert(sender, margin as i16);
         }
 

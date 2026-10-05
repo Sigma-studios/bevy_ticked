@@ -15,6 +15,7 @@ use crate::{
 };
 use bevy::prelude::*;
 use bevy_ensemble::{EnsembleAppExt, EnsembleSet, Lobby, MessageAuthority};
+use bevy_ticked::tick_types::{Tick, Ticks};
 use bevy_ticked::{TickedLoop, TickedSystems};
 use std::marker::PhantomData;
 
@@ -26,17 +27,17 @@ pub struct LockstepConfig {
     /// own buffer is not larger. Never below one; a zero is clamped at build.
     ///
     /// Not the host's own input lag: the host's actions go into the tick about to run.
-    pub host_tick_buffer: u64,
+    pub host_tick_buffer: Ticks,
     /// How many ticks ahead of its own clock a client schedules its actions, so that they have
     /// crossed the link and been ruled on before the tick they name is simulated.
-    pub client_tick_buffer: u64,
+    pub client_tick_buffer: Ticks,
     /// How far past the host's current tick a client may schedule, in ticks.
     ///
     /// Every tick a client names is a tracker entry the host keeps until it simulates that
     /// tick. Without a bound one message could reserve a tick at `u64::MAX`, kept for ever, or
     /// a million of them. 128 is two seconds at 64 Hz — more than the largest buffer the
     /// adaptive tuner will size, with room for a client whose clock has run ahead.
-    pub action_horizon: u64,
+    pub action_horizon: Ticks,
 }
 
 impl Default for LockstepConfig {
@@ -45,9 +46,9 @@ impl Default for LockstepConfig {
             // One: the smallest grace window. The buffer that matters for the session's
             // rate is the client's, and the host's used to be its own input lag, which it no
             // longer pays.
-            host_tick_buffer: 1,
-            client_tick_buffer: 6,
-            action_horizon: 128,
+            host_tick_buffer: Ticks(1),
+            client_tick_buffer: Ticks(6),
+            action_horizon: Ticks(128),
         }
     }
 }
@@ -108,7 +109,7 @@ fn reset_lockstep_state_on_lobby_removed<A: LockstepAction, S: JoinSnapshot>(
     last_requests.0.clear();
     pending_participant_joins.0.clear();
     stashed_ticks.0.clear();
-    last_broadcast_tick.0 = 0;
+    last_broadcast_tick.0 = Tick::ZERO;
     // There is no sequence left to stay contiguous with.
     last_scheduled_tick.0 = None;
     snapshot_state.ready = true;
@@ -126,13 +127,13 @@ where
 {
     fn build(&self, app: &mut App) {
         let mut config = self.config;
-        if config.host_tick_buffer == 0 {
+        if config.host_tick_buffer.is_zero() {
             // A zero was a hang: the host's pause check required its own entry for the tick its
             // flush had not yet inserted, held, and the flush does not run while held. The
             // host no longer waits on itself, but a client's grace window of zero ticks still
             // asks its first batch to arrive before it can have been sent.
             warn!("LockstepConfig::host_tick_buffer of 0 is clamped to 1");
-            config.host_tick_buffer = 1;
+            config.host_tick_buffer = Ticks::ONE;
         }
         crate::session::install::<A>(app);
         app.insert_resource(crate::session::StageSystemActions(

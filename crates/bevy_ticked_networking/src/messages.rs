@@ -1,4 +1,5 @@
 use bevy::prelude::*;
+use bevy_ticked::tick_types::Tick;
 use serde::{Deserialize, Serialize};
 
 use crate::input::TickedInput;
@@ -30,7 +31,7 @@ pub struct ReceivedSnapshotAck {
 #[derive(Event, Clone, Debug)]
 pub struct ReceivedNetworkInput<T: TickedInput> {
     pub sender: u128,
-    pub tick: u64,
+    pub tick: Tick,
     pub input: T,
 }
 
@@ -68,7 +69,7 @@ pub struct SendNetworkSnapshot {
 #[derive(Event, Clone, Debug)]
 pub struct SendNetworkInput<T: TickedInput> {
     /// `(tick, input)` pairs in ascending tick order, newest last.
-    pub inputs: Vec<(u64, T)>,
+    pub inputs: Vec<(Tick, T)>,
     /// `seq` of the newest snapshot this client has applied.
     pub ack: Option<u32>,
     /// Ask for a full body next: a delta arrived against a baseline this client no longer has.
@@ -82,7 +83,7 @@ pub struct SendNetworkInput<T: TickedInput> {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NetworkInputPayload<T> {
     /// `(tick, input)` pairs in ascending tick order, newest last.
-    pub inputs: Vec<(u64, T)>,
+    pub inputs: Vec<(Tick, T)>,
     /// `seq` of the newest snapshot the sender has applied. See [`ReceivedSnapshotAck`].
     #[serde(default)]
     pub ack: Option<u32>,

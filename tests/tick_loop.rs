@@ -84,11 +84,15 @@ fn the_tick_advances_between_pre_and_post() {
             TickedLoop,
             (
                 (|t: Res<CurrentTick>, mut o: ResMut<Order>| {
-                    o.0.push(if t.0 == 0 { "pre@0" } else { "pre@n" })
+                    o.0.push(if t.0 == Tick::ZERO { "pre@0" } else { "pre@n" })
                 })
                 .in_set(TickedSystems::PreTick),
                 (|t: Res<CurrentTick>, mut o: ResMut<Order>| {
-                    o.0.push(if t.0 == 0 { "post@0" } else { "post@n" })
+                    o.0.push(if t.0 == Tick::ZERO {
+                        "post@0"
+                    } else {
+                        "post@n"
+                    })
                 })
                 .in_set(TickedSystems::PostTick),
             ),

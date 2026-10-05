@@ -9,6 +9,7 @@
 //! wrote `insert(tick, ...)`, watched nothing happen, and each added a `+ 1` with a comment that
 //! said "not sure why". [`queue_input`] is the `+ 1`, with the reason.
 
+use bevy_ticked::tick_types::Tick;
 use std::collections::BTreeMap;
 
 use bevy::prelude::*;
@@ -23,12 +24,12 @@ use crate::net::TickedNetwork;
 /// `CurrentTick`.
 pub fn queue_input<I: TickedInput>(app: &mut App, uuid: u128, input: I) {
     let tick = app.world().resource::<CurrentTick>().0;
-    queue_input_at(app, tick + 1, uuid, input);
+    queue_input_at(app, tick.next(), uuid, input);
 }
 
 /// File `input` from `uuid` for an explicit tick. For a test that is asserting about the tick
 /// arithmetic itself; everything else wants [`queue_input`].
-pub fn queue_input_at<I: TickedInput>(app: &mut App, tick: u64, uuid: u128, input: I) {
+pub fn queue_input_at<I: TickedInput>(app: &mut App, tick: Tick, uuid: u128, input: I) {
     app.world_mut()
         .resource_mut::<InputQueue<I>>()
         .insert(tick, uuid, input);

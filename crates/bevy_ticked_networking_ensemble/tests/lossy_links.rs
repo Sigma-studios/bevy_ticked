@@ -45,7 +45,7 @@ fn body_of(seats: &[(u128, u64)], uuid: u128) -> u64 {
 fn hold(net: &mut TickedNetwork, peer: PeerId, input: Input, frames: usize) -> i64 {
     let before = tick(net.app(peer));
     net.hold_input(peer, input, frames);
-    (tick(net.app(peer)) - before) as i64
+    tick(net.app(peer)).offset_from(before)
 }
 
 /// Every body agrees on every client, once the link has had time to carry the last word.
@@ -182,7 +182,7 @@ fn the_buffer_converges_after_a_step_change_in_latency() {
     net.hold_input(client, Input::NONE, 600);
     let on_satellite = target_replay_distance(net.app(client));
     assert!(
-        on_satellite >= on_cable + 15,
+        on_satellite >= on_cable + Ticks(15),
         "a 600 ms round trip needs about 40 more ticks of lead; the target went from {on_cable} \
          to {on_satellite}"
     );
@@ -197,7 +197,7 @@ fn the_buffer_converges_after_a_step_change_in_latency() {
     net.hold_input(client, Input::NONE, 900);
     let back = target_replay_distance(net.app(client));
     assert!(
-        back <= on_cable + 4,
+        back <= on_cable + Ticks(4),
         "the lead never came back down after the link recovered: {on_cable} -> {on_satellite} \
          -> {back}"
     );
@@ -260,7 +260,7 @@ fn a_reordered_snapshot_is_dropped_over_the_link() {
          stale ({stats:?})"
     );
     let applied = applied_tick(net.app(client)).expect("a snapshot was applied");
-    assert!(applied > 0);
+    assert!(applied > Tick::ZERO);
     assert_everyone_converged(&net, &seats);
 }
 
@@ -374,12 +374,12 @@ fn a_ten_thousand_tick_session_keeps_history_and_queues_bounded() {
     let (oldest, newest) = history_range::<Pos>(net.app(client)).expect("the client has history");
     assert!(
         newest - oldest <= window,
-        "the client holds {} ticks of Pos history, window {window}",
+        "the client holds {} of Pos history, window {window}",
         newest - oldest
     );
     let queued = input_queue::<Input>(net.app(host)).ticks().len() as u64;
     assert!(
-        queued <= window + 64,
+        queued <= (window + Ticks(64)).0,
         "the host holds {queued} ticks of input; history window {window}"
     );
     assert_everyone_converged(&net, &seats);

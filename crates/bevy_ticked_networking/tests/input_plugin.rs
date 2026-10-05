@@ -22,7 +22,7 @@ struct Pressed(u32);
 
 /// `(tick, input the simulation read at that tick)`.
 #[derive(Resource, Default)]
-struct Seen(Vec<(u64, Option<Input>)>);
+struct Seen(Vec<(Tick, Option<Input>)>);
 
 #[derive(Resource, Default)]
 struct Samples(u32);
@@ -77,7 +77,7 @@ fn input_sampled_by_the_plugin_is_stamped_for_the_tick_it_will_run_in() {
     }
 }
 
-/// The old way: a capture system in `Update` stamps `tick + 1` after the tick has run, so a
+/// The old way: a capture system in `Update` stamps `tick.next()` after the tick has run, so a
 /// press waits a whole frame before a tick reads it. The hook reads it in the same frame.
 #[test]
 fn sampling_in_the_hook_costs_no_extra_frame() {
@@ -87,7 +87,7 @@ fn sampling_in_the_hook_costs_no_extra_frame() {
         local: Res<LocalPlayer>,
         mut queue: ResMut<InputQueue<Input>>,
     ) {
-        queue.insert(tick.0 + 1, local.0, Input(pressed.0));
+        queue.insert(tick.0.next(), local.0, Input(pressed.0));
     }
     let latency = |app: &mut App| {
         app.update();
@@ -169,7 +169,7 @@ fn a_restore_pass_does_not_resample() {
     app.world_mut().write_message(StepBackward);
     app.update();
     app.update();
-    assert_eq!(app.world().resource::<CurrentTick>().0, at_tick - 1);
+    assert_eq!(app.world().resource::<CurrentTick>().0, at_tick.prev());
     let after = app
         .world()
         .resource::<InputQueue<Input>>()

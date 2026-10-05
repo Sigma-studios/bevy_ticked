@@ -3,6 +3,7 @@ use crate::{
     SystemAction,
 };
 use bevy::prelude::*;
+use bevy_ticked::tick_types::Tick;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     marker::PhantomData,
@@ -20,23 +21,23 @@ impl<A> Default for LocalPendingActions<A> {
 
 #[derive(Resource)]
 pub struct ActionTracker<A> {
-    pub ticks: HashMap<u64, BTreeMap<u128, Vec<A>>>,
+    pub ticks: HashMap<Tick, BTreeMap<u128, Vec<A>>>,
     /// The session's own actions per tick, ruled on by the host with the players'.
-    pub system: HashMap<u64, Vec<SystemAction>>,
+    pub system: HashMap<Tick, Vec<SystemAction>>,
 }
 
 impl<A> ActionTracker<A> {
-    pub fn actions_for_tick(&self, tick: u64) -> Option<&BTreeMap<u128, Vec<A>>> {
+    pub fn actions_for_tick(&self, tick: Tick) -> Option<&BTreeMap<u128, Vec<A>>> {
         self.ticks.get(&tick)
     }
 
     /// The session's actions on `tick`, empty if none.
-    pub fn system_actions_for_tick(&self, tick: u64) -> &[SystemAction] {
+    pub fn system_actions_for_tick(&self, tick: Tick) -> &[SystemAction] {
         self.system.get(&tick).map(Vec::as_slice).unwrap_or(&[])
     }
 
     /// The newest tick the tracker holds anything for.
-    pub fn newest_tick(&self) -> Option<u64> {
+    pub fn newest_tick(&self) -> Option<Tick> {
         self.ticks.keys().chain(self.system.keys()).copied().max()
     }
 }
@@ -114,7 +115,7 @@ pub struct ArrivalMargins(pub BTreeMap<u128, i16>);
 /// the session, and the tracker grew by one tick's worth of everybody's actions per tick until
 /// the host ran out of memory.
 #[derive(Resource, Default)]
-pub struct PendingClientJoins(pub HashMap<u128, u64>);
+pub struct PendingClientJoins(pub HashMap<u128, Tick>);
 
 /// Host side: when each client last had a join snapshot captured for it, on the frame clock.
 ///
@@ -148,7 +149,7 @@ impl<A> Default for StashedAuthoritativeTicks<A> {
 }
 
 #[derive(Resource, Default)]
-pub struct LastBroadcastTick(pub u64);
+pub struct LastBroadcastTick(pub Tick);
 
 #[derive(Resource)]
 pub struct ClientSnapshotState<S: JoinSnapshot> {

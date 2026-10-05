@@ -31,6 +31,7 @@ use bevy::prelude::*;
 use bevy_ensemble::{
     Host, Lobby, LobbyClient, LobbyClientPlayerUuid, LobbyParticipant, LobbyParticipantOf,
 };
+use bevy_ticked::tick_types::{Tick, Ticks};
 use bevy_ticked::{
     events::{TickedEventAppExt, TickedEventWriter},
     tick::{CurrentTick, TickHoldReason, TickHolds},
@@ -169,7 +170,7 @@ fn stage_system_actions(world: &mut World) {
     if !hosting {
         return;
     }
-    let next_tick = world.resource::<CurrentTick>().0 + 1;
+    let next_tick = world.resource::<CurrentTick>().0.next();
     {
         let pauses: Vec<LockstepPauseReason> = world
             .resource_mut::<Messages<PauseLockstep>>()
@@ -246,11 +247,11 @@ pub(crate) struct KeptSessionRequests {
 
 /// Type-erased "push these system actions into the tracker for `tick`".
 #[derive(Resource, Clone, Copy)]
-pub(crate) struct StageSystemActions(pub(crate) fn(&mut World, u64, Vec<SystemAction>));
+pub(crate) struct StageSystemActions(pub(crate) fn(&mut World, Tick, Vec<SystemAction>));
 
 pub(crate) fn stage_into_tracker<A: LockstepAction>(
     world: &mut World,
-    tick: u64,
+    tick: Tick,
     actions: Vec<SystemAction>,
 ) {
     world
@@ -356,7 +357,7 @@ fn track_stall<A: LockstepAction>(
         }
         return;
     }
-    let next = tick.0 + 1;
+    let next = tick.0.next();
     let waiting_on: Vec<u128> = if !host.is_empty() {
         participants
             .iter()
@@ -454,18 +455,18 @@ fn catch_up<A: LockstepAction>(
         return;
     };
     let target = if !host.is_empty() {
-        let backlog = last_broadcast.0.saturating_sub(tick.0);
-        if backlog > 2 {
-            1.0 + (backlog as f64 / 64.0).min(MAX_CATCH_UP)
+        let backlog = last_broadcast.0.since(tick.0);
+        if backlog > Ticks(2) {
+            1.0 + (backlog.0 as f64 / 64.0).min(MAX_CATCH_UP)
         } else {
             1.0
         }
     } else if !client.is_empty() {
         let backlog = tracker
             .newest_tick()
-            .map_or(0, |newest| newest.saturating_sub(tick.0));
-        if backlog > config.client_tick_buffer + 2 {
-            1.0 + (backlog as f64 / 64.0).min(MAX_CATCH_UP)
+            .map_or(Ticks::ZERO, |newest| newest.since(tick.0));
+        if backlog > config.client_tick_buffer + Ticks(2) {
+            1.0 + (backlog.0 as f64 / 64.0).min(MAX_CATCH_UP)
         } else {
             1.0
         }
@@ -481,8 +482,13 @@ fn catch_up<A: LockstepAction>(
 /// them. Two: one for a frame of jitter, one for the tick.
 pub const TARGET_ARRIVAL_MARGIN: i16 = 2;
 
-/// Frames a shrinking buffer waits between steps.
-const SHRINK_EVERY_FRAMES: u32 = 128;
+/// How long a client must stay comfortably early before its buffer gives back a tick, and again
+/// before the next.
+///
+/// Time rather than a count: this used to be 128 margin reports, which is two seconds at the
+/// default tick rate and something else at any other — a buffer that shrank at a rate set by how
+/// often the host happened to report.
+const SHRINK_AFTER: Duration = Duration::from_secs(2);
 
 /// A client sizes its buffer from its own arrival margin: the host's word on whether its
 /// actions arrive in time, which the ping round trip only estimates.
@@ -491,7 +497,8 @@ fn size_buffer_from_margin(
     mut config: ResMut<LockstepConfig>,
     client: Query<(), (With<Lobby>, Without<Host>)>,
     tuning: Option<Res<crate::AdaptiveBufferTuning>>,
-    mut frames_over: Local<u32>,
+    time: Res<Time>,
+    mut early_since: Local<Option<Duration>>,
 ) {
     if client.is_empty() || !margin.is_changed() {
         return;
@@ -499,22 +506,27 @@ fn size_buffer_from_margin(
     let Some(margin) = margin.0 else {
         return;
     };
-    let floor = tuning.as_ref().map_or(1, |t| t.min_buffer.max(1));
-    let ceiling = tuning.as_ref().map_or(96, |t| t.max_buffer.max(floor));
+    let floor = tuning
+        .as_ref()
+        .map_or(Ticks::ONE, |t| t.min_buffer.max(Ticks::ONE));
+    let ceiling = tuning
+        .as_ref()
+        .map_or(Ticks(96), |t| t.max_buffer.max(floor));
     let short = TARGET_ARRIVAL_MARGIN - margin;
     if short > 0 {
         // Late, or about to be: grow at once, by the shortfall.
         config.client_tick_buffer =
-            (config.client_tick_buffer + short as u64).clamp(floor, ceiling);
-        *frames_over = 0;
+            (config.client_tick_buffer + Ticks(short as u64)).clamp(floor, ceiling);
+        *early_since = None;
     } else if margin > TARGET_ARRIVAL_MARGIN + 2 {
         // Comfortably early for a while: give back a tick.
-        *frames_over += 1;
-        if *frames_over >= SHRINK_EVERY_FRAMES && config.client_tick_buffer > floor {
-            config.client_tick_buffer -= 1;
-            *frames_over = 0;
+        let now = time.elapsed();
+        let since = *early_since.get_or_insert(now);
+        if now.saturating_sub(since) >= SHRINK_AFTER && config.client_tick_buffer > floor {
+            config.client_tick_buffer -= Ticks::ONE;
+            *early_since = Some(now);
         }
     } else {
-        *frames_over = 0;
+        *early_since = None;
     }
 }

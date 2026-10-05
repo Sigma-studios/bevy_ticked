@@ -84,7 +84,7 @@ fn the_wire_hash_is_stable_for_the_same_registration() {
 // ── §2.4 ─────────────────────────────────────────────────────────────────────
 
 #[derive(Resource, Default)]
-struct Presented(Vec<(u64, Thunk)>);
+struct Presented(Vec<(Tick, Thunk)>);
 
 /// A world that fires one event on tick 3 and nothing otherwise, presenting into
 /// `Presented` from `Update`.
@@ -146,20 +146,20 @@ fn an_event_is_presented_once_however_many_times_its_tick_runs() {
     step(&mut app); // tick 2 -- fires
     assert_eq!(
         app.world().resource::<Presented>().0,
-        vec![(2, Thunk(5))],
+        vec![(Tick(2), Thunk(5))],
         "the event should be presented once"
     );
 
     // Now replay tick 2 five times, as a client with a wobbly connection does.
     for _ in 0..5 {
-        app.world_mut().write_message(ResetToTick(1));
+        app.world_mut().write_message(ResetToTick(Tick(1)));
         app.update();
         step(&mut app);
     }
 
     assert_eq!(
         app.world().resource::<Presented>().0,
-        vec![(2, Thunk(5))],
+        vec![(Tick(2), Thunk(5))],
         "a replayed tick must not re-announce what it already announced"
     );
 }
@@ -175,10 +175,13 @@ fn a_correction_presents_the_truth_and_not_the_prediction() {
         }
     }
     step(&mut app); // tick 1 predicts Thunk(5)
-    assert_eq!(app.world().resource::<Presented>().0, vec![(1, Thunk(5))]);
+    assert_eq!(
+        app.world().resource::<Presented>().0,
+        vec![(Tick(1), Thunk(5))]
+    );
 
     // The authority says the body was somewhere else. Roll back, correct, replay.
-    app.world_mut().write_message(ResetToTick(0));
+    app.world_mut().write_message(ResetToTick(Tick(0)));
     app.update();
     {
         let mut q = app.world_mut().query::<&mut Position>();
@@ -191,7 +194,7 @@ fn a_correction_presents_the_truth_and_not_the_prediction() {
 
     assert_eq!(
         app.world().resource::<Presented>().0,
-        vec![(1, Thunk(5)), (1, Thunk(9))],
+        vec![(Tick(1), Thunk(5)), (Tick(1), Thunk(9))],
         "the corrected tick must be presented; without the watermark rewind it \
          would be swallowed as already-shown and the player would only ever hear \
          the guess"
@@ -213,13 +216,13 @@ fn a_rewind_past_an_event_unpublishes_ticks_that_never_happened() {
     let before = app.world().resource::<Presented>().0.len();
     assert!(before >= 2, "two ticks should have fired, saw {before}");
 
-    app.world_mut().write_message(ResetToTick(1));
+    app.world_mut().write_message(ResetToTick(Tick(1)));
     app.update();
 
     let events = app.world().resource::<TickedEvents<Thunk>>();
     assert!(
-        events.at_tick(2).is_empty(),
+        events.at_tick(Tick(2)).is_empty(),
         "tick 2 was rolled past, so its events are no longer part of the world"
     );
-    assert!(!events.at_tick(1).is_empty(), "tick 1 still happened");
+    assert!(!events.at_tick(Tick(1)).is_empty(), "tick 1 still happened");
 }

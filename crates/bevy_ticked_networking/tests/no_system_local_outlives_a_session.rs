@@ -119,7 +119,7 @@ fn a_held_hosting_is_not_throttled_by_the_last_one() {
 
 /// `ensure_initial_capture`'s `Local<bool> done`: tick 0 was captured once per app, and every
 /// door clears the history and puts the clock back to 0, so a later session had no tick 0 — a
-/// `ResetToTick(0)` or a step back to the start found nothing to restore.
+/// `ResetToTick(Tick(0))` or a step back to the start found nothing to restore.
 ///
 /// A host keeps the world it stands in, so its door captures that world at tick 0; the second
 /// hosting of a reused app has to do the same as the first hosting of a fresh one.
@@ -127,7 +127,7 @@ fn a_held_hosting_is_not_throttled_by_the_last_one() {
 fn every_session_captures_its_own_tick_zero() {
     let has_zero = |app: &App| {
         let registry = app.world().resource::<TickedComponentRegistry>().clone();
-        registry.has_tick_captured(app.world(), 0)
+        registry.has_tick_captured(app.world(), Tick::ZERO)
     };
 
     let mut reused = peer();

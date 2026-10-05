@@ -126,11 +126,11 @@ fn play_a_while(app: &mut App) {
     let tick = world.resource::<CurrentTick>().0;
     world
         .resource_mut::<InputQueue<Input>>()
-        .insert(tick + 1, 3, Input::RIGHT);
+        .insert(tick.next(), 3, Input::RIGHT);
     world
         .resource_mut::<NewestInputTick>()
         .0
-        .insert(3, tick + 1);
+        .insert(3, tick.next());
     world
         .resource_mut::<InputMargins>()
         .0
@@ -139,7 +139,7 @@ fn play_a_while(app: &mut App) {
     world.resource_mut::<PassesHeld>().0 = 17;
     {
         let mut buffer = world.resource_mut::<ClientTickBuffer>();
-        buffer.target_replay_distance = 40;
+        buffer.target_replay_distance = Ticks(40);
         buffer.target_margin = 9;
     }
     step(app, 5);

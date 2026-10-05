@@ -93,7 +93,7 @@ fn no_snapshot_is_applied_before_the_registry_handshake_matches() {
         &EnsembleSnapshotMessage {
             bytes: encode_packet(&SnapshotPacket {
                 seq: 1,
-                tick: 1,
+                tick: Tick(1),
                 your_margin: 0,
                 body: SnapshotBody::Full(FullBody::default()),
             }),
@@ -540,7 +540,7 @@ fn walk_right(
     mut queue: ResMut<InputQueue<Input>>,
 ) {
     if let Some(local) = local {
-        queue.insert(tick.0 + 1, local.0, Input::RIGHT);
+        queue.insert(tick.0.next(), local.0, Input::RIGHT);
     }
 }
 

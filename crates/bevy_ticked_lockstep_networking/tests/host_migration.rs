@@ -12,7 +12,9 @@ use std::time::Duration;
 use bevy::prelude::*;
 use bevy_ensemble::{HostMigratable, PeerTimeout, encode_ensemble_message};
 use bevy_ensemble_loopback::{HostDeparture, Link, LoopbackNetwork, PeerId};
-use bevy_ticked::prelude::{TickHoldReason, TickHolds, TickRateDilation, TickedEvents};
+use bevy_ticked::prelude::{
+    Tick, TickHoldReason, TickHolds, TickRateDilation, TickedEvents, Ticks,
+};
 use bevy_ticked_lockstep_networking::testing::{migration_state, newest_ruled_tick, push_action};
 use bevy_ticked_lockstep_networking::{
     ChecksumReport, Desync, HostMigrationPolicy, LastMigration, LockstepMigration,
@@ -50,7 +52,7 @@ fn session_with(
     net.run(300);
     for index in 0..=clients as usize {
         assert!(
-            tick(&net, PeerId(index)) > 60,
+            tick(&net, PeerId(index)) > Tick(60),
             "peer {index} is not running"
         );
     }
@@ -68,12 +70,14 @@ fn roster(net: &LoopbackNetwork, p: PeerId) -> Vec<u128> {
 }
 
 /// The tick a peer saw `uuid` leave on, from its roster events.
-fn left_at(net: &LoopbackNetwork, p: PeerId, uuid: u128) -> Option<u64> {
+fn left_at(net: &LoopbackNetwork, p: PeerId, uuid: u128) -> Option<Tick> {
     let events = net.app(p).world().resource::<TickedEvents<RosterChange>>();
-    (0..=tick(net, p)).find(|t| events.at_tick(*t).contains(&RosterChange::Left(uuid)))
+    Tick::ZERO
+        .through(tick(net, p))
+        .find(|t| events.at_tick(*t).contains(&RosterChange::Left(uuid)))
 }
 
-fn resume_after(net: &LoopbackNetwork, p: PeerId) -> u64 {
+fn resume_after(net: &LoopbackNetwork, p: PeerId) -> Tick {
     net.app(p)
         .world()
         .get_resource::<LastMigration>()
@@ -160,7 +164,7 @@ fn a_host_that_came_back_before_a_successor_was_named_resumes_without_a_migratio
 
     let before = tick(&net, A);
     run_until(&mut net, 400, "the session to run again", |net| {
-        tick(net, A) > before + 100 && tick(net, B) > before + 100
+        tick(net, A) > before + Ticks(100) && tick(net, B) > before + Ticks(100)
     });
     for p in [A, B] {
         assert!(!net.app(p).world().contains_resource::<LastMigration>());
@@ -176,7 +180,7 @@ fn a_host_that_leaves_hands_the_match_to_a_survivor_who_resumes_it_in_agreement(
     let before = tick(&net, A);
     net.migrate(A);
     run_until(&mut net, 600, "the survivors to resume and run on", |net| {
-        resumed(net, A) && tick(net, A) > before + 150 && tick(net, B) > before + 150
+        resumed(net, A) && tick(net, A) > before + Ticks(150) && tick(net, B) > before + Ticks(150)
     });
     assert_agree(&net, A, B);
     assert_eq!(roster(&net, A), [2, 3]);
@@ -191,8 +195,8 @@ fn the_departed_host_leaves_the_roster_on_the_first_tick_the_new_host_rules() {
         resumed(net, A) && resumed(net, B)
     });
     net.run(60);
-    let first_ruled = resume_after(&net, A) + 1;
-    assert_eq!(resume_after(&net, B), first_ruled - 1);
+    let first_ruled = resume_after(&net, A).next();
+    assert_eq!(resume_after(&net, B), first_ruled.prev());
     assert_eq!(left_at(&net, A, HOST), Some(first_ruled));
     assert_eq!(left_at(&net, B, HOST), Some(first_ruled));
 }
@@ -212,7 +216,7 @@ fn survivors_that_held_different_last_ticks_are_filled_in_to_the_furthest() {
 
     net.name_host(A);
     run_until(&mut net, 800, "the survivors to resume and run on", |net| {
-        resumed(net, B) && tick(net, B) > furthest + 100
+        resumed(net, B) && tick(net, B) > furthest + Ticks(100)
     });
     assert_eq!(resume_after(&net, A), furthest);
     assert_agree(&net, A, B);
@@ -227,7 +231,7 @@ fn a_new_host_that_is_the_most_behind_takes_the_missing_ticks_from_a_survivor() 
 
     net.name_host(B);
     run_until(&mut net, 800, "the survivors to resume and run on", |net| {
-        resumed(net, B) && tick(net, A) > furthest + 100
+        resumed(net, B) && tick(net, A) > furthest + Ticks(100)
     });
     assert_eq!(
         resume_after(&net, B),
@@ -243,7 +247,7 @@ fn an_action_scheduled_before_the_host_left_and_never_ruled_is_ruled_by_the_new_
     for p in [A, B] {
         assert_eq!(
             counter(&net, p),
-            tick(&net, p),
+            tick(&net, p).0,
             "no action has been taken yet"
         );
     }
@@ -253,12 +257,12 @@ fn an_action_scheduled_before_the_host_left_and_never_ruled_is_ruled_by_the_new_
     net.lose_host(HostDeparture::Crashes);
     net.name_host(A);
     run_until(&mut net, 600, "the survivors to resume and run on", |net| {
-        resumed(net, B) && tick(net, A) > resume_after(net, A) + 60
+        resumed(net, B) && tick(net, A) > resume_after(net, A) + Ticks(60)
     });
     net.run(30);
     for p in [A, B] {
         assert_eq!(
-            counter(&net, p) - tick(&net, p),
+            counter(&net, p) - tick(&net, p).0,
             5,
             "peer {p:?} applied the action exactly once"
         );
@@ -280,7 +284,7 @@ fn a_survivor_that_never_reports_leaves_on_the_same_tick_everywhere() {
         resumed(net, A) && resumed(net, B)
     });
     net.run(60);
-    let first_ruled = resume_after(&net, A) + 1;
+    let first_ruled = resume_after(&net, A).next();
     assert_eq!(left_at(&net, A, 4), Some(first_ruled));
     assert_eq!(left_at(&net, B, 4), Some(first_ruled));
     assert_eq!(roster(&net, A), [2, 3]);
@@ -297,7 +301,7 @@ fn a_joiner_caught_mid_join_by_a_host_loss_joins_the_new_host_from_a_fresh_snaps
         &mut net,
         1200,
         "the joiner to be simulating with the new host",
-        |net| roster(net, A).contains(&4) && tick(net, joiner) > resume_after(net, A) + 150,
+        |net| roster(net, A).contains(&4) && tick(net, joiner) > resume_after(net, A) + Ticks(150),
     );
     assert!(net.app(A).world().resource::<SnapshotsCaptured>().0 >= 1);
     assert_agree(&net, A, joiner);
@@ -316,7 +320,7 @@ fn a_second_host_loss_during_the_resume_is_resumed_from_again() {
         resumed(net, B) && resumed(net, C)
     });
     net.run(120);
-    let first_ruled = resume_after(&net, B) + 1;
+    let first_ruled = resume_after(&net, B).next();
     for uuid in [HOST, 2] {
         assert_eq!(left_at(&net, B, uuid), Some(first_ruled), "{uuid} on B");
         assert_eq!(left_at(&net, C, uuid), Some(first_ruled), "{uuid} on C");
@@ -331,7 +335,7 @@ fn a_survivor_holding_ticks_past_the_trust_window_rejoins_rather_than_being_trus
         lagging_rulings(net, B, 30);
         for p in [HOST_PEER, A, B] {
             net.app_mut(p).insert_resource(HostMigrationPolicy {
-                trust_window: 8,
+                trust_window: Ticks(8),
                 ..default()
             });
         }
@@ -342,7 +346,7 @@ fn a_survivor_holding_ticks_past_the_trust_window_rejoins_rather_than_being_trus
         newest_ruled_tick::<Action>(net.app(B)).unwrap(),
     );
     assert!(
-        furthest > own + 8,
+        furthest > own + Ticks(8),
         "A holds more than a trust window beyond B"
     );
 
@@ -351,17 +355,17 @@ fn a_survivor_holding_ticks_past_the_trust_window_rejoins_rather_than_being_trus
         net.app(B).world().contains_resource::<LastMigration>()
             && left_at(net, B, 2).is_some()
             && roster(net, B).contains(&2)
-            && tick(net, A) > resume_after(net, B) + 150
+            && tick(net, A) > resume_after(net, B) + Ticks(150)
     });
     let resumed_at = resume_after(&net, B);
     assert!(
-        resumed_at <= own + 8 && resumed_at < furthest,
+        resumed_at <= own + Ticks(8) && resumed_at < furthest,
         "the new host took nothing past its window: resumed at {resumed_at}, its own rulings \
          end at {own}, A's at {furthest}"
     );
     assert_eq!(
         left_at(&net, B, 2),
-        Some(resumed_at + 1),
+        Some(resumed_at.next()),
         "A, too far ahead to resume, left on the first tick the new host ruled"
     );
     net.run(100);
@@ -371,7 +375,7 @@ fn a_survivor_holding_ticks_past_the_trust_window_rejoins_rather_than_being_trus
 #[test]
 fn a_parked_checksum_report_for_a_tick_the_new_host_re_rules_is_forgotten() {
     let mut net = session(2);
-    let future = tick(&net, B) + 60;
+    let future = tick(&net, B) + Ticks(60);
     let bytes = {
         let registry = net
             .app(B)
@@ -389,7 +393,7 @@ fn a_parked_checksum_report_for_a_tick_the_new_host_re_rules_is_forgotten() {
     net.run(1);
     net.migrate(A);
     run_until(&mut net, 800, "B to run past the reported tick", |net| {
-        tick(net, B) > future + 10
+        tick(net, B) > future + Ticks(10)
     });
     assert!(
         !net.app(B)
@@ -426,7 +430,7 @@ fn a_session_paused_when_the_host_left_stays_paused_until_the_new_host_resumes_i
 
     net.app_mut(A).world_mut().write_message(ResumeLockstep);
     run_until(&mut net, 400, "the session to run again", |net| {
-        tick(net, A) > paused_at.0 + 60 && tick(net, B) > paused_at.1 + 60
+        tick(net, A) > paused_at.0 + Ticks(60) && tick(net, B) > paused_at.1 + Ticks(60)
     });
     assert_agree(&net, A, B);
 }

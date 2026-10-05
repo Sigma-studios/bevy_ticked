@@ -21,8 +21,8 @@ const LINKS: usize = 4;
 const HALF_LINK: f32 = 0.5;
 
 /// When the pair in the lifecycle tests is minted, and when it is tombstoned.
-const SPAWN_AT: u64 = 30;
-const TOMBSTONE_AT: u64 = 80;
+const SPAWN_AT: Tick = Tick(30);
+const TOMBSTONE_AT: Tick = Tick(80);
 
 /// A revolute joint from the end of `parent` to the start of `child`, with limits the chain folds
 /// against when it lands.
@@ -91,7 +91,7 @@ fn a_jointed_chain_replays_bit_identically() {
     let mut app = peer_app(HOST_UUID, avian::install);
     let bodies = spawn_chain(app.world_mut(), LINKS);
     // Mid-swing to landed: the free end strikes the ground inside the window.
-    assert_replays_identically::<AvianHash>(&mut app, 20, 96);
+    assert_replays_identically::<AvianHash>(&mut app, Tick(20), Ticks(96));
 
     let free_end = bodies[LINKS - 1];
     let started_at = Vec3::new(
@@ -196,7 +196,7 @@ fn assert_the_pair_was_tombstoned(app: &App) {
 #[test]
 fn a_rewind_across_a_jointed_spawn_and_its_tombstone_replays_identically() {
     let mut app = lifecycle_app();
-    assert_replays_identically::<AvianHash>(&mut app, SPAWN_AT - 10, 96);
+    assert_replays_identically::<AvianHash>(&mut app, SPAWN_AT - Ticks(10), Ticks(96));
     assert_the_pair_was_tombstoned(&app);
 }
 
@@ -205,6 +205,6 @@ fn a_rewind_across_a_jointed_spawn_and_its_tombstone_replays_identically() {
 #[test]
 fn a_rewind_across_a_jointed_tombstone_replays_identically() {
     let mut app = lifecycle_app();
-    assert_replays_identically::<AvianHash>(&mut app, TOMBSTONE_AT - 20, 64);
+    assert_replays_identically::<AvianHash>(&mut app, TOMBSTONE_AT - Ticks(20), Ticks(64));
     assert_the_pair_was_tombstoned(&app);
 }

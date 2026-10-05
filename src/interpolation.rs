@@ -43,7 +43,7 @@ impl TickInterpolation<'_> {
     }
 
     /// The current simulation tick.
-    pub fn current_tick(&self) -> u64 {
+    pub fn current_tick(&self) -> crate::tick_types::Tick {
         self.current_tick.0
     }
 
@@ -52,8 +52,8 @@ impl TickInterpolation<'_> {
     ///
     /// Saturates at the fractional part for ticks at or in the future, so a
     /// freshly stamped event animates from zero rather than jumping.
-    pub fn ticks_since(&self, tick: u64) -> f32 {
-        self.current_tick.0.saturating_sub(tick) as f32 + self.fraction()
+    pub fn ticks_since(&self, tick: crate::tick_types::Tick) -> f32 {
+        self.current_tick.0.since(tick).0 as f32 + self.fraction()
     }
 }
 

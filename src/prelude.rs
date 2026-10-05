@@ -20,9 +20,10 @@ pub use crate::{
     rollback::{rollback_and_resimulate, rollback_to_tick},
     session::{PerPeer, SessionAppExt, SessionReset, SessionResources, SessionScope},
     tick::{
-        CurrentTick, HISTORY_BUFFER_TICKS, HistoryBufferTicks, ResetToTick, SECONDS_PER_TICK,
-        StepBackward, StepForward, TICKS_PER_SECOND, TickHoldReason, TickHolds,
+        CurrentTick, DEFAULT_TICK_HZ, DEFAULT_TIMESTEP, HISTORY_BUFFER_TICKS, HistoryBufferTicks,
+        ResetToTick, StepBackward, StepForward, TickHoldReason, TickHolds,
     },
+    tick_types::{Tick, Ticks},
     time::{TickRateDilation, Ticked, TickedTime, run_tick_schedule},
     tracked_entity::{
         LocalSpawnerSlot, SLOT_BITS, STREAM_BITS, SpawnerSlot, TickTrackedEntity,
@@ -31,3 +32,6 @@ pub use crate::{
     tracked_index::TrackedEntityIndex,
     world_actions::WorldActions,
 };
+
+#[allow(deprecated)]
+pub use crate::tick::{SECONDS_PER_TICK, TICKS_PER_SECOND};

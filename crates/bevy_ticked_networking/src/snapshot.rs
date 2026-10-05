@@ -30,6 +30,7 @@ use bevy_ticked::{
     registry::{TickedComponentRegistry, TypeMask},
     resource_registry::TickedResourceRegistry,
     tick::CurrentTick,
+    tick_types::Tick,
     tracked_entity::{TickTrackedEntity, TrackedIdAllocator},
     tracked_index::TrackedEntityIndex,
 };
@@ -40,7 +41,7 @@ pub struct SnapshotPacket {
     /// Counts the packets sent to this recipient. A client acks it on its input packets.
     pub seq: u32,
     /// The tick the body describes.
-    pub tick: u64,
+    pub tick: Tick,
     /// This recipient's input-arrival margin in ticks, measured by the server: how many ticks
     /// ahead of the server its most recent input arrived (negative is late). The client sizes
     /// its prediction lead from it. [`MARGIN_UNMEASURED`] when the server has no recent
@@ -188,7 +189,7 @@ impl FullBody {
 
 impl SnapshotPacket {
     /// A full packet for `tick` with no sequence or margin, as a test or a tool builds one.
-    pub fn full(tick: u64, body: FullBody) -> Self {
+    pub fn full(tick: Tick, body: FullBody) -> Self {
         Self {
             seq: 0,
             tick,
@@ -210,7 +211,7 @@ impl SnapshotPacket {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RelayedInput {
     pub player: u128,
-    pub tick: u64,
+    pub tick: Tick,
     pub bytes: Vec<u8>,
 }
 
@@ -218,7 +219,7 @@ pub struct RelayedInput {
 ///
 /// Walks the tracked ids once, in order, and asks the registry for each id's types in wire
 /// order. `inputs_ahead` is left empty; the server fills it in.
-pub fn build_full_body(world: &mut World, tick: u64) -> FullBody {
+pub fn build_full_body(world: &mut World, tick: Tick) -> FullBody {
     let registry = world.resource::<TickedComponentRegistry>().clone();
     let mut ids: Vec<u64> = {
         let mut tracked = world.query::<&TickTrackedEntity>();
@@ -276,7 +277,7 @@ pub struct Applied {
 ///
 /// Walks the records once. The history entry at `tick` is opened for every networked type
 /// before the walk and closed after it, which is where absence is enforced, one query per type.
-pub fn apply_full_body(world: &mut World, tick: u64, body: &FullBody) -> Applied {
+pub fn apply_full_body(world: &mut World, tick: Tick, body: &FullBody) -> Applied {
     let registry = world.resource::<TickedComponentRegistry>().clone();
     let mut applied = Applied::default();
 

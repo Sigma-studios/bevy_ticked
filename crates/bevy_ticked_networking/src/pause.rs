@@ -28,7 +28,7 @@
 //!
 //! Those two are *edges* — a window event, and one long frame. Neither can see a host that is
 //! simply too slow to keep up, which is the case between them:
-//! [`PausePolicy::auto_pause_when_behind_for`] counts consecutive frames longer than the tick
+//! [`PausePolicy::auto_pause_when_behind_frames`] counts consecutive frames longer than the tick
 //! loop's whole catch-up budget and pauses on that instead. A host at three frames a second
 //! trips neither edge and is nonetheless shedding a quarter of every second's ticks.
 //!
@@ -43,6 +43,7 @@
 use std::time::Duration;
 
 use bevy::prelude::*;
+use bevy_ticked::tick_types::Tick;
 use bevy_ticked::{
     MaxTicksPerFrame, TickedLoop, TickedSystems,
     session::{SessionAppExt, SessionReset, SessionScope},
@@ -83,7 +84,7 @@ pub enum PauseReason {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Paused {
     /// The tick everybody holds at.
-    pub at: u64,
+    pub at: Tick,
     pub reason: PauseReason,
 }
 
@@ -143,7 +144,7 @@ pub struct PausePolicy {
     /// second monitor, a host windowed beside the chat it is reading the lobby code from, several
     /// copies of a game on one machine — and there it stopped a session that was perfectly able to
     /// run. Every real-time game built on this turned it off. Whether the host *can keep up* is
-    /// what [`auto_pause_when_behind_for`](Self::auto_pause_when_behind_for) and
+    /// what [`auto_pause_when_behind_frames`](Self::auto_pause_when_behind_frames) and
     /// [`auto_pause_after_real_gap`](Self::auto_pause_after_real_gap) measure, and a web host
     /// that is throttled trips one of them.
     pub auto_pause_on_focus_loss: bool,
@@ -163,7 +164,11 @@ pub struct PausePolicy {
     ///
     /// Between `MaxTicksPerFrame` ticks per frame and the gap threshold there was no guard at
     /// all. This is it.
-    pub auto_pause_when_behind_for: Option<u32>,
+    ///
+    /// Frames, not time, and on purpose: the question is about frames — how many in a row could
+    /// not run their ticks — and the sibling fields are durations because theirs are about time.
+    /// It was called `auto_pause_when_behind_for`, which read like one of them.
+    pub auto_pause_when_behind_frames: Option<u32>,
     /// A client that has applied no snapshot for this long holds its clock until one comes.
     /// `None` by default; see the module docs for why.
     pub client_soft_hold_after: Option<Duration>,
@@ -178,7 +183,7 @@ impl Default for PausePolicy {
             auto_pause_after_real_gap: Some(Duration::from_millis(500)),
             // Three, so a single heavy frame is not a pause and a host that genuinely cannot
             // keep up is one within a second at any frame rate low enough to matter.
-            auto_pause_when_behind_for: Some(3),
+            auto_pause_when_behind_frames: Some(3),
             client_soft_hold_after: None,
         }
     }
@@ -321,7 +326,7 @@ fn host_apply_requests(world: &mut World) {
         && pause.0.is_none()
     {
         pause.0 = Some(Paused {
-            at: tick + 1,
+            at: tick.next(),
             reason,
         });
     }
@@ -414,7 +419,10 @@ fn pause_when_behind(
     mut pauses: MessageWriter<PauseSession>,
     mut resumes: MessageWriter<ResumeSession>,
 ) {
-    let Some(threshold) = policy.auto_pause_when_behind_for.filter(|_| host.is_some()) else {
+    let Some(threshold) = policy
+        .auto_pause_when_behind_frames
+        .filter(|_| host.is_some())
+    else {
         behind.consecutive_frames = 0;
         return;
     };

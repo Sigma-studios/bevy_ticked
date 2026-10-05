@@ -23,7 +23,7 @@ fn holds(app: &bevy::prelude::App) -> &TickHolds {
     app.world().resource::<TickHolds>()
 }
 
-fn pause_of(app: &bevy::prelude::App) -> Option<u64> {
+fn pause_of(app: &bevy::prelude::App) -> Option<Tick> {
     app.world().resource::<SessionPause>().0.map(|p| p.at)
 }
 
@@ -94,7 +94,7 @@ fn a_client_ahead_of_paused_at_rolls_back_to_it_and_forgets_its_prediction() {
 fn resuming_reacquires_the_lead_without_a_replay_burst() {
     let mut net = session(1);
     let (host, client) = (net.host(), net.client());
-    let target = target_replay_distance(net.app(client)) as i64;
+    let target = target_replay_distance(net.app(client)).0 as i64;
     net.app_mut(host)
         .world_mut()
         .write_message(PauseSession(PauseReason::Host));
@@ -178,7 +178,7 @@ fn by_default_a_silent_host_does_not_stop_the_client() {
         holds(net.app(client))
     );
     assert!(
-        tick(net.app(client)) >= before + 30,
+        tick(net.app(client)) >= before + Ticks(30),
         "its clock went on through the silence"
     );
 }

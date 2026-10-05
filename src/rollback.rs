@@ -3,14 +3,14 @@ use bevy::prelude::*;
 
 use crate::{
     events::TickedEventRegistry, registry::TickedComponentRegistry, tick::CurrentTick,
-    time::run_tick_schedule,
+    tick_types::Tick, time::run_tick_schedule,
 };
 
 /// Restore world state to a previous tick from WorldActions history.
 ///
 /// Sets `CurrentTick` to `target_tick` and overwrites all registered components
 /// on entities with their saved state at that tick.
-pub fn rollback_to_tick(world: &mut World, target_tick: u64) {
+pub fn rollback_to_tick(world: &mut World, target_tick: Tick) {
     let registry = world.resource::<TickedComponentRegistry>().clone();
     registry.restore_all(world, target_tick);
     world.resource_mut::<CurrentTick>().0 = target_tick;
@@ -24,8 +24,8 @@ pub fn rollback_to_tick(world: &mut World, target_tick: u64) {
 /// 3. Captures state into WorldActions
 pub fn rollback_and_resimulate(
     world: &mut World,
-    target_tick: u64,
-    end_tick: u64,
+    target_tick: Tick,
+    end_tick: Tick,
     simulation_schedule: impl ScheduleLabel,
 ) {
     let registry = world.resource::<TickedComponentRegistry>().clone();
@@ -41,7 +41,7 @@ pub fn rollback_and_resimulate(
     TickedEventRegistry::truncate_all_after(world, target_tick);
 
     // Re-simulate forward
-    for tick in (target_tick + 1)..=end_tick {
+    for tick in target_tick.next().through(end_tick) {
         world.resource_mut::<CurrentTick>().0 = tick;
         run_tick_schedule(world, tick, simulation_schedule.intern());
         registry.capture_all(world, tick);

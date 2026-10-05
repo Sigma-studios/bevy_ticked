@@ -308,7 +308,7 @@ pub fn reset_session_state(world: &mut World) {
     if let Some(resources) = world.get_resource::<SessionResources>().cloned() {
         resources.reset(world, SessionScope::Role);
     }
-    world.insert_resource(CurrentTick(0));
+    world.insert_resource(CurrentTick(crate::tick_types::Tick::ZERO));
     if let Some(registry) = world.get_resource::<TickedComponentRegistry>().cloned() {
         registry.clear_all(world);
     }

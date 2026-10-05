@@ -4,6 +4,7 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
 
+use bevy_ticked::tick_types::{Tick, Ticks};
 use bevy_ticked_testing::fixtures::avian::{self, AvianHash, sleeping_bodies, spawn_stack};
 use bevy_ticked_testing::golden::{check_golden, record_trace};
 use bevy_ticked_testing::prelude::*;
@@ -17,7 +18,7 @@ fn a_stack_of_boxes_replays_bit_identically_with_the_documented_bundle() {
     let mut app = peer_app(HOST_UUID, avian::install);
     spawn_stack(app.world_mut(), BOXES);
     // Mid-topple: bodies in contact, rotating, sliding.
-    assert_replays_identically::<AvianHash>(&mut app, 40, 96);
+    assert_replays_identically::<AvianHash>(&mut app, Tick(40), Ticks(96));
 }
 
 /// The negative control. With sleeping allowed, a body that fell asleep during the live run
@@ -39,12 +40,12 @@ fn sleeping_is_disabled_for_tracked_bodies_or_the_replay_diverges() {
     // The replay spans the sleep: from before it, through it, past it. Not from tick 0,
     // which the harness cannot start a replay at: with warm starting the stack settles
     // early enough that 64 ticks before the first sleep would be.
-    let from = slept_at.saturating_sub(64).max(1);
+    let from = slept_at.saturating_sub(Ticks(64)).max(Tick(1));
     // A second app run to the same point, so the check starts at `from`.
     let mut fresh = peer_app(HOST_UUID, avian::install_sleepy);
     spawn_stack(fresh.world_mut(), BOXES);
     let diverged = catch_unwind(AssertUnwindSafe(|| {
-        assert_replays_identically::<AvianHash>(&mut fresh, from, 128);
+        assert_replays_identically::<AvianHash>(&mut fresh, from, Ticks(128));
     }))
     .is_err();
     assert!(
@@ -56,7 +57,7 @@ fn sleeping_is_disabled_for_tracked_bodies_or_the_replay_diverges() {
     // And with the bundle as documented, the same window replays cleanly.
     let mut bundled = peer_app(HOST_UUID, avian::install);
     spawn_stack(bundled.world_mut(), BOXES);
-    assert_replays_identically::<AvianHash>(&mut bundled, from, 128);
+    assert_replays_identically::<AvianHash>(&mut bundled, from, Ticks(128));
 }
 
 /// The stack's trace, sampled every eight ticks for four seconds, matches the recorded one.

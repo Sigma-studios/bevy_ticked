@@ -83,13 +83,13 @@ fn wire_pos(app: &App) -> u16 {
 }
 
 /// Host-shaped: what the client predicted for `tick`, from its own history.
-fn matching(app: &mut App, tick: u64) -> SnapshotPacket {
+fn matching(app: &mut App, tick: Tick) -> SnapshotPacket {
     let mut packet = SnapshotPacket::full(tick, build_full_body(app.world_mut(), tick));
     packet.your_margin = 2;
     packet
 }
 
-fn placing(app: &mut App, tick: u64, pos: i32) -> SnapshotPacket {
+fn placing(app: &mut App, tick: Tick, pos: i32) -> SnapshotPacket {
     let mut packet = matching(app, tick);
     let index = wire_pos(app);
     if let SnapshotBody::Full(body) = &mut packet.body {
@@ -108,7 +108,7 @@ fn synced() -> App {
     let index = wire_pos(&app);
     let mut body = bevy_ticked_networking::snapshot::FullBody::default();
     body.put(EntityRecord::new(1).with(index, &Pos(0)));
-    deliver(&mut app, SnapshotPacket::full(0, body));
+    deliver(&mut app, SnapshotPacket::full(Tick::ZERO, body));
     app.update();
     let entity = {
         let mut q = app
@@ -127,7 +127,7 @@ fn synced() -> App {
     app
 }
 
-fn lead(app: &App) -> u64 {
+fn lead(app: &App) -> Ticks {
     app.world()
         .resource::<ClientTickBuffer>()
         .target_replay_distance
@@ -217,7 +217,7 @@ fn unregistered_state_advances_once_per_tick_not_once_per_replay() {
     let mut q = app.world_mut().query::<&Unregistered>();
     let count = q.single(app.world()).unwrap().0 - count_before;
     assert_eq!(
-        count, ticks,
+        count, ticks.0,
         "an unregistered counter used to advance once per replayed tick, seven times per real \
          one; it advances once per tick now"
     );
@@ -279,7 +279,7 @@ fn a_burst_of_stale_snapshots_replays_at_most_max_ticks_per_frame() {
     let index = wire_pos(&app);
     let mut body = bevy_ticked_networking::snapshot::FullBody::default();
     body.put(EntityRecord::new(1).with(index, &Pos(0)));
-    deliver(&mut app, SnapshotPacket::full(0, body));
+    deliver(&mut app, SnapshotPacket::full(Tick::ZERO, body));
     app.update();
     let entity = {
         let mut q = app
@@ -297,7 +297,7 @@ fn a_burst_of_stale_snapshots_replays_at_most_max_ticks_per_frame() {
     }
     // A correction from far back: more ticks to replay than one frame may run.
     let current = app.world().resource::<CurrentTick>().0;
-    let packet = placing(&mut app, current - 30, 9);
+    let packet = placing(&mut app, current - Ticks(30), 9);
     deliver(&mut app, packet);
 
     let mut per_frame = Vec::new();
@@ -348,7 +348,7 @@ fn the_server_send_rate_divides_the_snapshot_stream() {
             source: TickSource::Hz(64.0),
             ..default()
         })
-        .add_plugins(TickedServerPlugin::<Input>::new().send_every(4))
+        .add_plugins(TickedServerPlugin::<Input>::new().send_every(Ticks(4)))
         .insert_resource(TimeUpdateStrategy::ManualDuration(TICK))
         .register_networked_ticked_component::<Pos>("Pos");
     app.insert_resource(LocalServerPlayer(1));
@@ -358,10 +358,10 @@ fn the_server_send_rate_divides_the_snapshot_stream() {
     }
     let ticks = app.world().resource::<CurrentTick>().0;
     let sent = app.world().resource::<SnapshotStats>().sent;
-    assert!(ticks >= 60);
+    assert!(ticks >= Tick(60));
     assert_eq!(
         sent,
-        ticks / 4,
+        ticks.0 / 4,
         "one snapshot every fourth tick: {sent} for {ticks} ticks"
     );
 }

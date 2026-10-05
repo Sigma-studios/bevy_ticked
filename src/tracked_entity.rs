@@ -371,7 +371,7 @@ impl TrackedWorldExt for World {
         let minted_as = SpawnedAs(TypeId::of::<B>());
         let tick = self
             .get_resource::<crate::tick::CurrentTick>()
-            .map_or(0, |t| t.0);
+            .map_or(crate::tick_types::Tick::ZERO, |t| t.0);
         // A handle out of the index is a hint, not a promise: the reaper destroys tombstones once
         // the window has passed them, so one that is no longer in the world means this id is being
         // minted afresh rather than revived.

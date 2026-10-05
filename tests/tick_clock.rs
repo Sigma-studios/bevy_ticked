@@ -19,7 +19,7 @@ use bevy_ticked::prelude::*;
 struct Observed {
     deltas: Vec<Duration>,
     elapsed: Vec<Duration>,
-    ticks: Vec<u64>,
+    ticks: Vec<Tick>,
 }
 
 fn observe(time: Res<Time>, tick: Res<CurrentTick>, mut observed: ResMut<Observed>) {
@@ -141,7 +141,7 @@ fn simulation_time_is_derived_from_the_tick_counter() {
     for (elapsed, tick) in observed.elapsed.iter().zip(&observed.ticks) {
         assert_eq!(
             *elapsed,
-            timestep * (*tick as u32),
+            timestep * (tick.0 as u32),
             "elapsed at tick {tick} must be exactly tick * timestep"
         );
     }
@@ -181,7 +181,10 @@ fn hz_source_runs_one_tick_per_frame_at_matching_rates() {
     }
 
     let observed = app.world().resource::<Observed>();
-    assert_eq!(observed.ticks, (1..=10).collect::<Vec<_>>());
+    assert_eq!(
+        observed.ticks,
+        Tick(1).through(Tick(10)).collect::<Vec<_>>()
+    );
     assert!(
         observed
             .deltas
@@ -202,7 +205,7 @@ fn hz_source_catches_up_within_one_frame() {
 
     assert_eq!(
         app.world().resource::<Observed>().ticks,
-        vec![1, 2, 3, 4],
+        vec![Tick(1), Tick(2), Tick(3), Tick(4)],
         "the accumulator must spend all whole ticks it has banked"
     );
 }

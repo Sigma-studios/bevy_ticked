@@ -23,12 +23,13 @@
 //! replayed tick land on a slightly different elapsed value than the original,
 //! which is precisely the kind of drift rollback cannot tolerate.
 
+use crate::tick_types::Tick;
 use core::time::Duration;
 
 use bevy::ecs::schedule::ScheduleLabel;
 use bevy::prelude::*;
 
-use crate::tick::SECONDS_PER_TICK;
+use crate::tick::DEFAULT_TIMESTEP;
 
 /// Context for [`Time<Ticked>`], the clock that measures simulation time.
 ///
@@ -44,7 +45,7 @@ pub struct Ticked {
 impl Default for Ticked {
     fn default() -> Self {
         Self {
-            timestep: Duration::from_secs_f32(SECONDS_PER_TICK),
+            timestep: DEFAULT_TIMESTEP,
             overstep: Duration::ZERO,
         }
     }
@@ -74,7 +75,7 @@ pub trait TickedTime {
     fn set_timestep_hz(&mut self, hz: f64);
 
     /// Simulation time elapsed at the end of `tick`, i.e. `tick * timestep`.
-    fn elapsed_at_tick(&self, tick: u64) -> Duration;
+    fn elapsed_at_tick(&self, tick: Tick) -> Duration;
 
     /// Time accumulated toward the next tick but not yet consumed by one.
     fn overstep(&self) -> Duration;
@@ -129,7 +130,7 @@ impl TickedTime for Time<Ticked> {
     }
 
     #[inline]
-    fn elapsed_at_tick(&self, tick: u64) -> Duration {
+    fn elapsed_at_tick(&self, tick: Tick) -> Duration {
         elapsed_at(self.timestep(), tick)
     }
 
@@ -194,8 +195,8 @@ impl Default for TickRateDilation {
 
 /// `tick * timestep`, computed in integer nanoseconds so it is exact and
 /// reproducible rather than drifting with repeated float accumulation.
-fn elapsed_at(timestep: Duration, tick: u64) -> Duration {
-    Duration::from_nanos((timestep.as_nanos() as u64).saturating_mul(tick))
+fn elapsed_at(timestep: Duration, tick: Tick) -> Duration {
+    Duration::from_nanos((timestep.as_nanos() as u64).saturating_mul(tick.0))
 }
 
 /// Run `schedule` as simulation tick `tick`, with [`Time<Ticked>`] installed as
@@ -219,12 +220,12 @@ fn elapsed_at(timestep: Duration, tick: u64) -> Duration {
 /// another on the replay, and the replay diverged by the difference. Now it gets the tick's,
 /// same as `Time`. The source guard in `bevy_ticked_testing` still flags the read, because
 /// `Time<Real>` inside a tick is a wrong question even when the answer is made harmless.
-pub fn run_tick_schedule(world: &mut World, tick: u64, schedule: impl ScheduleLabel) {
+pub fn run_tick_schedule(world: &mut World, tick: Tick, schedule: impl ScheduleLabel) {
     let context = *world.resource::<Time<Ticked>>().context();
 
     // Build the clock so that `elapsed == tick * timestep` and `delta == timestep`.
     let mut clock = Time::new_with(context);
-    clock.advance_by(elapsed_at(context.timestep, tick.saturating_sub(1)));
+    clock.advance_by(elapsed_at(context.timestep, tick.prev()));
     clock.advance_by(context.timestep);
     *world.resource_mut::<Time<Ticked>>() = clock;
 
@@ -313,8 +314,8 @@ mod tests {
     fn default_timestep_matches_the_tick_rate_constant() {
         assert_eq!(
             clock().timestep(),
-            Duration::from_secs_f32(SECONDS_PER_TICK),
-            "the default clock must tick at TICKS_PER_SECOND"
+            DEFAULT_TIMESTEP,
+            "the default clock must tick at DEFAULT_TICK_HZ"
         );
         assert_eq!(clock().timestep(), Duration::from_micros(15_625));
     }
@@ -322,9 +323,12 @@ mod tests {
     #[test]
     fn elapsed_is_exact_and_linear_in_the_tick_count() {
         let c = clock();
-        assert_eq!(c.elapsed_at_tick(0), Duration::ZERO);
-        assert_eq!(c.elapsed_at_tick(64), Duration::from_secs(1));
-        assert_eq!(c.elapsed_at_tick(64 * 3600), Duration::from_secs(3600));
+        assert_eq!(c.elapsed_at_tick(Tick(0)), Duration::ZERO);
+        assert_eq!(c.elapsed_at_tick(Tick(64)), Duration::from_secs(1));
+        assert_eq!(
+            c.elapsed_at_tick(Tick(64 * 3600)),
+            Duration::from_secs(3600)
+        );
     }
 
     #[test]
@@ -333,10 +337,10 @@ mod tests {
         // the clock is still exactly on the second, which repeated float
         // accumulation would not be.
         let c = clock();
-        let one_hour = 64 * 3600;
+        let one_hour = Tick(64 * 3600);
         assert_eq!(c.elapsed_at_tick(one_hour), Duration::from_secs(3600));
         assert_eq!(
-            c.elapsed_at_tick(one_hour) - c.elapsed_at_tick(one_hour - 1),
+            c.elapsed_at_tick(one_hour) - c.elapsed_at_tick(one_hour.prev()),
             c.timestep()
         );
     }
@@ -346,7 +350,10 @@ mod tests {
         let mut c = clock();
         c.set_timestep_hz(30.0);
         assert_eq!(c.timestep(), Duration::from_secs_f64(1.0 / 30.0));
-        assert_eq!(c.elapsed_at_tick(30), Duration::from_nanos(999_999_990));
+        assert_eq!(
+            c.elapsed_at_tick(Tick(30)),
+            Duration::from_nanos(999_999_990)
+        );
     }
 
     #[test]

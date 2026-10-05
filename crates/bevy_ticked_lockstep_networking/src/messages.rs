@@ -1,4 +1,5 @@
 use bevy::prelude::*;
+use bevy_ticked::tick_types::{Tick, Ticks};
 use serde::{Deserialize, Serialize};
 use std::marker::PhantomData;
 
@@ -7,7 +8,7 @@ pub struct JoinSnapshotRequest;
 
 #[derive(Message, Serialize, Deserialize, Debug, Clone)]
 pub struct JoinSnapshotResponse<S> {
-    pub snapshot_tick: u64,
+    pub snapshot_tick: Tick,
     pub snapshot: S,
 }
 
@@ -22,12 +23,12 @@ pub struct JoinSnapshotResponse<S> {
 #[derive(Message, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct ClientLoaded {
     /// The sender's `LockstepConfig::client_tick_buffer` at the moment it loaded.
-    pub buffer: u64,
+    pub buffer: Ticks,
 }
 
 #[derive(Message, Serialize, Deserialize, Debug, Clone)]
 pub struct ClientScheduledActions<A> {
-    pub tick: u64,
+    pub tick: Tick,
     pub actions: Vec<A>,
 }
 
@@ -48,7 +49,7 @@ pub struct ClientScheduledActions<A> {
 /// [`apply_authoritative_tick`]: crate::apply_authoritative_tick
 #[derive(Message, Serialize, Deserialize, Debug, Clone)]
 pub struct AuthoritativeTick<A> {
-    pub tick: u64,
+    pub tick: Tick,
     pub players_actions: Vec<(u128, Vec<A>)>,
     /// What the session itself did on this tick: a participant joined or left, the session
     /// paused or resumed. Applied inside the tick on every peer, so every peer sees the roster
@@ -64,7 +65,7 @@ pub struct AuthoritativeTick<A> {
 
 impl<A> AuthoritativeTick<A> {
     /// A tick with nothing but players' actions.
-    pub fn new(tick: u64, players_actions: Vec<(u128, Vec<A>)>) -> Self {
+    pub fn new(tick: Tick, players_actions: Vec<(u128, Vec<A>)>) -> Self {
         Self {
             tick,
             players_actions,
@@ -119,37 +120,37 @@ pub enum RosterChange {
 #[derive(Message, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct ParticipantJoined {
     pub player_uuid: u128,
-    pub joined_at_tick: u64,
+    pub joined_at_tick: Tick,
 }
 
 #[derive(Message, Debug, Clone)]
 pub struct CaptureJoinSnapshot<S> {
     pub requester: u128,
-    pub snapshot_tick: u64,
+    pub snapshot_tick: Tick,
     pub marker: PhantomData<fn() -> S>,
 }
 
 #[derive(Message, Debug, Clone)]
 pub struct ProvideJoinSnapshot<S> {
     pub requester: u128,
-    pub snapshot_tick: u64,
+    pub snapshot_tick: Tick,
     pub snapshot: S,
 }
 
 #[derive(Message, Debug, Clone)]
 pub struct ApplyJoinSnapshot<S> {
-    pub snapshot_tick: u64,
+    pub snapshot_tick: Tick,
     pub snapshot: S,
 }
 
 #[derive(Message, Debug, Clone)]
 pub struct JoinSnapshotApplied<S> {
-    pub snapshot_tick: u64,
+    pub snapshot_tick: Tick,
     pub marker: PhantomData<fn() -> S>,
 }
 
 impl<S> JoinSnapshotApplied<S> {
-    pub fn new(snapshot_tick: u64) -> Self {
+    pub fn new(snapshot_tick: Tick) -> Self {
         Self {
             snapshot_tick,
             marker: PhantomData,
@@ -169,7 +170,7 @@ impl<S> JoinSnapshotApplied<S> {
 /// [`LockstepJoinSet::ApplyJoinSnapshot`]: crate::LockstepJoinSet::ApplyJoinSnapshot
 #[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct JoinSnapshotReceived {
-    pub snapshot_tick: u64,
+    pub snapshot_tick: Tick,
 }
 
 /// Local, never on the wire: the host accepted a [`ClientLoaded`] and made its sender a

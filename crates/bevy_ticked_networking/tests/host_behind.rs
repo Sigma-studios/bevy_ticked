@@ -8,7 +8,7 @@
 //! that each snapshot then takes back — for as long as it lasts, with nothing said.
 //!
 //! Every frame here is 300 ms: deliberately longer than the 250 ms budget (16 ticks at 64 Hz) and
-//! shorter than the 500 ms gap, so nothing but `auto_pause_when_behind_for` can fire.
+//! shorter than the 500 ms gap, so nothing but `auto_pause_when_behind_frames` can fire.
 
 use std::time::Duration;
 
@@ -144,7 +144,7 @@ fn the_guard_can_be_turned_off() {
         })
         // Before the role plugin, which is the documented way to keep a policy of one's own.
         .insert_resource(PausePolicy {
-            auto_pause_when_behind_for: None,
+            auto_pause_when_behind_frames: None,
             ..default()
         })
         .add_plugins(TickedServerPlugin::<Input>::new())

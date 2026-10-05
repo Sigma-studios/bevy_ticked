@@ -43,8 +43,8 @@ fn peer() -> App {
 fn deliver_first_snapshot(app: &mut App) {
     app.world_mut().spawn((TickTrackedEntity(1), Pos(0)));
     let registry = app.world().resource::<TickedComponentRegistry>().clone();
-    registry.capture_all(app.world_mut(), 0);
-    let mut packet = SnapshotPacket::full(0, build_full_body(app.world_mut(), 0));
+    registry.capture_all(app.world_mut(), Tick(0));
+    let mut packet = SnapshotPacket::full(Tick::ZERO, build_full_body(app.world_mut(), Tick::ZERO));
     packet.your_margin = 2;
     app.world_mut().trigger(ReceivedNetworkSnapshot(packet));
 }

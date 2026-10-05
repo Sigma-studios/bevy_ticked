@@ -9,6 +9,7 @@ pub mod resource_registry;
 pub mod rollback;
 pub mod session;
 pub mod tick;
+pub mod tick_types;
 pub mod time;
 pub mod tracked_entity;
 pub mod tracked_index;
@@ -17,6 +18,7 @@ pub mod world_actions;
 use bevy::app::{MainScheduleOrder, RunFixedMainLoop, RunFixedMainLoopSystems};
 use bevy::ecs::schedule::ScheduleLabel;
 use bevy::prelude::*;
+use tick_types::{Tick, Ticks};
 
 use registry::TickedComponentRegistry;
 use resource_registry::TickedResourceAppExt;
@@ -178,7 +180,7 @@ pub struct TickedPlugin {
     /// replace — the networking plugins size it from what a rollback can actually reach.
     /// `Some(n)` is a game's own choice and nothing replaces it. See
     /// [`HistoryWindowChosen`].
-    pub history_ticks: Option<u64>,
+    pub history_ticks: Option<Ticks>,
     /// How [`TickedSimulation`] runs its systems.
     ///
     /// Single-threaded by default, because the simulation is supposed to be deterministic and
@@ -429,8 +431,8 @@ pub fn capture_initial_state(world: &mut World) {
         return;
     }
     let current_tick = world.resource::<CurrentTick>().0;
-    if current_tick == 0 && !registry.has_tick_captured(world, 0) {
-        registry.capture_all(world, 0);
+    if current_tick == Tick::ZERO && !registry.has_tick_captured(world, Tick::ZERO) {
+        registry.capture_all(world, Tick::ZERO);
     }
     world.resource_mut::<InitialCapture>().done = true;
 }
@@ -445,7 +447,7 @@ fn ensure_initial_capture(world: &mut World) {
 fn advance_one_tick(world: &mut World) {
     let tick = {
         let mut current = world.resource_mut::<CurrentTick>();
-        current.0 += 1;
+        current.0 = current.0.next();
         current.0
     };
 
@@ -456,7 +458,7 @@ fn advance_one_tick(world: &mut World) {
     // Prune old history to prevent unbounded memory growth.
     let buffer = world.resource::<HistoryBufferTicks>().0;
     let prune_tick = tick.saturating_sub(buffer);
-    if prune_tick > 0 {
+    if prune_tick > Tick::ZERO {
         registry.prune_all_before(world, prune_tick);
     }
 }
@@ -478,7 +480,7 @@ fn advance_tick_system(world: &mut World) {
 enum ManualControlAction {
     StepForward,
     StepBackward,
-    Reset(u64),
+    Reset(Tick),
 }
 
 /// Handle manual step/reset messages (works while paused). Exclusive system for World access.
@@ -512,10 +514,10 @@ fn apply_manual_controls(world: &mut World) {
             }
             ManualControlAction::StepBackward => {
                 let current_tick = world.resource::<CurrentTick>().0;
-                if current_tick == 0 {
+                if current_tick == Tick::ZERO {
                     continue;
                 }
-                restore_to(world, current_tick - 1);
+                restore_to(world, current_tick.prev());
                 run_loop_restored(world);
             }
             ManualControlAction::Reset(target) => {
@@ -531,7 +533,7 @@ fn apply_manual_controls(world: &mut World) {
     }
 }
 
-fn restore_to(world: &mut World, target: u64) {
+fn restore_to(world: &mut World, target: Tick) {
     let registry = world.resource::<TickedComponentRegistry>().clone();
     registry.restore_all(world, target);
     events::TickedEventRegistry::truncate_all_after(world, target);

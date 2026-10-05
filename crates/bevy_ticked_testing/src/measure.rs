@@ -24,7 +24,7 @@ pub fn measure_tick_rate(net: &mut TickedNetwork, peer: PeerId, steps: usize) ->
     let before = tick(net.app(peer));
     net.run(steps);
     let after = tick(net.app(peer));
-    (after - before) as f64 / steps as f64
+    after.since(before).0 as f64 / steps as f64
 }
 
 /// Frames from `peer` first holding `press` until `moved` is true of the host.
@@ -129,5 +129,5 @@ pub fn measure_snapshot_size(
 /// How many ticks `peer` is behind the host. Negative when it leads, which is where a client
 /// belongs; positive is a client whose inputs are arriving late.
 pub fn trails_host_by(net: &TickedNetwork, peer: PeerId) -> i64 {
-    tick(net.app(net.host())) as i64 - tick(net.app(peer)) as i64
+    tick(net.app(net.host())).offset_from(tick(net.app(peer)))
 }

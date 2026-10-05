@@ -51,7 +51,7 @@ fn one_step_is_exactly_one_tick() {
     net.step();
     assert_eq!(
         tick(net.app(host)),
-        before + 1,
+        before.next(),
         "one frame of TICK on a 64 Hz source must be exactly one tick"
     );
     assert_eq!(measure_tick_rate(&mut net, host, 32), 1.0);
@@ -159,7 +159,7 @@ fn assert_all_peers_agree_fails_on_a_corrupted_replica() {
     let seats = seat_everyone(&mut net);
     // The ticks the client predicted before it learnt of the spawns are mispredictions by
     // construction; agreement starts once the snapshot carrying the bodies has arrived.
-    let since = tick(net.app(client)) + 2;
+    let since = tick(net.app(client)) + Ticks(2);
     net.run(30);
     assert_all_peers_agree_since::<MinimalHash>(&net, since);
     assert!(
@@ -182,9 +182,9 @@ fn assert_all_peers_agree_fails_on_a_corrupted_replica() {
     }));
     let message = panic_message(outcome);
     assert!(
-        message.contains(&format!("tick {}", at + 1)),
+        message.contains(&format!("tick {}", at.next())),
         "the panic did not name the first corrupted tick {}: {message}",
-        at + 1
+        at.next()
     );
     assert!(
         message.contains("positions"),

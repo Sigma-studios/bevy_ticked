@@ -167,6 +167,10 @@ pub const DEFAULT_NEEDLES: &[Needle] = &[
         needle: "SECONDS_PER_TICK",
         reason: "a second source of truth for the tick length that Time<Fixed> can disagree with; read Res<Time>::delta() inside the tick",
     },
+    Needle {
+        needle: "DEFAULT_TIMESTEP",
+        reason: "the default tick length, not the live one, which a game may set to anything; read Res<Time>::delta() inside the tick",
+    },
 ];
 
 /// One banned substring found in one line of ticked source.

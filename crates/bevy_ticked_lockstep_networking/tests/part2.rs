@@ -8,7 +8,9 @@ use std::time::Duration;
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
 use bevy_ensemble_loopback::{Link, LoopbackNetwork, PeerId};
-use bevy_ticked::prelude::{TickHoldReason, TickHolds, TickRateDilation, TickedEvents};
+use bevy_ticked::prelude::{
+    Tick, TickHoldReason, TickHolds, TickRateDilation, TickedEvents, Ticks,
+};
 use bevy_ticked_lockstep_networking::{
     LockstepPauseReason, LockstepPaused, LockstepRoster, LockstepStall, OwnInputMargin,
     PauseLockstep, ResumeLockstep, RosterChange, StallPolicy,
@@ -27,7 +29,7 @@ fn trio() -> LoopbackNetwork {
     net.add_client(3, peer(3));
     net.run(300);
     for p in [HOST_PEER, A, B] {
-        assert!(tick(&net, p) > 100, "peer {p:?} is not running");
+        assert!(tick(&net, p) > Tick(100), "peer {p:?} is not running");
     }
     net
 }
@@ -47,16 +49,20 @@ fn stall(net: &LoopbackNetwork, p: PeerId) -> LockstepStall {
 }
 
 /// The tick a peer saw `uuid` leave on, from its roster events.
-fn left_at(net: &LoopbackNetwork, p: PeerId, uuid: u128) -> Option<u64> {
+fn left_at(net: &LoopbackNetwork, p: PeerId, uuid: u128) -> Option<Tick> {
     let events = net.app(p).world().resource::<TickedEvents<RosterChange>>();
     let newest = tick(net, p);
-    (0..=newest).find(|t| events.at_tick(*t).contains(&RosterChange::Left(uuid)))
+    Tick::ZERO
+        .through(newest)
+        .find(|t| events.at_tick(*t).contains(&RosterChange::Left(uuid)))
 }
 
-fn joined_at(net: &LoopbackNetwork, p: PeerId, uuid: u128) -> Option<u64> {
+fn joined_at(net: &LoopbackNetwork, p: PeerId, uuid: u128) -> Option<Tick> {
     let events = net.app(p).world().resource::<TickedEvents<RosterChange>>();
     let newest = tick(net, p);
-    (0..=newest).find(|t| events.at_tick(*t).contains(&RosterChange::Joined(uuid)))
+    Tick::ZERO
+        .through(newest)
+        .find(|t| events.at_tick(*t).contains(&RosterChange::Joined(uuid)))
 }
 
 #[test]
@@ -104,7 +110,7 @@ fn an_unresponsive_participant_pauses_the_session_then_is_kicked() {
     );
     assert!(!stall(&net, HOST_PEER).paused, "not yet a pause");
     assert!(
-        tick(&net, HOST_PEER) < host_was + 40,
+        tick(&net, HOST_PEER) < host_was + Ticks(40),
         "the session stalled: {} -> {}",
         host_was,
         tick(&net, HOST_PEER)
@@ -133,7 +139,7 @@ fn an_unresponsive_participant_pauses_the_session_then_is_kicked() {
         net.step_only(&[HOST_PEER, A]);
     }
     assert!(
-        tick(&net, HOST_PEER) > resumed_at + 40,
+        tick(&net, HOST_PEER) > resumed_at + Ticks(40),
         "the session runs again"
     );
     assert_eq!(roster(&net, HOST_PEER), vec![1, 2]);
@@ -175,8 +181,8 @@ fn a_join_does_not_freeze_the_session_longer_than_the_snapshot_transfer() {
     net.run(120);
     let advanced = tick(&net, HOST_PEER) - host_was;
     assert!(
-        advanced >= 100,
-        "the host advanced {advanced} ticks in 120 frames while a client joined: it froze"
+        advanced >= Ticks(100),
+        "the host advanced {advanced} in 120 frames while a client joined: it froze"
     );
     assert_eq!(roster(&net, HOST_PEER), vec![1, 2, 3]);
 }
@@ -199,9 +205,9 @@ fn a_joiner_fast_forwards_to_the_host() {
         if dilation > 1.0 {
             sped_up = true;
         }
-        let behind = tick(&net, HOST_PEER).saturating_sub(tick(&net, B));
+        let behind = tick(&net, HOST_PEER).since(tick(&net, B));
         // On a 300 ms one-way link a client can only ever be a round trip behind.
-        if caught_up_at.is_none() && tick(&net, B) > 50 && behind <= 48 {
+        if caught_up_at.is_none() && tick(&net, B) > Tick(50) && behind <= Ticks(48) {
             caught_up_at = Some(frame);
         }
     }
@@ -241,7 +247,7 @@ fn the_buffer_follows_the_reliable_stream_not_the_pings() {
         .resource::<bevy_ticked_lockstep_networking::LockstepConfig>()
         .client_tick_buffer;
     assert!(
-        buffer_after > buffer_before + 10,
+        buffer_after > buffer_before + Ticks(10),
         "a 600 ms round trip needs far more than {buffer_before} ticks of buffer: {buffer_after}"
     );
     let margin = net.app(A).world().resource::<OwnInputMargin>().0.unwrap();
@@ -266,7 +272,7 @@ fn a_frozen_host_in_lockstep_pauses_clients_then_resumes_in_agreement() {
             .holds(TickHoldReason::WaitingForPeers),
         "a client without authoritative ticks waits"
     );
-    assert!(tick(&net, A) <= a_was + 8, "and does not run ahead");
+    assert!(tick(&net, A) <= a_was + Ticks(8), "and does not run ahead");
     assert_eq!(stall(&net, A).waiting_on, vec![1]);
     assert!(stall(&net, A).paused);
 
@@ -326,7 +332,7 @@ fn lockstep_pause_composes_with_a_manual_hold() {
         "it waits on A now"
     );
     assert!(
-        tick(&net, A) <= host_paused_at + 2,
+        tick(&net, A) <= host_paused_at + Ticks(2),
         "A's menu is still open: {}",
         tick(&net, A)
     );
@@ -335,7 +341,7 @@ fn lockstep_pause_composes_with_a_manual_hold() {
         .resource_mut::<TickHolds>()
         .release(TickHoldReason::Manual);
     net.run(100);
-    assert!(tick(&net, A) > host_paused_at + 40);
+    assert!(tick(&net, A) > host_paused_at + Ticks(40));
     assert_eq!(
         net.app(A).world().resource::<LockstepPaused>().0,
         None,
@@ -392,7 +398,7 @@ fn a_frame_that_runs_several_ticks_does_not_change_the_world() {
     }
     let a = log(&net, HOST_PEER);
     let b = log(&steady, HOST_PEER);
-    let shared: Vec<u64> = a
+    let shared: Vec<Tick> = a
         .samples
         .iter()
         .map(|(tick, _)| *tick)
@@ -407,14 +413,14 @@ fn a_frame_that_runs_several_ticks_does_not_change_the_world() {
         assert_eq!(
             a.at(tick),
             b.at(tick),
-            "tick {tick} differs between the two sessions"
+            "{tick} differs between the two sessions"
         );
     }
 }
 
 /// The roster each tick ran with, on this peer, as the game's systems saw it.
 #[derive(Resource, Default)]
-struct RosterEachTick(std::collections::BTreeMap<u64, Vec<u128>>);
+struct RosterEachTick(std::collections::BTreeMap<Tick, Vec<u128>>);
 
 fn record_roster(
     tick: Res<bevy_ticked::prelude::CurrentTick>,
@@ -463,7 +469,7 @@ fn a_joiner_runs_every_tick_with_the_roster_the_host_ran_it_with() {
                 if let Some(on_host) = host.get(tick) {
                     assert_eq!(
                         roster, on_host,
-                        "peer {p:?} ran tick {tick} with a different roster from the host's \
+                        "peer {p:?} ran {tick} with a different roster from the host's \
                          (stagger {stagger})"
                     );
                 }

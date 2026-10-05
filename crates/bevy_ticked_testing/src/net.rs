@@ -383,7 +383,12 @@ impl TickedNetwork {
     }
 
     /// Step until `peer` has simulated `tick`, up to `max_frames`.
-    pub fn run_until_tick(&mut self, peer: PeerId, target: u64, max_frames: usize) -> bool {
+    pub fn run_until_tick(
+        &mut self,
+        peer: PeerId,
+        target: bevy_ticked::tick_types::Tick,
+        max_frames: usize,
+    ) -> bool {
         self.run_until(max_frames, |net| tick(net.app(peer)) >= target)
     }
 

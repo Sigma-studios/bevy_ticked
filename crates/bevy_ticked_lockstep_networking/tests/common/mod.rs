@@ -15,7 +15,7 @@ use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
 use bevy_ensemble::{EnsemblePlugin, LocalMultiplayerPlayerId, PlayerUUID};
 use bevy_ensemble_loopback::{LoopbackNetwork, LoopbackTransportPlugin, PeerId};
-use bevy_ticked::prelude::{CurrentTick, TickSource, TickedPlugin, TickedSimulation};
+use bevy_ticked::prelude::{CurrentTick, Tick, TickSource, TickedPlugin, TickedSimulation, Ticks};
 use bevy_ticked_lockstep_networking::{
     ActionTracker, AdaptiveTickBufferPlugin, ApplyJoinSnapshot, CaptureJoinSnapshot,
     ChecksumExchangePlugin, ChecksumLog, ChecksumLogPlugin, Divergence, JoinSnapshotApplied,
@@ -138,8 +138,8 @@ impl Default for Recipe {
     fn default() -> Self {
         Self {
             config: LockstepConfig {
-                host_tick_buffer: 6,
-                client_tick_buffer: 6,
+                host_tick_buffer: Ticks(6),
+                client_tick_buffer: Ticks(6),
                 ..default()
             },
             finishes_join: true,
@@ -183,7 +183,7 @@ pub fn peer_with(uuid: PlayerUUID, recipe: Recipe) -> App {
         // trails the host by whatever its join cost — so what gets compared is what each recorded
         // *at tick N*, and that needs both of them to have recorded every N.
         .insert_resource(ChecksumLog::<CounterHash> {
-            interval: 1,
+            interval: Ticks(1),
             capacity: 4096,
             samples: Vec::new(),
         })
@@ -225,7 +225,7 @@ pub fn joined_pair() -> LoopbackNetwork {
     net
 }
 
-pub fn tick(net: &LoopbackNetwork, peer: PeerId) -> u64 {
+pub fn tick(net: &LoopbackNetwork, peer: PeerId) -> Tick {
     net.app(peer).world().resource::<CurrentTick>().0
 }
 
@@ -271,11 +271,11 @@ pub fn run_until(
 }
 
 /// Step until `peer` has simulated `target`, and say so if it never did.
-pub fn run_until_tick(net: &mut LoopbackNetwork, peer: PeerId, target: u64, max_frames: usize) {
+pub fn run_until_tick(net: &mut LoopbackNetwork, peer: PeerId, target: Tick, max_frames: usize) {
     let reached = net.run_until(max_frames, |net| tick(net, peer) >= target);
     assert!(
         reached,
-        "peer {peer:?} is at tick {} and never reached {target} in {max_frames} frames",
+        "peer {peer:?} is at {} and never reached {target} in {max_frames} frames",
         tick(net, peer)
     );
 }

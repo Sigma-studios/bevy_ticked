@@ -38,7 +38,7 @@ fn paused(app: &bevy::prelude::App) -> bool {
 fn a_client_alt_tab_reacquires_its_lead_without_a_visible_rewind() {
     let mut net = session();
     let (host, client) = (net.host(), net.client());
-    let target = target_replay_distance(net.app(client)) as i64;
+    let target = target_replay_distance(net.app(client)).0 as i64;
 
     net.freeze(client, TWO_SECONDS);
     assert!(
@@ -77,7 +77,7 @@ fn a_client_alt_tab_reacquires_its_lead_without_a_visible_rewind() {
 fn a_host_alt_tab_auto_pauses_and_no_lead_piles_up() {
     let mut net = session();
     let (host, client) = (net.host(), net.client());
-    let target = target_replay_distance(net.app(client)) as i64;
+    let target = target_replay_distance(net.app(client)).0 as i64;
     let before = tick(net.app(client));
 
     net.freeze(host, TWO_SECONDS);
@@ -90,7 +90,7 @@ fn a_host_alt_tab_auto_pauses_and_no_lead_piles_up() {
         "the client ran on through the silence: lead {piled}, target {target}"
     );
     assert!(
-        tick(net.app(client)) >= before + TWO_SECONDS as u64 - 2,
+        tick(net.app(client)) >= before + Ticks(TWO_SECONDS as u64 - 2),
         "and its clock never stopped"
     );
     assert!(
@@ -130,12 +130,12 @@ fn a_short_host_stall_is_one_rewind_not_a_freeze() {
     // or not a key is down. That is what the host times, and the rewind reads the host's
     // report to tell a host that stood still from a link that slowed.
     net.hold_input(client, Input::NONE, 64);
-    let target = target_replay_distance(net.app(client)) as i64;
+    let target = target_replay_distance(net.app(client)).0 as i64;
     let before = tick(net.app(client));
 
     net.freeze_while_held(host, 30, client, Input::NONE);
     assert!(
-        tick(net.app(client)) >= before + 28,
+        tick(net.app(client)) >= before + Ticks(28),
         "the client kept ticking through the stall"
     );
     assert!(
@@ -184,7 +184,7 @@ fn a_short_host_stall_is_one_rewind_not_a_freeze() {
     // still settling — the margin the host measured on inputs sent while it stood still is
     // not a measurement — so what is left is the rate trim's, and it is nowhere near another
     // rewind's worth.
-    let target_now = target_replay_distance(net.app(client)) as i64;
+    let target_now = target_replay_distance(net.app(client)).0 as i64;
     let excess = stats.last_replay_distance - target_now;
     assert!(
         excess.abs() < 8,
@@ -199,7 +199,7 @@ fn a_short_host_stall_is_one_rewind_not_a_freeze() {
     );
     // And the trim closes it, with no second rewind.
     net.hold_input(client, Input::NONE, 192);
-    let target = target_replay_distance(net.app(client)) as i64;
+    let target = target_replay_distance(net.app(client)).0 as i64;
     let lead = lead(net.app(client), net.app(host));
     assert!(
         (target..=target + 2).contains(&lead),
@@ -232,7 +232,7 @@ fn a_jittery_link_never_triggers_the_rewind() {
             stats.snapped_back, 0,
             "jitter read as a stalled host: {stats:?}"
         );
-        let target = target_replay_distance(net.app(client)) as i64;
+        let target = target_replay_distance(net.app(client)).0 as i64;
         let lead = lead(net.app(client), net.app(host));
         assert!(
             (1..=target + 8).contains(&lead),
@@ -257,12 +257,12 @@ fn an_idle_client_does_not_ratchet_its_lead() {
         let target = target_replay_distance(net.app(client));
         let replay = replays(net.app(client)).last_replay_distance;
         assert!(
-            target <= target_at_start + 2,
+            target <= target_at_start + Ticks(2),
             "{second}s in, the target has drifted from {target_at_start} to {target} with no \
              input sent"
         );
         assert!(
-            replay <= target as i64 + 2,
+            replay <= target.0 as i64 + 2,
             "{second}s in, the replay distance is {replay} against a target of {target}"
         );
     }

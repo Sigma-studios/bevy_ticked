@@ -41,6 +41,7 @@ use bevy::prelude::*;
 
 use crate::registry::TickedComponentRegistry;
 use crate::tick::CurrentTick;
+use crate::tick_types::Tick;
 use crate::tracked_entity::{SpawnedAs, TickTrackedEntity};
 use crate::tracked_index::TrackedEntityIndex;
 
@@ -48,13 +49,13 @@ use crate::tracked_index::TrackedEntityIndex;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Lifetime {
     /// The first captured tick the id existed at.
-    pub born: u64,
+    pub born: Tick,
     /// The first captured tick it no longer existed at, if it has died.
-    pub died: Option<u64>,
+    pub died: Option<Tick>,
 }
 
 impl Lifetime {
-    pub fn alive_at(&self, tick: u64) -> bool {
+    pub fn alive_at(&self, tick: Tick) -> bool {
         self.born <= tick && self.died.is_none_or(|died| tick < died)
     }
 }
@@ -72,9 +73,9 @@ pub struct TrackedEntityLifetimes {
     /// and a peer can hold it *alive* as the previous occupant throughout. That peer cannot work
     /// the change out for itself — a record is only components — so the authority says so
     /// outright, which is what `FullBody::reborn` carries.
-    reborn: BTreeMap<u64, u64>,
+    reborn: BTreeMap<u64, Tick>,
     /// The newest tick captured, so a death noted between ticks lands on the next one.
-    last_captured: Option<u64>,
+    last_captured: Option<Tick>,
     /// Reused every capture, so a tick allocates nothing once warm.
     scratch: Vec<u64>,
     query: Option<bevy::ecs::query::QueryState<&'static TickTrackedEntity>>,
@@ -106,16 +107,16 @@ impl TrackedEntityLifetimes {
     }
 
     /// Whether `id` existed at `tick`; `None` if the id has never been seen.
-    pub fn alive_at(&self, tick: u64, id: u64) -> Option<bool> {
+    pub fn alive_at(&self, tick: Tick, id: u64) -> Option<bool> {
         self.by_id.get(&id).map(|lifetime| lifetime.alive_at(tick))
     }
 
-    pub fn born_at(&self, id: u64) -> Option<u64> {
+    pub fn born_at(&self, id: u64) -> Option<Tick> {
         self.by_id.get(&id).map(|lifetime| lifetime.born)
     }
 
     /// Note that `id` has been handed to a different thing at `tick`. Called by [`reset`].
-    pub fn note_reborn(&mut self, tick: u64, id: u64) {
+    pub fn note_reborn(&mut self, tick: Tick, id: u64) {
         let at = self.reborn.entry(id).or_insert(tick);
         *at = (*at).max(tick);
     }
@@ -126,7 +127,7 @@ impl TrackedEntityLifetimes {
     /// baseline rather than absolute, because a reset is not free: it throws away whatever the
     /// game hung on the entity locally, and doing that to an id which did not change hands would
     /// re-dress something already right.
-    pub fn reborn_since(&self, tick: u64) -> impl Iterator<Item = u64> + '_ {
+    pub fn reborn_since(&self, tick: Tick) -> impl Iterator<Item = u64> + '_ {
         self.reborn
             .iter()
             .filter(move |(_, at)| **at > tick)
@@ -139,7 +140,7 @@ impl TrackedEntityLifetimes {
     }
 
     /// Every id alive at `tick`, ascending.
-    pub fn alive_ids_at(&self, tick: u64) -> impl Iterator<Item = u64> + '_ {
+    pub fn alive_ids_at(&self, tick: Tick) -> impl Iterator<Item = u64> + '_ {
         self.by_id
             .iter()
             .filter(move |(_, lifetime)| lifetime.alive_at(tick))
@@ -155,7 +156,7 @@ impl TrackedEntityLifetimes {
     }
 
     /// Note that `id` exists at `tick`: born now if never seen, revived if it had died.
-    pub fn note_alive(&mut self, tick: u64, id: u64) {
+    pub fn note_alive(&mut self, tick: Tick, id: u64) {
         match self.by_id.get_mut(&id) {
             None => {
                 self.by_id.insert(
@@ -185,9 +186,9 @@ impl TrackedEntityLifetimes {
     /// A death noted after `tick` has been captured (a despawn between ticks) is a death at
     /// the next tick: the world at `tick` had the entity, and a rewind to `tick` must too. A
     /// death noted before the capture (a despawn inside the tick's simulation) is at `tick`.
-    pub fn note_dead(&mut self, tick: u64, id: u64) {
+    pub fn note_dead(&mut self, tick: Tick, id: u64) {
         let died = if self.last_captured.is_some_and(|captured| captured >= tick) {
-            tick + 1
+            tick.next()
         } else {
             tick
         };
@@ -200,7 +201,7 @@ impl TrackedEntityLifetimes {
     }
 
     /// The authority's word: `id` did not exist at `tick`, whatever this peer captured.
-    pub fn set_died(&mut self, tick: u64, id: u64) {
+    pub fn set_died(&mut self, tick: Tick, id: u64) {
         if let Some(lifetime) = self.by_id.get_mut(&id)
             && lifetime.born < tick
         {
@@ -214,7 +215,7 @@ impl TrackedEntityLifetimes {
 
     /// Record which ids are alive at `tick` from the live world: everything tracked and not
     /// tombstoned is alive; everything known and absent has died.
-    pub(crate) fn capture(world: &mut World, tick: u64) {
+    pub(crate) fn capture(world: &mut World, tick: Tick) {
         let (query, mut scratch) = {
             let mut this = world.get_resource_or_insert_with(Self::default);
             (this.query.take(), std::mem::take(&mut this.scratch))
@@ -244,7 +245,7 @@ impl TrackedEntityLifetimes {
 
     /// Forget everything after `tick`: an id born after it never existed, a death after it
     /// has not happened.
-    pub(crate) fn truncate_after(&mut self, tick: u64) {
+    pub(crate) fn truncate_after(&mut self, tick: Tick) {
         self.last_captured = self.last_captured.map(|t| t.min(tick));
         // A change of hands after `tick` has not happened; the replay decides again whether it
         // does, and `reset` records it again if so.
@@ -258,7 +259,7 @@ impl TrackedEntityLifetimes {
     }
 
     /// Forget ids that died before `tick`.
-    pub(crate) fn prune_before(&mut self, tick: u64) {
+    pub(crate) fn prune_before(&mut self, tick: Tick) {
         self.by_id
             .retain(|_, lifetime| lifetime.died.is_none_or(|died| died >= tick));
         // Every recipient still in the ring has acknowledged something newer than this, so a
@@ -278,7 +279,7 @@ impl TrackedEntityLifetimes {
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Tombstone {
     /// The tick it stopped existing at.
-    pub died_at: u64,
+    pub died_at: Tick,
 }
 
 /// `despawn_ticked`: the despawn a rollback can undo.
@@ -313,23 +314,23 @@ impl TickedEntityCommandsExt for EntityWorldMut<'_> {
         let tick = self
             .world()
             .get_resource::<CurrentTick>()
-            .map_or(0, |t| t.0);
+            .map_or(Tick::ZERO, |t| t.0);
         self.world_scope(|world| tombstone(world, entity, id, tick));
     }
 }
 
 /// Tombstone `entity` (tracked as `id`) at `tick`: disabled recursively, unindexed, and noted
 /// dead in the lifetimes (on the next tick if `tick` was already captured with it alive).
-pub fn tombstone(world: &mut World, entity: Entity, id: u64, tick: u64) {
+pub fn tombstone(world: &mut World, entity: Entity, id: u64, tick: Tick) {
     tombstone_inner(world, entity, id, tick, false);
 }
 
 /// As [`tombstone`], with the death at exactly `tick`: the authority said so.
-pub fn tombstone_at(world: &mut World, entity: Entity, id: u64, tick: u64) {
+pub fn tombstone_at(world: &mut World, entity: Entity, id: u64, tick: Tick) {
     tombstone_inner(world, entity, id, tick, true);
 }
 
-fn tombstone_inner(world: &mut World, entity: Entity, id: u64, tick: u64, exact: bool) {
+fn tombstone_inner(world: &mut World, entity: Entity, id: u64, tick: Tick, exact: bool) {
     let Ok(mut entity_mut) = world.get_entity_mut(entity) else {
         return;
     };
@@ -356,7 +357,7 @@ fn tombstone_inner(world: &mut World, entity: Entity, id: u64, tick: u64, exact:
 }
 
 /// Bring a tombstone back: enabled recursively, re-indexed, noted alive.
-pub fn revive(world: &mut World, entity: Entity, id: u64, tick: u64) {
+pub fn revive(world: &mut World, entity: Entity, id: u64, tick: Tick) {
     let Ok(mut entity_mut) = world.get_entity_mut(entity) else {
         return;
     };
@@ -408,7 +409,9 @@ pub fn reset(world: &mut World, entity: Entity) {
     // Noted here rather than at the call sites, so that every path which empties an entity also
     // tells the wire. A peer can hold this id alive as the previous occupant and have no way to
     // notice the change; `TrackedEntityLifetimes::reborn_since` is how it is eventually told.
-    let tick = world.get_resource::<CurrentTick>().map_or(0, |t| t.0);
+    let tick = world
+        .get_resource::<CurrentTick>()
+        .map_or(Tick::ZERO, |t| t.0);
     if let Some(id) = id
         && let Some(mut lifetimes) = world.get_resource_mut::<TrackedEntityLifetimes>()
     {
@@ -452,7 +455,7 @@ pub fn redress(world: &mut World, entity: Entity, id: u64) {
 
 /// Every tombstone that died before `tick`: the window has passed it and nothing will ask for
 /// it back.
-pub(crate) fn reap_before(world: &mut World, tick: u64) {
+pub(crate) fn reap_before(world: &mut World, tick: Tick) {
     // The index knows every tombstone; no query, and nothing to do on the common tick.
     let Some(index) = world.get_resource::<TrackedEntityIndex>() else {
         return;
@@ -482,7 +485,7 @@ pub(crate) fn reap_before(world: &mut World, tick: u64) {
 
 /// Destroy every tombstone: a session reset.
 pub(crate) fn reap_all(world: &mut World) {
-    reap_before(world, u64::MAX);
+    reap_before(world, Tick::MAX);
 }
 
 /// A plain `despawn` on a tracked entity: record the death so a rewind can rebuild it, and say
@@ -518,7 +521,7 @@ pub(crate) fn record_plain_despawn(
 ///
 /// Called by [`TickedComponentRegistry::restore_all`] before the component restore, so every
 /// entity that should exist at `tick` does when the components are put back.
-pub fn restore_existence(world: &mut World, registry: &TickedComponentRegistry, tick: u64) {
+pub fn restore_existence(world: &mut World, registry: &TickedComponentRegistry, tick: Tick) {
     let Some(lifetimes) = world.get_resource::<TrackedEntityLifetimes>().cloned() else {
         return;
     };

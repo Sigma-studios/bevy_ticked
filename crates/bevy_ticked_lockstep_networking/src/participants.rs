@@ -5,15 +5,16 @@ use bevy_ensemble::{
     LobbyParticipant, LobbyParticipantOf, ReceivedEnsembleMessage,
 };
 use bevy_ticked::tick::CurrentTick;
+use bevy_ticked::tick_types::Tick;
 use std::collections::{HashMap, HashSet};
 
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LockstepLobbyParticipant {
-    pub joined_at_tick: u64,
+    pub joined_at_tick: Tick,
 }
 
 #[derive(Resource, Default)]
-pub struct PendingLockstepParticipantJoins(pub HashMap<u128, u64>);
+pub struct PendingLockstepParticipantJoins(pub HashMap<u128, Tick>);
 
 pub fn add_host_participant(
     mut commands: Commands,
@@ -154,7 +155,7 @@ pub fn activate_loaded_client_participants(
         let buffer = config.host_tick_buffer.max(message.message.buffer);
         // From the first tick this host rules, which is past its clock while it takes over.
         let ruled_through = current_tick.0.max(last_broadcast_tick.0);
-        let joined_at_tick = ruled_through + 1 + buffer;
+        let joined_at_tick = ruled_through.next() + buffer;
         commands
             .entity(participant_entity)
             .insert(LockstepLobbyParticipant { joined_at_tick });
@@ -287,6 +288,9 @@ pub fn apply_pending_lockstep_participants(
     }
 }
 
-pub fn participant_is_required_for_tick(participant: &LockstepLobbyParticipant, tick: u64) -> bool {
+pub fn participant_is_required_for_tick(
+    participant: &LockstepLobbyParticipant,
+    tick: Tick,
+) -> bool {
     tick >= participant.joined_at_tick
 }

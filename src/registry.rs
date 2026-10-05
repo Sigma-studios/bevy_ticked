@@ -4,6 +4,7 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
+use crate::tick_types::Tick;
 use bevy::prelude::*;
 
 use crate::{
@@ -88,14 +89,14 @@ struct RegisteredTickedComponent {
     type_id: TypeId,
     /// How a delta carries it. Meaningless for a rollback-only type.
     class: ReplicationClass,
-    capture: fn(&mut World, u64),
-    restore: fn(&mut World, u64),
-    restore_one: fn(&mut World, u64, u64, Entity),
-    truncate_after: fn(&mut World, u64),
-    prune_before: fn(&mut World, u64),
+    capture: fn(&mut World, Tick),
+    restore: fn(&mut World, Tick),
+    restore_one: fn(&mut World, Tick, u64, Entity),
+    truncate_after: fn(&mut World, Tick),
+    prune_before: fn(&mut World, Tick),
     clear: fn(&mut World),
-    has_tick: fn(&World, u64) -> bool,
-    oldest_tick: fn(&World) -> Option<u64>,
+    has_tick: fn(&World, Tick) -> bool,
+    oldest_tick: fn(&World) -> Option<Tick>,
     /// The wire, populated by the networking crate. `None` for a rollback-only type.
     wire: Option<WireFns>,
 }
@@ -108,10 +109,10 @@ struct RegisteredTickedComponent {
 #[derive(Clone, Copy)]
 pub struct WireFns {
     /// Append the value saved for `(tick, id)` to `out`. `false` if there is none.
-    pub encode_one: fn(&World, u64, u64, &mut Vec<u8>) -> bool,
+    pub encode_one: fn(&World, Tick, u64, &mut Vec<u8>) -> bool,
     /// Take one value from the front of `bytes`, insert it on `entity` and into the history at
     /// `(tick, id)`. Returns how many bytes it consumed, or `None` if they did not decode.
-    pub decode_one: fn(&mut World, u64, Entity, u64, &[u8]) -> Option<usize>,
+    pub decode_one: fn(&mut World, Tick, Entity, u64, &[u8]) -> Option<usize>,
     /// As `decode_one`, onto the entity only: no history entry. For putting an authoritative
     /// value on display without pretending the simulation produced it.
     pub insert_one: fn(&mut World, Entity, &[u8]) -> Option<usize>,
@@ -119,16 +120,16 @@ pub struct WireFns {
     /// the type says the authority removed it.
     pub remove_one: fn(&mut World, Entity),
     /// Start a new history entry at `tick`, empty; `decode_one` fills it.
-    pub begin_tick: fn(&mut World, u64),
+    pub begin_tick: fn(&mut World, Tick),
     /// Absence is authoritative: remove the type from every tracked entity that `decode_one`
     /// did not fill at `tick`.
-    pub finish_tick: fn(&mut World, u64),
+    pub finish_tick: fn(&mut World, Tick),
     /// Whether `(tick, id)` has a saved value.
-    pub has_at: fn(&World, u64, u64) -> bool,
+    pub has_at: fn(&World, Tick, u64) -> bool,
     /// Compare the value at the front of `bytes` with the one saved for `(tick, id)`, by
     /// encoding. Returns `(equal, consumed)`; `consumed` is meaningful only when equal; `None`
     /// if nothing is saved there or it did not encode.
-    pub matches_at: fn(&World, u64, u64, &[u8]) -> Option<(bool, usize)>,
+    pub matches_at: fn(&World, Tick, u64, &[u8]) -> Option<(bool, usize)>,
     /// How many bytes the value at the front of `bytes` occupies, without a world. What lets
     /// a record be split into its components by anyone holding the registry.
     pub decode_len: fn(&[u8]) -> Option<usize>,
@@ -361,7 +362,7 @@ impl TickedComponentRegistry {
     }
 
     /// The oldest tick any registered component still holds state for.
-    pub fn oldest_captured_tick(&self, world: &World) -> Option<u64> {
+    pub fn oldest_captured_tick(&self, world: &World) -> Option<Tick> {
         self.inner
             .entries
             .iter()
@@ -370,7 +371,7 @@ impl TickedComponentRegistry {
     }
 
     /// Check if any registered component has captured state at the given tick.
-    pub fn has_tick_captured(&self, world: &World, tick: u64) -> bool {
+    pub fn has_tick_captured(&self, world: &World, tick: Tick) -> bool {
         self.inner
             .entries
             .iter()
@@ -390,7 +391,7 @@ impl TickedComponentRegistry {
     /// The same applies to [`restore_all`](Self::restore_all),
     /// [`truncate_all_after`](Self::truncate_all_after),
     /// [`prune_all_before`](Self::prune_all_before) and [`clear_all`](Self::clear_all).
-    pub fn capture_all(&self, world: &mut World, tick: u64) {
+    pub fn capture_all(&self, world: &mut World, tick: Tick) {
         for entry in &self.inner.entries {
             (entry.capture)(world, tick);
         }
@@ -409,7 +410,7 @@ impl TickedComponentRegistry {
     /// an entity spawned after `tick` is tombstoned (kept, disabled, for the replay that may
     /// spawn it again), one despawned after `tick` is revived, and one destroyed outright is
     /// rebuilt from the histories through the spawn path. There are no husks any more.
-    pub fn restore_all(&self, world: &mut World, tick: u64) {
+    pub fn restore_all(&self, world: &mut World, tick: Tick) {
         // Existence first, so every entity that should exist at `tick` does when its
         // components are put back, and none that should not is still standing.
         crate::lifetimes::restore_existence(world, self, tick);
@@ -425,7 +426,7 @@ impl TickedComponentRegistry {
     pub(crate) fn restore_one_from_history(
         &self,
         world: &mut World,
-        tick: u64,
+        tick: Tick,
         id: u64,
         entity: Entity,
     ) {
@@ -444,7 +445,7 @@ impl TickedComponentRegistry {
     /// local half back to what it was at `tick`, from history; the networked half is the
     /// snapshot's job. Husks are not reported: the snapshot's absence rule has already
     /// despawned what should not exist.
-    pub fn restore_local_only(&self, world: &mut World, tick: u64) {
+    pub fn restore_local_only(&self, world: &mut World, tick: Tick) {
         for entry in &self.inner.entries {
             if entry.wire.is_none() {
                 (entry.restore)(world, tick);
@@ -456,7 +457,7 @@ impl TickedComponentRegistry {
     }
 
     /// Truncate all WorldActions history after the given tick.
-    pub fn truncate_all_after(&self, world: &mut World, tick: u64) {
+    pub fn truncate_all_after(&self, world: &mut World, tick: Tick) {
         for entry in &self.inner.entries {
             (entry.truncate_after)(world, tick);
         }
@@ -472,7 +473,7 @@ impl TickedComponentRegistry {
 
     /// Remove all WorldActions history before the given tick, and reap the tombstones the
     /// window has passed.
-    pub fn prune_all_before(&self, world: &mut World, tick: u64) {
+    pub fn prune_all_before(&self, world: &mut World, tick: Tick) {
         for entry in &self.inner.entries {
             (entry.prune_before)(world, tick);
         }
@@ -507,7 +508,7 @@ impl TickedComponentRegistry {
     // ---- the wire, entity by entity --------------------------------------------------------
 
     /// Which networked types have a value saved for `(tick, id)`, as a wire-index mask.
-    pub fn present_at(&self, world: &World, tick: u64, id: u64) -> TypeMask {
+    pub fn present_at(&self, world: &World, tick: Tick, id: u64) -> TypeMask {
         let frozen = self.frozen();
         let mut mask = TypeMask::with_len(frozen.entries.len());
         for (wire_index, entry_index) in frozen.entries.iter().enumerate() {
@@ -526,7 +527,7 @@ impl TickedComponentRegistry {
         &self,
         world: &World,
         wire_index: u16,
-        tick: u64,
+        tick: Tick,
         id: u64,
         out: &mut Vec<u8>,
     ) -> bool {
@@ -543,7 +544,7 @@ impl TickedComponentRegistry {
         &self,
         world: &mut World,
         wire_index: u16,
-        tick: u64,
+        tick: Tick,
         entity: Entity,
         id: u64,
         bytes: &[u8],
@@ -559,7 +560,7 @@ impl TickedComponentRegistry {
         &self,
         world: &World,
         wire_index: u16,
-        tick: u64,
+        tick: Tick,
         id: u64,
         bytes: &[u8],
     ) -> Option<(bool, usize)> {
@@ -568,7 +569,7 @@ impl TickedComponentRegistry {
     }
 
     /// Every networked wire index this peer has a saved value for at `(tick, id)`.
-    pub fn saved_wire_types_at(&self, world: &World, tick: u64, id: u64) -> TypeMask {
+    pub fn saved_wire_types_at(&self, world: &World, tick: Tick, id: u64) -> TypeMask {
         self.present_at(world, tick, id)
     }
 
@@ -602,7 +603,7 @@ impl TickedComponentRegistry {
 
     /// Open a history entry at `tick` for every networked type, before decoding a snapshot's
     /// records into it.
-    pub fn begin_wire_tick(&self, world: &mut World, tick: u64) {
+    pub fn begin_wire_tick(&self, world: &mut World, tick: Tick) {
         for wire_index in 0..self.wire_len() as u16 {
             if let Some((_, wire)) = self.wire_entry(wire_index) {
                 (wire.begin_tick)(world, tick);
@@ -612,7 +613,7 @@ impl TickedComponentRegistry {
 
     /// Close the history entry at `tick`: every tracked entity that the snapshot did not give a
     /// value of a networked type loses that type. Absence is authoritative.
-    pub fn finish_wire_tick(&self, world: &mut World, tick: u64) {
+    pub fn finish_wire_tick(&self, world: &mut World, tick: Tick) {
         for wire_index in 0..self.wire_len() as u16 {
             if let Some((_, wire)) = self.wire_entry(wire_index) {
                 (wire.finish_tick)(world, tick);
@@ -744,7 +745,7 @@ impl TickedAppExt for App {
 
 // --- Type-erased dispatch functions ---
 
-fn capture_component<T: TickedComponent>(world: &mut World, tick: u64) {
+fn capture_component<T: TickedComponent>(world: &mut World, tick: Tick) {
     // A recycled map and the cached query: after warm-up neither line allocates, and nothing
     // below does either, unless `T::clone` does. See `WorldActions` for why that matters.
     let (mut state, query) = {
@@ -762,7 +763,7 @@ fn capture_component<T: TickedComponent>(world: &mut World, tick: u64) {
     actions.put_query(query);
 }
 
-fn restore_component<T: TickedComponent>(world: &mut World, tick: u64) {
+fn restore_component<T: TickedComponent>(world: &mut World, tick: Tick) {
     if world.resource::<WorldActions<T>>().at_tick(tick).is_none() {
         return;
     }
@@ -792,7 +793,7 @@ fn restore_component<T: TickedComponent>(world: &mut World, tick: u64) {
 
 fn restore_one_component<T: TickedComponent>(
     world: &mut World,
-    tick: u64,
+    tick: Tick,
     id: u64,
     entity: Entity,
 ) {
@@ -806,11 +807,11 @@ fn restore_one_component<T: TickedComponent>(
     }
 }
 
-fn truncate_component<T: TickedComponent>(world: &mut World, tick: u64) {
+fn truncate_component<T: TickedComponent>(world: &mut World, tick: Tick) {
     world.resource_mut::<WorldActions<T>>().truncate_after(tick);
 }
 
-fn prune_component<T: TickedComponent>(world: &mut World, tick: u64) {
+fn prune_component<T: TickedComponent>(world: &mut World, tick: Tick) {
     world.resource_mut::<WorldActions<T>>().prune_before(tick);
 }
 
@@ -818,10 +819,10 @@ fn clear_component<T: TickedComponent>(world: &mut World) {
     world.resource_mut::<WorldActions<T>>().clear();
 }
 
-fn oldest_tick_component<T: TickedComponent>(world: &World) -> Option<u64> {
+fn oldest_tick_component<T: TickedComponent>(world: &World) -> Option<Tick> {
     world.resource::<WorldActions<T>>().oldest_recorded_tick()
 }
 
-fn has_tick_component<T: TickedComponent>(world: &World, tick: u64) -> bool {
+fn has_tick_component<T: TickedComponent>(world: &World, tick: Tick) -> bool {
     world.resource::<WorldActions<T>>().at_tick(tick).is_some()
 }

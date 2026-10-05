@@ -83,7 +83,7 @@ struct PeerConfig {
 #[derive(Resource)]
 struct Out {
     file: File,
-    written_through: Option<u64>,
+    written_through: Option<Tick>,
 }
 
 /// Where the peer is in its life, for the exit code.
@@ -361,7 +361,8 @@ fn scripted_input(
     if local.0 == 0 {
         return None;
     }
-    let next = tick.0 + 1;
+    // The script counts plain tick numbers.
+    let next = tick.0.next().0;
     let mut input = Input::NONE;
     if config.walk {
         input = if next.is_multiple_of(128) || (next / 64).is_multiple_of(2) {
@@ -396,7 +397,7 @@ fn watch_session(
     }
     if progress.session_started
         && progress.reached_target_at.is_none()
-        && tick.0 >= config.target_tick
+        && tick.0 >= Tick(config.target_tick)
     {
         progress.reached_target_at = Some(Instant::now());
         info!("reached tick {}", tick.0);
@@ -487,8 +488,8 @@ fn write_checksums(
             None => return,
         },
     };
-    let from = out.written_through.map_or(0, |t| t + 1);
-    for t in from..=confirmed_through {
+    let from = out.written_through.map_or(Tick::ZERO, Tick::next);
+    for t in from.through(confirmed_through) {
         let hash = match config.role {
             Role::Host => log.at(t),
             Role::Client => history
@@ -516,7 +517,7 @@ fn write_checksums(
 fn hash_of_records(
     registry: &bevy_ticked::registry::TickedComponentRegistry,
     history: &bevy_ticked_networking::replication::AuthoritativeHistory,
-    tick: u64,
+    tick: Tick,
 ) -> Option<MinimalHash> {
     if !history.has_tick(tick) {
         return None;

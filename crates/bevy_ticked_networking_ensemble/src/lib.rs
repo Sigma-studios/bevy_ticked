@@ -328,18 +328,19 @@ fn forward_received_pause_requests(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy_ticked::tick_types::Tick;
     use bevy_ticked_networking::snapshot::{FullBody, SnapshotBody, SnapshotPacket, encode_packet};
 
     #[derive(Clone, Serialize, serde::Deserialize)]
     struct Input;
 
     #[derive(Resource, Default)]
-    struct Arrivals(Vec<(u32, u64)>);
+    struct Arrivals(Vec<(u32, Tick)>);
 
     #[derive(Resource, Default)]
     struct Frame(u32);
 
-    fn packet_at(tick: u64) -> Vec<u8> {
+    fn packet_at(tick: Tick) -> Vec<u8> {
         encode_packet(&SnapshotPacket {
             seq: 1,
             tick,
@@ -355,7 +356,7 @@ mod tests {
         world.write_message(ReceivedEnsembleMessage {
             sender: Some(1),
             message: EnsembleSnapshotMessage {
-                bytes: packet_at(u64::from(frame)),
+                bytes: packet_at(Tick(u64::from(frame))),
             },
             received_at: bevy_ensemble::Instant::now(),
         });
@@ -405,7 +406,7 @@ mod tests {
         assert!(!arrivals.is_empty(), "nothing was forwarded at all");
         let late: Vec<_> = arrivals
             .iter()
-            .filter(|(frame, tick)| u64::from(*frame) != *tick)
+            .filter(|(frame, tick)| u64::from(*frame) != tick.0)
             .collect();
         assert!(
             late.is_empty(),
@@ -444,7 +445,7 @@ mod tests {
         app.world_mut().write_message(ReceivedEnsembleMessage {
             sender: Some(1),
             message: EnsembleSnapshotMessage {
-                bytes: packet_at(3),
+                bytes: packet_at(Tick(3)),
             },
             received_at: bevy_ensemble::Instant::now(),
         });
@@ -463,7 +464,7 @@ mod tests {
         app.world_mut().write_message(ReceivedEnsembleMessage {
             sender: Some(1),
             message: EnsembleSnapshotMessage {
-                bytes: packet_at(4),
+                bytes: packet_at(Tick(4)),
             },
             received_at: bevy_ensemble::Instant::now(),
         });
@@ -480,7 +481,7 @@ mod tests {
         app.world_mut().write_message(ReceivedEnsembleMessage {
             sender: Some(1),
             message: EnsembleSnapshotMessage {
-                bytes: packet_at(5),
+                bytes: packet_at(Tick(5)),
             },
             received_at: bevy_ensemble::Instant::now(),
         });
@@ -505,7 +506,7 @@ mod tests {
             sender: Some(7),
             message: EnsembleInputMessage {
                 payload: NetworkInputPayload {
-                    inputs: vec![(1, Input)],
+                    inputs: vec![(Tick(1), Input)],
                     ack: Some(12),
                     nack_full: false,
                 },

@@ -47,9 +47,12 @@
 //! carries the link's *jitter* rather than its mean precisely so a controller like this one has
 //! something to size headroom from; a real transport's ping does the same thing by measuring.
 
+use std::time::Duration;
+
 use bevy::prelude::*;
 use bevy_ensemble::{Host, Lobby, LobbyClient, PeerRtt, PeerRttJitter};
-use bevy_ticked::prelude::SECONDS_PER_TICK;
+use bevy_ticked::tick_types::Ticks;
+use bevy_ticked::time::{Ticked, TickedTime};
 
 use crate::LockstepConfig;
 
@@ -96,12 +99,12 @@ pub struct AdaptiveBufferTuning {
     /// 60 fps against a 64 Hz tick, so its frames and its ticks drift through each other, and a
     /// frame that spikes has nowhere to be absorbed. One tick is ~16 ms against a symptom that
     /// costs a visible stutter; set it to 0 if you have measured your own frame pacing.
-    pub extra_ticks: u64,
+    pub extra_ticks: Ticks,
     /// Hard ceiling on the buffer, in ticks.
     ///
     /// Also, implicitly, a decision that a link needing more than this is not worth playing on:
     /// past the cap the session runs slower than wall-clock and stays that way.
-    pub max_buffer: u64,
+    pub max_buffer: Ticks,
     /// Never buffer fewer than this many ticks, even on a perfect connection.
     ///
     /// Four by default, and for the same reason as [`extra_ticks`](Self::extra_ticks): on a
@@ -110,7 +113,7 @@ pub struct AdaptiveBufferTuning {
     /// simulation at half speed. Measured with a floor of two: 32 Hz on a 15 ms link. A game
     /// that has measured its own overhead sets it; the tuner never goes below one, because a
     /// client that schedules for the tick about to run is late by definition.
-    pub min_buffer: u64,
+    pub min_buffer: Ticks,
 }
 
 impl Default for AdaptiveBufferTuning {
@@ -121,13 +124,13 @@ impl Default for AdaptiveBufferTuning {
             // scheduling latency that has been removed rather than compensated for, and the other
             // was jitter headroom now sized from a real measurement. What remains is slop for a
             // frame rate that does not divide the tick rate.
-            extra_ticks: 1,
+            extra_ticks: Ticks(1),
             // Past ~440 ms RTT the buffer can no longer reach the round trip and the whole
             // simulation runs slower than real time. Capping at 30 did not save the player any
             // input latency — at 1 s RTT they waited 1065 ms either way — it only decided whether
             // they waited it at 29 Hz or at 64 Hz.
-            max_buffer: 96,
-            min_buffer: 4,
+            max_buffer: Ticks(96),
+            min_buffer: Ticks(4),
         }
     }
 }
@@ -139,10 +142,14 @@ const RTT_ALPHA: f32 = 0.15;
 /// still lands before its scheduled tick.
 const JITTER_SAFETY: f32 = 2.0;
 
-/// Minimum frames between successive single-tick shrink steps. Shrinking is deliberately lazy: we
+/// Minimum time between successive single-tick shrink steps. Shrinking is deliberately lazy: we
 /// drop latency slowly once a connection has clearly and durably improved, rather than reacting to
 /// a momentary dip.
-const SHRINK_COOLDOWN_FRAMES: u32 = 120;
+///
+/// Time, not frames. It was 120 frames, which is two seconds at 60 fps, under one at 144, and
+/// however long a throttled tab took — a buffer that gave latency back at a rate set by the
+/// player's monitor.
+const SHRINK_COOLDOWN: Duration = Duration::from_secs(2);
 
 // Growth has no cooldown. It used to: a jump left a hole in the client's scheduled-tick sequence
 // and hung the session, so the buffer had to be walked up one tick at a time. `flush_pending_actions`
@@ -153,13 +160,16 @@ const SHRINK_COOLDOWN_FRAMES: u32 = 120;
 
 /// Smoothed network estimates backing the adaptive buffer. A single app is either a host or a
 /// client for the life of a lobby, so one state instance serves whichever buffer is being driven.
+///
+/// The estimates are kept in `f32` seconds: an EMA is float arithmetic, and converting to a
+/// `Duration` at the edge is what [`rtt_estimate`](Self::rtt_estimate) does.
 #[derive(Resource, Default)]
 pub struct AdaptiveBufferState {
     ema_rtt: Option<f32>,
     /// The spread the transport reported, as published. Not smoothed again here — see
     /// [`update_estimates`].
     jitter: f32,
-    frames_since_shrink: u32,
+    since_shrink: Duration,
 }
 
 impl AdaptiveBufferState {
@@ -170,8 +180,8 @@ impl AdaptiveBufferState {
     /// lobby is joined on whatever connection *it* has, and an estimate carried over from the
     /// last one sized the new session's buffer for a peer that was no longer there. The
     /// lockstep plugin resets this with the lobby; this is how a test sees that it did.
-    pub fn rtt_estimate(&self) -> Option<f32> {
-        self.ema_rtt
+    pub fn rtt_estimate(&self) -> Option<Duration> {
+        self.ema_rtt.map(Duration::from_secs_f32)
     }
 }
 
@@ -224,8 +234,15 @@ fn update_estimates(state: &mut AdaptiveBufferState, raw_rtt: f32, jitter: f32) 
     });
 }
 
-/// Buffer size (in ticks) the current estimates call for.
-fn target_buffer(state: &AdaptiveBufferState, tuning: &AdaptiveBufferTuning) -> Option<u64> {
+/// Buffer size (in ticks) the current estimates call for, at a tick of `timestep`.
+///
+/// The live timestep, not the crate's default: a game ticking at 30 Hz sized its buffer as if
+/// ticks were half as long as they are, and got half the headroom it asked for.
+fn target_buffer(
+    state: &AdaptiveBufferState,
+    tuning: &AdaptiveBufferTuning,
+    timestep: Duration,
+) -> Option<Ticks> {
     let ema_rtt = state.ema_rtt?;
     // Base on the full RTT: a locally-issued action must reach the host and the host's
     // authoritative echo must reach the other peers before the tick runs — round-trip, plus
@@ -234,8 +251,8 @@ fn target_buffer(state: &AdaptiveBufferState, tuning: &AdaptiveBufferTuning) -> 
     // `rtt_factor` of 1.0 makes this exactly break-even, which is why a session sits fractionally
     // under full tick rate on a steady link and dips below it whenever the link is not steady.
     let latency = tuning.rtt_factor * ema_rtt + JITTER_SAFETY * state.jitter;
-    let ticks = (latency / SECONDS_PER_TICK).ceil() as u64 + tuning.extra_ticks;
-    let floor = tuning.min_buffer.max(1);
+    let ticks = Ticks((latency / timestep.as_secs_f32()).ceil() as u64) + tuning.extra_ticks;
+    let floor = tuning.min_buffer.max(Ticks::ONE);
     Some(ticks.clamp(floor, tuning.max_buffer.max(floor)))
 }
 
@@ -244,30 +261,26 @@ fn target_buffer(state: &AdaptiveBufferState, tuning: &AdaptiveBufferTuning) -> 
 /// The asymmetry is deliberate and is about cost rather than safety. Too small a buffer stalls the
 /// session on every tick until it recovers, so growth takes the target immediately. Too large a
 /// buffer only costs input latency, and a connection that looks better for a moment usually is
-/// not, so shrinking waits out [`SHRINK_COOLDOWN_FRAMES`] and then gives back one tick.
-fn apply_target(buffer: &mut u64, target: u64, state: &mut AdaptiveBufferState) {
-    use std::cmp::Ordering;
-
-    match target.cmp(buffer) {
-        Ordering::Greater => {
-            *buffer = target;
-            state.frames_since_shrink = state.frames_since_shrink.saturating_add(1);
-        }
-        Ordering::Less => {
-            if state.frames_since_shrink >= SHRINK_COOLDOWN_FRAMES {
-                *buffer -= 1;
-                state.frames_since_shrink = 0;
-            } else {
-                state.frames_since_shrink = state.frames_since_shrink.saturating_add(1);
-            }
-        }
-        Ordering::Equal => {
-            state.frames_since_shrink = state.frames_since_shrink.saturating_add(1);
-        }
+/// not, so shrinking waits out [`SHRINK_COOLDOWN`] and then gives back one tick. `delta` is the
+/// frame's time.
+fn apply_target(
+    buffer: &mut Ticks,
+    target: Ticks,
+    state: &mut AdaptiveBufferState,
+    delta: Duration,
+) {
+    state.since_shrink = state.since_shrink.saturating_add(delta);
+    if target > *buffer {
+        *buffer = target;
+    } else if target < *buffer && state.since_shrink >= SHRINK_COOLDOWN {
+        *buffer -= Ticks::ONE;
+        state.since_shrink = Duration::ZERO;
     }
 }
 
 fn adapt_tick_buffer(
+    time: Res<Time>,
+    ticked: Res<Time<Ticked>>,
     mut config: ResMut<LockstepConfig>,
     mut state: ResMut<AdaptiveBufferState>,
     tuning: Res<AdaptiveBufferTuning>,
@@ -287,10 +300,10 @@ fn adapt_tick_buffer(
         // The host must keep up with its slowest peer — and cover its *least steady* one, which
         // need not be the same peer. Taking the worst of each independently is deliberate: a
         // buffer sized for the slow link and the steady link's spread stalls on the jittery one.
-        client_peers
-            .iter()
-            .fold(None::<(f64, f64, bool)>, |worst, (rtt, jitter)| {
-                let jitter = jitter.map_or(0.0, |jitter| jitter.0);
+        client_peers.iter().fold(
+            None::<(Duration, Duration, bool)>,
+            |worst, (rtt, jitter)| {
+                let jitter = jitter.map_or(Duration::ZERO, |jitter| jitter.0);
                 let fresh = rtt.is_changed();
                 Some(match worst {
                     None => (rtt.0, jitter, fresh),
@@ -300,12 +313,13 @@ fn adapt_tick_buffer(
                         was_fresh || fresh,
                     ),
                 })
-            })
+            },
+        )
     } else {
         client_lobby_rtt.iter().next().map(|(rtt, jitter)| {
             (
                 rtt.0,
-                jitter.map_or(0.0, |jitter| jitter.0),
+                jitter.map_or(Duration::ZERO, |jitter| jitter.0),
                 rtt.is_changed(),
             )
         })
@@ -317,9 +331,9 @@ fn adapt_tick_buffer(
     };
 
     if is_fresh_sample {
-        update_estimates(&mut state, raw_rtt as f32, raw_jitter as f32);
+        update_estimates(&mut state, raw_rtt.as_secs_f32(), raw_jitter.as_secs_f32());
     }
-    let Some(target) = target_buffer(&state, &tuning) else {
+    let Some(target) = target_buffer(&state, &tuning, ticked.timestep()) else {
         return;
     };
 
@@ -328,12 +342,15 @@ fn adapt_tick_buffer(
     } else {
         &mut config.client_tick_buffer
     };
-    apply_target(buffer, target, &mut state);
+    apply_target(buffer, target, &mut state, time.delta());
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The crate's default tick.
+    const TICK: Duration = Duration::from_micros(15_625);
 
     fn tuning() -> AdaptiveBufferTuning {
         AdaptiveBufferTuning::default()
@@ -345,7 +362,7 @@ mod tests {
         update_estimates(&mut state, 0.0, 0.0);
 
         assert_eq!(
-            target_buffer(&state, &tuning()),
+            target_buffer(&state, &tuning(), TICK),
             Some(tuning().min_buffer),
             "a link with no measurable latency still costs a tick each side to schedule and \
              apply, and a buffer that does not cover it runs the simulation at half speed"
@@ -371,18 +388,19 @@ mod tests {
     #[test]
     fn the_buffer_grows_at_once_and_shrinks_on_a_cooldown() {
         let mut state = AdaptiveBufferState::default();
-        let mut buffer = 6;
+        let mut buffer = Ticks(6);
 
-        apply_target(&mut buffer, 40, &mut state);
-        assert_eq!(buffer, 40, "growth takes the target immediately");
+        let frame = Duration::from_millis(16);
+        apply_target(&mut buffer, Ticks(40), &mut state, frame);
+        assert_eq!(buffer, Ticks(40), "growth takes the target immediately");
 
-        apply_target(&mut buffer, 10, &mut state);
-        assert_eq!(buffer, 40, "the first shrink waits out the cooldown");
+        apply_target(&mut buffer, Ticks(10), &mut state, frame);
+        assert_eq!(buffer, Ticks(40), "the first shrink waits out the cooldown");
 
-        for _ in 0..SHRINK_COOLDOWN_FRAMES {
-            apply_target(&mut buffer, 10, &mut state);
-        }
-        assert_eq!(buffer, 39, "and then gives back exactly one tick");
+        apply_target(&mut buffer, Ticks(10), &mut state, SHRINK_COOLDOWN);
+        assert_eq!(buffer, Ticks(39), "and then gives back exactly one tick");
+        apply_target(&mut buffer, Ticks(10), &mut state, frame);
+        assert_eq!(buffer, Ticks(39), "and waits again");
     }
 
     #[test]
@@ -392,14 +410,14 @@ mod tests {
             for _ in 0..200 {
                 update_estimates(&mut state, 0.100, 0.0);
             }
-            target_buffer(&state, &tuning()).expect("a sample was integrated")
+            target_buffer(&state, &tuning(), TICK).expect("a sample was integrated")
         };
         let jittery = {
             let mut state = AdaptiveBufferState::default();
             for _ in 0..200 {
                 update_estimates(&mut state, 0.100, 0.040);
             }
-            target_buffer(&state, &tuning()).expect("a sample was integrated")
+            target_buffer(&state, &tuning(), TICK).expect("a sample was integrated")
         };
 
         assert!(
@@ -419,5 +437,46 @@ mod tests {
             update_estimates(&mut state, 0.100, 0.0);
         }
         assert_eq!(state.jitter, 0.0);
+    }
+
+    #[test]
+    fn the_buffer_counts_ticks_at_the_rate_the_game_runs() {
+        // 200 ms of latency is 13 ticks of 15.625 ms and 6 of 33.3 ms. Sized against the default
+        // tick, a 30 Hz game got twice the buffer it needed.
+        let mut state = AdaptiveBufferState::default();
+        update_estimates(&mut state, 0.200, 0.0);
+        let tuning = AdaptiveBufferTuning {
+            extra_ticks: Ticks(0),
+            min_buffer: Ticks(1),
+            ..tuning()
+        };
+        let at_64 = target_buffer(&state, &tuning, TICK).unwrap();
+        let at_30 = target_buffer(&state, &tuning, Duration::from_secs_f64(1.0 / 30.0)).unwrap();
+        assert!(
+            at_64 > at_30 * 2 - Ticks(2) && at_64 < at_30 * 2 + Ticks(2),
+            "{at_64} ticks at 64 Hz, {at_30} at 30 Hz: the same latency, so about half as many"
+        );
+    }
+
+    #[test]
+    fn the_shrink_cooldown_is_time_not_frames() {
+        // Two seconds whether that is 120 frames or 288.
+        for frame in [
+            Duration::from_nanos(16_666_667),
+            Duration::from_nanos(6_944_444),
+        ] {
+            let mut state = AdaptiveBufferState::default();
+            let mut buffer = Ticks(20);
+            let mut frames = 0;
+            while buffer == Ticks(20) {
+                apply_target(&mut buffer, Ticks(10), &mut state, frame);
+                frames += 1;
+            }
+            let waited = frame * frames;
+            assert!(
+                waited >= SHRINK_COOLDOWN && waited < SHRINK_COOLDOWN + frame,
+                "waited {waited:?} at {frame:?} a frame"
+            );
+        }
     }
 }

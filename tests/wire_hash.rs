@@ -63,10 +63,10 @@ fn resources(build: impl FnOnce(&mut App)) -> TickedResourceRegistry {
     app.world().resource::<TickedResourceRegistry>().clone()
 }
 
-fn stub_serialize(_: &World, _: u64) -> Option<Vec<u8>> {
+fn stub_serialize(_: &World, _: Tick) -> Option<Vec<u8>> {
     None
 }
-fn stub_apply(_: &mut World, _: u64, _: &[u8]) {}
+fn stub_apply(_: &mut World, _: Tick, _: &[u8]) {}
 
 // ── the format ───────────────────────────────────────────────────────────────
 

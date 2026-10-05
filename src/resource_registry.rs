@@ -28,6 +28,7 @@
 //! not expressible and deliberately so — the shapes that want it (a round that has not started, an
 //! objective nobody holds) are better served by a value that says so.
 
+use crate::tick_types::Tick;
 use std::{
     any::{TypeId, type_name},
     collections::{HashMap, VecDeque},
@@ -53,7 +54,7 @@ impl<R> TickedResource for R where R: Resource + Clone + Default + Send + Sync +
 /// prune just freed and allocates nothing, which is the rule the component histories keep.
 #[derive(Resource)]
 pub struct ResourceActions<R: TickedResource> {
-    history: VecDeque<(u64, R)>,
+    history: VecDeque<(Tick, R)>,
 }
 
 impl<R: TickedResource> Default for ResourceActions<R> {
@@ -65,23 +66,23 @@ impl<R: TickedResource> Default for ResourceActions<R> {
 }
 
 impl<R: TickedResource> ResourceActions<R> {
-    fn position(&self, tick: u64) -> Result<usize, usize> {
+    fn position(&self, tick: Tick) -> Result<usize, usize> {
         self.history.binary_search_by_key(&tick, |(at, _)| *at)
     }
 
-    pub fn at_tick(&self, tick: u64) -> Option<&R> {
+    pub fn at_tick(&self, tick: Tick) -> Option<&R> {
         self.position(tick).ok().map(|at| &self.history[at].1)
     }
 
-    pub fn oldest_recorded_tick(&self) -> Option<u64> {
+    pub fn oldest_recorded_tick(&self) -> Option<Tick> {
         self.history.front().map(|(tick, _)| *tick)
     }
 
-    pub fn newest_recorded_tick(&self) -> Option<u64> {
+    pub fn newest_recorded_tick(&self) -> Option<Tick> {
         self.history.back().map(|(tick, _)| *tick)
     }
 
-    pub fn set_tick(&mut self, tick: u64, value: R) {
+    pub fn set_tick(&mut self, tick: Tick, value: R) {
         match self.position(tick) {
             Ok(at) => self.history[at].1 = value,
             Err(at) if at == self.history.len() => self.history.push_back((tick, value)),
@@ -89,7 +90,7 @@ impl<R: TickedResource> ResourceActions<R> {
         }
     }
 
-    pub fn truncate_after(&mut self, tick: u64) {
+    pub fn truncate_after(&mut self, tick: Tick) {
         let keep = match self.position(tick) {
             Ok(at) => at + 1,
             Err(at) => at,
@@ -97,7 +98,7 @@ impl<R: TickedResource> ResourceActions<R> {
         self.history.truncate(keep);
     }
 
-    pub fn prune_before(&mut self, tick: u64) {
+    pub fn prune_before(&mut self, tick: Tick) {
         while self.history.front().is_some_and(|(at, _)| *at < tick) {
             self.history.pop_front();
         }
@@ -139,14 +140,14 @@ struct RegisteredTickedResource {
     /// Whether the name was given at registration or defaulted to `type_name`. See
     /// [`TickedComponentRegistry::wire_hash`](crate::registry::TickedComponentRegistry::wire_hash).
     type_id: TypeId,
-    capture: fn(&mut World, u64),
-    restore: fn(&mut World, u64),
-    truncate_after: fn(&mut World, u64),
-    prune_before: fn(&mut World, u64),
+    capture: fn(&mut World, Tick),
+    restore: fn(&mut World, Tick),
+    truncate_after: fn(&mut World, Tick),
+    prune_before: fn(&mut World, Tick),
     clear: fn(&mut World),
     reset: fn(&mut World),
-    serialize_at: Option<fn(&World, u64) -> Option<Vec<u8>>>,
-    deserialize_and_apply: Option<fn(&mut World, u64, &[u8])>,
+    serialize_at: Option<fn(&World, Tick) -> Option<Vec<u8>>>,
+    deserialize_and_apply: Option<fn(&mut World, Tick, &[u8])>,
 }
 
 impl TickedResourceRegistry {
@@ -181,8 +182,8 @@ impl TickedResourceRegistry {
     pub fn register_networked<R: TickedResource>(
         &mut self,
         wire_name: &'static str,
-        serialize_at: fn(&World, u64) -> Option<Vec<u8>>,
-        deserialize_and_apply: fn(&mut World, u64, &[u8]),
+        serialize_at: fn(&World, Tick) -> Option<Vec<u8>>,
+        deserialize_and_apply: fn(&mut World, Tick, &[u8]),
     ) {
         self.register_inner::<R>(
             Some(wire_name),
@@ -194,8 +195,8 @@ impl TickedResourceRegistry {
     fn register_inner<R: TickedResource>(
         &mut self,
         wire_name: Option<&'static str>,
-        serialize_at: Option<fn(&World, u64) -> Option<Vec<u8>>>,
-        deserialize_and_apply: Option<fn(&mut World, u64, &[u8])>,
+        serialize_at: Option<fn(&World, Tick) -> Option<Vec<u8>>>,
+        deserialize_and_apply: Option<fn(&mut World, Tick, &[u8])>,
     ) {
         let type_id = TypeId::of::<R>();
         let tname = type_name::<R>();
@@ -332,13 +333,13 @@ impl TickedResourceRegistry {
         self.inner.entries.is_empty()
     }
 
-    pub fn capture_all(&self, world: &mut World, tick: u64) {
+    pub fn capture_all(&self, world: &mut World, tick: Tick) {
         for entry in &self.inner.entries {
             (entry.capture)(world, tick);
         }
     }
 
-    pub fn restore_all(&self, world: &mut World, tick: u64) {
+    pub fn restore_all(&self, world: &mut World, tick: Tick) {
         for entry in &self.inner.entries {
             (entry.restore)(world, tick);
         }
@@ -346,7 +347,7 @@ impl TickedResourceRegistry {
 
     /// Restore only the resources registered without serialization. See
     /// [`TickedComponentRegistry::restore_local_only`](crate::registry::TickedComponentRegistry::restore_local_only).
-    pub fn restore_local_only(&self, world: &mut World, tick: u64) {
+    pub fn restore_local_only(&self, world: &mut World, tick: Tick) {
         for entry in &self.inner.entries {
             if entry.serialize_at.is_none() {
                 (entry.restore)(world, tick);
@@ -354,13 +355,13 @@ impl TickedResourceRegistry {
         }
     }
 
-    pub fn truncate_all_after(&self, world: &mut World, tick: u64) {
+    pub fn truncate_all_after(&self, world: &mut World, tick: Tick) {
         for entry in &self.inner.entries {
             (entry.truncate_after)(world, tick);
         }
     }
 
-    pub fn prune_all_before(&self, world: &mut World, tick: u64) {
+    pub fn prune_all_before(&self, world: &mut World, tick: Tick) {
         for entry in &self.inner.entries {
             (entry.prune_before)(world, tick);
         }
@@ -390,7 +391,7 @@ impl TickedResourceRegistry {
     }
 
     /// Serialize every networked resource at `tick`, as `(wire index, bytes)` in wire order.
-    pub fn serialize_all(&self, world: &World, tick: u64) -> Vec<(u16, Vec<u8>)> {
+    pub fn serialize_all(&self, world: &World, tick: Tick) -> Vec<(u16, Vec<u8>)> {
         let frozen = self.frozen();
         let mut result = Vec::new();
         for (wire_index, entry_index) in frozen.entries.iter().enumerate() {
@@ -408,7 +409,7 @@ impl TickedResourceRegistry {
     pub fn deserialize_and_apply_all(
         &self,
         world: &mut World,
-        tick: u64,
+        tick: Tick,
         resources: &[(u16, Vec<u8>)],
     ) {
         let frozen = self.frozen();
@@ -423,7 +424,7 @@ impl TickedResourceRegistry {
     }
 }
 
-fn capture_resource<R: TickedResource>(world: &mut World, tick: u64) {
+fn capture_resource<R: TickedResource>(world: &mut World, tick: Tick) {
     let Some(value) = world.get_resource::<R>().cloned() else {
         return;
     };
@@ -432,7 +433,7 @@ fn capture_resource<R: TickedResource>(world: &mut World, tick: u64) {
         .set_tick(tick, value);
 }
 
-fn restore_resource<R: TickedResource>(world: &mut World, tick: u64) {
+fn restore_resource<R: TickedResource>(world: &mut World, tick: Tick) {
     let saved = world
         .get_resource::<ResourceActions<R>>()
         .and_then(|actions| actions.at_tick(tick).cloned());
@@ -443,13 +444,13 @@ fn restore_resource<R: TickedResource>(world: &mut World, tick: u64) {
     }
 }
 
-fn truncate_resource<R: TickedResource>(world: &mut World, tick: u64) {
+fn truncate_resource<R: TickedResource>(world: &mut World, tick: Tick) {
     if let Some(mut actions) = world.get_resource_mut::<ResourceActions<R>>() {
         actions.truncate_after(tick);
     }
 }
 
-fn prune_resource<R: TickedResource>(world: &mut World, tick: u64) {
+fn prune_resource<R: TickedResource>(world: &mut World, tick: Tick) {
     if let Some(mut actions) = world.get_resource_mut::<ResourceActions<R>>() {
         actions.prune_before(tick);
     }

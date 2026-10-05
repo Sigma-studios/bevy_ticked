@@ -5,6 +5,7 @@ use crate::{
 use bevy::prelude::*;
 use bevy_ensemble::{Host, HostUuid, Lobby, LobbyParticipant, LobbyParticipantOf};
 use bevy_ticked::tick::{CurrentTick, TickHoldReason, TickHolds};
+use bevy_ticked::tick_types::Tick;
 
 /// Exclusive system that runs in `FixedUpdate::PreTick` every iteration.
 ///
@@ -50,7 +51,7 @@ pub fn sync_lockstep_pause_state<A: LockstepAction, S: JoinSnapshot>(world: &mut
     }
 
     let current_tick = world.resource::<CurrentTick>().0;
-    let next_tick = current_tick + 1;
+    let next_tick = current_tick.next();
 
     let last_broadcast = world.resource::<crate::LastBroadcastTick>().0;
     let should_pause = if host_lobby.is_some() && next_tick <= last_broadcast {
@@ -71,7 +72,7 @@ pub fn sync_lockstep_pause_state<A: LockstepAction, S: JoinSnapshot>(world: &mut
         // while held — could never lift. A host alone in its lobby has nobody to wait for.
         let buffer = world.resource::<LockstepConfig>().host_tick_buffer;
 
-        let required_participants: Vec<(u128, u64)> = world
+        let required_participants: Vec<(u128, Tick)> = world
             .query::<(
                 &LobbyParticipant,
                 &LockstepLobbyParticipant,
@@ -89,7 +90,7 @@ pub fn sync_lockstep_pause_state<A: LockstepAction, S: JoinSnapshot>(world: &mut
         let tracker = world.resource::<ActionTracker<A>>();
         required_participants.iter().any(|(uuid, joined_at_tick)| {
             // Still in the initial buffer window — actions not expected yet.
-            if next_tick <= joined_at_tick + buffer {
+            if next_tick <= *joined_at_tick + buffer {
                 return false;
             }
             !tracker_has_actions_for_player(tracker, next_tick, *uuid)

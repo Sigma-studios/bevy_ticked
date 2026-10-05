@@ -71,10 +71,10 @@ struct Vel(i32);
 
 const ENTITIES: u64 = 50;
 const WARMUP_TICKS: usize = 100;
-const MEASURED_TICKS: u64 = 10;
+const MEASURED_TICKS: Ticks = Ticks(10);
 /// Small enough that the prune runs on every warm-up tick, so the measured ticks run in the
 /// steady state a long session is in: one map taken per capture, one handed back per prune.
-const WINDOW: u64 = 32;
+const WINDOW: Ticks = Ticks(32);
 
 /// Measures `capture_all` and `prune_all_before` called directly, the way `advance_one_tick`
 /// calls them, rather than a whole `app.update()`: Bevy's own frame — schedule executors,
@@ -106,7 +106,7 @@ fn capturing_a_tick_after_warmup_allocates_nothing() {
     }
     let warm_tick = app.world().resource::<CurrentTick>().0;
     assert!(
-        warm_tick as usize >= WARMUP_TICKS,
+        warm_tick.0 as usize >= WARMUP_TICKS,
         "the warm-up ran {warm_tick} ticks"
     );
 
@@ -114,7 +114,7 @@ fn capturing_a_tick_after_warmup_allocates_nothing() {
     let world = app.world_mut();
 
     start_counting();
-    for tick in warm_tick + 1..=warm_tick + MEASURED_TICKS {
+    for tick in warm_tick.next().through(warm_tick + MEASURED_TICKS) {
         registry.capture_all(world, tick);
         registry.prune_all_before(world, tick.saturating_sub(WINDOW));
     }
