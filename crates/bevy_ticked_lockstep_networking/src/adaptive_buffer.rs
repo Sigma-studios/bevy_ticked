@@ -192,7 +192,16 @@ impl Plugin for AdaptiveTickBufferPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<AdaptiveBufferState>()
             .init_resource::<AdaptiveBufferTuning>()
-            .add_systems(Update, adapt_tick_buffer);
+            // **Before the margin sizing, always.** Both write `client_tick_buffer` every frame,
+            // and unordered the multithreaded executor picks whichever finishes scheduling first —
+            // so the same session, the same link, the same seed, ran twice in one process, settled
+            // on different buffers and simulated different ticks. Nothing about either system is
+            // wrong; the race between them is. The margin runs last because it is the host's word
+            // on whether this client's actions arrive in time, and the RTT only estimates that.
+            .add_systems(
+                Update,
+                adapt_tick_buffer.before(crate::session::size_buffer_from_margin),
+            );
     }
 }
 

@@ -5,6 +5,16 @@ pull requests #1–#14 on this repository are the phases.
 
 ## Unreleased
 
+- **Fix** — the two controllers that write a client's tick buffer run in a fixed order.
+  `AdaptiveTickBufferPlugin`'s `adapt_tick_buffer` (from the ping round trip) and the session's
+  `size_buffer_from_margin` (from the host's arrival margin) both write `client_tick_buffer` every
+  frame in `Update`, and nothing ordered them: the multithreaded executor ran them either way round,
+  so one session on one link with one seed, run twice in a process, settled on different buffers
+  and simulated different ticks. The RTT sizing now runs first and the margin has the last word,
+  being the host's own report of what the RTT only estimates. Found by bevy_factory's netsim replay
+  test, which had been passing only because an unrelated system happened to hold the two apart.
+  `tests/buffer_controllers.rs` asks the schedule rather than hoping a run shows the race.
+
 - **Behaviour change** — `bevy_ticked_avian` solves in a canonical order, **on by default**.
   avian's result depended on spawn order (pair orientation from the broad phase, greedy constraint
   colouring in touch order, joints in table-row order), so a client, which never builds its world

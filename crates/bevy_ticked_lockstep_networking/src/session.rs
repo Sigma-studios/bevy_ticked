@@ -492,7 +492,7 @@ const SHRINK_AFTER: Duration = Duration::from_secs(2);
 
 /// A client sizes its buffer from its own arrival margin: the host's word on whether its
 /// actions arrive in time, which the ping round trip only estimates.
-fn size_buffer_from_margin(
+pub(crate) fn size_buffer_from_margin(
     margin: Res<OwnInputMargin>,
     mut config: ResMut<LockstepConfig>,
     client: Query<(), (With<Lobby>, Without<Host>)>,
