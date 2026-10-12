@@ -464,6 +464,14 @@ fn offset_on(app: &App, id: u64) -> Option<Vec3> {
     latest::<SmoothingOffset>(app, id).map(|offset| offset.translation)
 }
 
+/// Where `id` is drawn: its transform as the presentation built it, before the frame's blend
+/// and offset are laid on top.
+fn drawn_x(app: &App, id: u64) -> Option<f32> {
+    latest::<TickedInterpolation>(app, id)
+        .and_then(|interpolation| interpolation.current())
+        .map(|transform| transform.translation.x)
+}
+
 fn stats_on(app: &App) -> CorrectionStats {
     *app.world().resource::<CorrectionStats>()
 }
@@ -479,7 +487,7 @@ fn corrupt_visibly(net: &mut TickedNetwork, host: PeerId, peer: PeerId, id: u64)
     corrupt_component::<Pos>(net.app_mut(peer), id, |pos| pos.0 += 1);
     net.run(2);
     assert_eq!(
-        latest::<Transform>(net.app(peer), id).map(|t| t.translation.x),
+        drawn_x(net.app(peer), id),
         Some(pos(net.app(peer), id) as f32),
         "the wrong Pos never reached the transform, so no correction can be seen"
     );

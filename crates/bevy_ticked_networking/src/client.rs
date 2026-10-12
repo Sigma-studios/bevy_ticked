@@ -33,6 +33,10 @@ pub enum ClientSet {
     BeforeSnapshot,
     /// `handle_server_snapshot`: apply, roll back, replay.
     ApplySnapshot,
+    /// [`TickedPresentation`](bevy_ticked::TickedPresentation), run on the replayed state when a
+    /// snapshot was applied: the replay runs only the simulation, and whatever measures what the
+    /// correction did to the picture — the smoothing — has to find it drawn where it now is.
+    PresentSnapshot,
     /// After the replay, still before the tick.
     AfterSnapshot,
 }
@@ -297,6 +301,7 @@ impl<T: TickedInput> Plugin for TickedClientPlugin<T> {
                 (
                     ClientSet::BeforeSnapshot,
                     ClientSet::ApplySnapshot,
+                    ClientSet::PresentSnapshot,
                     ClientSet::AfterSnapshot,
                 )
                     .chain()
@@ -307,6 +312,9 @@ impl<T: TickedInput> Plugin for TickedClientPlugin<T> {
                 TickedLoop,
                 (
                     handle_server_snapshot::<T>.in_set(ClientSet::ApplySnapshot),
+                    bevy_ticked::run_presentation
+                        .run_if(on_message::<SnapshotApplied>)
+                        .in_set(ClientSet::PresentSnapshot),
                     (
                         send_local_input::<T>,
                         // Only a client can mint under the wrong slot; on a host or a solo

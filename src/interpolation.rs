@@ -20,6 +20,7 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
 use crate::tick::CurrentTick;
+use crate::tick_types::Tick;
 use crate::time::{Ticked, TickedTime};
 
 /// Read-only access to the current sub-tick interpolation state.
@@ -84,9 +85,14 @@ impl TickInterpolation<'_> {
 ///
 /// # Using it
 ///
-/// Add [`TickedInterpolationPlugin`] and put [`TickedInterpolation`] on anything
-/// whose `Transform` the simulation writes. Where avian is also present, give those
-/// entities `NoTransformEasing` so only one author remains.
+/// Add [`TickedInterpolationPlugin`] and put [`TickedInterpolation`] on anything whose
+/// `Transform` is built once per tick by [`TickedPresentation`](crate::TickedPresentation). The
+/// simulation never writes a `Transform` — the transform guard holds it to that in a debug
+/// build — so the two last poses recorded here are what the presentation made of the last two
+/// ticks, and the blend between them is the only other thing that writes the component.
+///
+/// A body that jumps — a portal, a respawn — carries [`Teleported`] stamped with the tick it
+/// jumped on, and is drawn there rather than slid across the map.
 pub struct TickedInterpolationPlugin;
 
 /// Interpolate this entity's `Transform` between its last two tick states.
@@ -99,17 +105,33 @@ pub struct TickedInterpolationPlugin;
 ///
 /// # The blend never reaches the simulation
 ///
-/// The blended value is written into `Transform` for the renderer, and put back before the
-/// next tick reads it ([`TickedSystems::Restore`](crate::TickedSystems::Restore)). It used to
-/// stay: the tick then integrated from a transform that was `fraction` of the way back toward
-/// the previous tick, and a body meant to cross 99 units in 99 ticks crossed 75. Every consumer
-/// that measured it read it as "physics feels floaty under Hz" and pinned the tick source to
-/// `FixedUpdate` to make it go away.
+/// It cannot: nothing in the tick reads a `Transform`. It used to — the tick integrated from the
+/// component the renderer had last blended, a body meant to cross 99 units in 99 ticks crossed 75,
+/// and a restore step put the true transform back before every tick to hide it. With the picture
+/// built after the tick from simulated state, there is nothing to put back.
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct TickedInterpolation {
     previous: Option<Transform>,
     current: Option<Transform>,
+    /// The tick `current` was recorded at, so a [`Teleported`] stamp can be told apart from one
+    /// that has already been honoured.
+    recorded_at: Option<Tick>,
 }
+
+/// This entity jumped on this tick, and is not to be blended across the jump.
+///
+/// Simulated state, stamped by whatever moved the body — a portal, a respawn — and so registered
+/// for rollback by the game like any other component it writes: a replay that un-happens the
+/// trip un-happens the stamp. The interpolation reads it when it records, and draws the body
+/// where it arrived from the first frame rather than sliding it there from where it left.
+///
+/// A tick rather than a marker, because a pass of [`TickedLoop`](crate::TickedLoop) can run
+/// several ticks and a replay many: what matters is whether the jump happened since the pose
+/// was last recorded, not whether it happened on the tick that is being recorded now.
+#[derive(
+    Component, Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
+pub struct Teleported(pub Tick);
 
 impl TickedInterpolation {
     /// The transform as the simulation last left it: the true state, not a blend.
@@ -139,10 +161,7 @@ impl Plugin for TickedInterpolationPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             crate::TickedLoop,
-            (
-                restore_simulation_transform.in_set(crate::TickedSystems::Restore),
-                record_tick_states.in_set(crate::TickedSystems::PostTick),
-            ),
+            record_tick_states.in_set(crate::TickedSystems::PostTick),
         )
         .add_systems(
             PostUpdate,
@@ -159,38 +178,28 @@ impl Plugin for TickedInterpolationPlugin {
 /// In `PostTick` rather than in `Update`: a replayed tick has to shift the pair
 /// too, or a client that rolls back blends toward a state it has already
 /// discarded.
-fn record_tick_states(mut bodies: Query<(&Transform, &mut TickedInterpolation)>) {
-    for (transform, mut interpolation) in &mut bodies {
-        interpolation.previous = interpolation.current;
-        interpolation.current = Some(*transform);
-    }
-}
-
-/// Before anything in the loop reads a transform, put the true one back.
 ///
-/// `GlobalTransform` too, for entities with no parent: propagation only runs in `PostUpdate`,
-/// so between it and the next tick the global transform is the blend, and a physics engine or
-/// a raycast reading it inside the tick would see the presentation value.
-fn restore_simulation_transform(
-    mut bodies: Query<(
-        &mut Transform,
-        Option<&mut GlobalTransform>,
-        Has<ChildOf>,
-        &TickedInterpolation,
-    )>,
+/// A body [`Teleported`] since the last record gets the new state on both sides of the pair,
+/// so the blend holds it where it arrived.
+fn record_tick_states(
+    tick: Res<CurrentTick>,
+    mut bodies: Query<(&Transform, &mut TickedInterpolation, Option<&Teleported>)>,
 ) {
-    for (mut transform, global, has_parent, interpolation) in &mut bodies {
-        let Some(current) = interpolation.current else {
-            continue;
+    for (transform, mut interpolation, teleported) in &mut bodies {
+        // A clock that went backwards — a rewind, a new session on a kept entity — makes the
+        // last record meaningless as a reference: anything stamped since counts.
+        let since = interpolation
+            .recorded_at
+            .filter(|&recorded| recorded <= tick.0);
+        let jumped =
+            teleported.is_some_and(|stamp| since.is_none_or(|recorded| stamp.0 > recorded));
+        interpolation.previous = if jumped {
+            Some(*transform)
+        } else {
+            interpolation.current
         };
-        if *transform != current {
-            *transform = current;
-            if let Some(mut global) = global
-                && !has_parent
-            {
-                *global = GlobalTransform::from(current);
-            }
-        }
+        interpolation.current = Some(*transform);
+        interpolation.recorded_at = Some(tick.0);
     }
 }
 
@@ -232,6 +241,7 @@ mod tests {
         let state = TickedInterpolation {
             previous: Some(at(0.0)),
             current: Some(at(10.0)),
+            recorded_at: None,
         };
         assert_eq!(state.sample(0.0).unwrap().translation.x, 0.0);
         assert_eq!(state.sample(1.0).unwrap().translation.x, 10.0);

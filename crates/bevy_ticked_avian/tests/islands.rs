@@ -3,7 +3,7 @@
 
 use bevy::prelude::*;
 use bevy_ticked::TickedSimulation;
-use bevy_ticked_avian::avian3d::TickedAvianPlugin;
+use bevy_ticked_avian::avian3d::{TickedAvianPlugin, presentation_transform_config};
 use bevy_ticked_testing::fixtures::avian;
 use bevy_ticked_testing::prelude::*;
 
@@ -34,6 +34,7 @@ fn allowing_sleep_keeps_the_islands() {
 #[should_panic(expected = "IslandPlugin is added and sleeping is off")]
 fn a_game_that_brings_islands_with_sleeping_off_is_refused() {
     let mut app = peer_app(HOST_UUID, |app| {
+        app.insert_resource(presentation_transform_config());
         app.add_plugins(PhysicsPlugins::new(TickedSimulation));
         avian::install_with(
             app,
@@ -47,6 +48,7 @@ fn a_game_that_brings_islands_with_sleeping_off_is_refused() {
 #[test]
 fn a_game_that_leaves_islands_out_is_accepted() {
     let mut app = peer_app(HOST_UUID, |app| {
+        app.insert_resource(presentation_transform_config());
         app.add_plugins(
             PhysicsPlugins::new(TickedSimulation)
                 .build()

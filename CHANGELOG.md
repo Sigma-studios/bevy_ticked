@@ -5,6 +5,20 @@ pull requests #1–#14 on this repository are the phases.
 
 ## Unreleased
 
+- **Behaviour change** — the picture is built outside the simulation, and the simulation may not
+  touch `Transform` (T21). A new schedule, `TickedPresentation`, runs after every tick
+  (`TickedSystems::Present`) and, on a client, straight after a snapshot's replay
+  (`ClientSet::PresentSnapshot`); games build `Transform` there from simulated state.
+  `TickedSystems::Restore` and the write-back it held are gone, along with smoothing's undo:
+  `CorrectionSmoothing` now requires `TickedInterpolation` and lays its offset over the pose the
+  interpolation rebuilds. `Teleported(Tick)` stops a jump being blended. `TickedPlugin` installs a
+  transform guard in debug builds (`transform_guard`), which panics when a simulation system reads
+  or writes a transform. `TickedAvianPlugin` has avian's transform handling off in every
+  direction, gives colliders the `GlobalTransform` avian needs to attach them, and refuses child
+  colliders; `positions_from_transforms()` is gone. The examples, the testing fixtures and the
+  tests follow; `restore_before_tick.rs` became `loop_clocks_and_steps.rs` and
+  `avian_under_interpolation.rs` went with the restore it tested. See `docs/MIGRATION.md` T21.
+
 - **Fix** — the two controllers that write a client's tick buffer run in a fixed order.
   `AdaptiveTickBufferPlugin`'s `adapt_tick_buffer` (from the ping round trip) and the session's
   `size_buffer_from_margin` (from the host's arrival margin) both write `client_tick_buffer` every

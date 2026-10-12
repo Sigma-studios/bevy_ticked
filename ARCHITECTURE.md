@@ -13,9 +13,12 @@ bevy_ticked_testing        the harness the six games had each written, plus what
 
 ## `bevy_ticked` — the tick
 
-`TickedPlugin { source, max_ticks_per_frame, history_ticks, simulation_executor }` owns a
-clock (`TickSource::Hz`, `Manual`, or Bevy's `FixedUpdate` for solo scrubbing) and runs
-`TickedLoop` once per tick: `TickedSystems::{Restore, PreTick, SampleInput, Tick, PostTick}`.
+`TickedPlugin { source, max_ticks_per_frame, history_ticks, transform_guard,
+simulation_executor }` owns a clock (`TickSource::Hz`, `Manual`, or Bevy's `FixedUpdate` for solo
+scrubbing) and runs `TickedLoop` once per tick: `TickedSystems::{PreTick, SampleInput, Tick,
+Present, PostTick}`. `Present` runs `TickedPresentation`, where a game builds what is drawn from
+simulated state; the simulation never touches `Transform`, and in a debug build
+`transform_guard` panics if it does.
 `Tick` runs the game's `TickedSimulation` schedule with `Time` swapped to the tick's clock,
 single-threaded by default, then captures every registered component and resource into a
 per-type history (`WorldActions<T>`, a ring of `HistoryBufferTicks` ticks).

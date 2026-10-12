@@ -27,6 +27,7 @@ compile_error!("Features `transport-webrtc` and `transport-steam` are mutually e
 #[cfg(not(any(feature = "transport-webrtc", feature = "transport-steam")))]
 compile_error!("One of `transport-webrtc` or `transport-steam` must be enabled.");
 
+use avian2d::dynamics::solver::islands::{IslandPlugin, IslandSleepingPlugin};
 use avian2d::prelude::*;
 use bevy::prelude::*;
 #[cfg(feature = "transport-webrtc")]
@@ -40,6 +41,7 @@ use bevy_ensemble_steam::{BevyEnsembleSteamPlugin, JoinSteamLobby, SteamFriendLo
 #[cfg(feature = "transport-webrtc")]
 use bevy_ensemble_webrtc::{BevyEnsembleWebrtcPlugin, JoinWebrtcLobby, RefreshLobbyList};
 use bevy_ticked::prelude::*;
+use bevy_ticked_avian::avian2d::{TickedAvianPlugin, presentation_transform_config};
 use bevy_ticked_lockstep_networking::ChecksumLogPlugin;
 use bevy_ticked_lockstep_networking::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -235,7 +237,18 @@ fn main() {
         source: TickSource::Hz(64.0),
         ..default()
     })
-    .add_plugins(PhysicsPlugins::new(TickedSimulation).with_length_unit(1.0))
+    // avian under the tick, through the bundle that keeps it off `Transform`: the config goes in
+    // before the physics plugins, which decide while they build whether a `Position` needs one.
+    // The sprites are placed from `Position` in `Update` — see `sync_visuals`.
+    .insert_resource(presentation_transform_config())
+    .add_plugins(
+        PhysicsPlugins::new(TickedSimulation)
+            .with_length_unit(1.0)
+            .build()
+            .disable::<IslandPlugin>()
+            .disable::<IslandSleepingPlugin>(),
+    )
+    .add_plugins(TickedAvianPlugin::default().physics_added_by_the_game())
     .insert_resource(Gravity(Vec2::ZERO))
     .add_plugins((
         LockstepPlugin::<Action, GameSnapshot>::default(),

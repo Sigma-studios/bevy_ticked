@@ -7,10 +7,12 @@
 //! there. Two games shipped this (`rollback_smoothing.rs`, `smoothing.rs`, 159 and 261
 //! lines); this is that, once.
 //!
-//! The offset is applied in `PostUpdate` onto the rendered transform, after the tick
-//! interpolation blend, and undone in [`TickedSystems::Restore`] so the simulation never
-//! integrates from it. With [`SmoothingTarget::Child`] it goes on a visual child instead and
-//! the simulated transform is never touched at all.
+//! The offset is applied in `PostUpdate`, after the tick interpolation blend: the drawn pose is
+//! rebuilt every frame from the interpolation's recorded ticks and the offset laid on top, so it
+//! never accumulates and never needs taking back — nothing in the tick reads a `Transform`.
+//! Corrections are measured the same way, against the pose last recorded for the entity and the
+//! one the presentation builds straight after the snapshot's replay. With
+//! [`SmoothingTarget::Child`] the offset goes on a visual child instead.
 //!
 //! Exempt: the local player's own entities (a correction to what you are controlling should
 //! be felt, and smoothing it makes input feel late), anything with [`NoCorrectionSmoothing`],
@@ -18,8 +20,11 @@
 
 use bevy::prelude::*;
 use bevy_ticked::{
-    TickedLoop, TickedSystems, interpolation::TickedInterpolationSet, registry::TickedComponent,
-    tracked_entity::TickTrackedEntity, world_actions::WorldActions,
+    TickedLoop,
+    interpolation::{TickInterpolation, TickedInterpolation, TickedInterpolationSet},
+    registry::TickedComponent,
+    tracked_entity::TickTrackedEntity,
+    world_actions::WorldActions,
 };
 use std::collections::HashMap;
 
@@ -29,7 +34,7 @@ use crate::replication::Owner;
 /// Where the smoothing offset is written.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SmoothingTarget {
-    /// The entity's own `Transform`, undone before every tick.
+    /// The entity's own `Transform`, on top of the interpolation's blend.
     #[default]
     Self_,
     /// A visual child's `Transform`, which the simulation never reads.
@@ -37,7 +42,11 @@ pub enum SmoothingTarget {
 }
 
 /// Smooth this entity's corrections. Add [`TickedSmoothingPlugin`].
+///
+/// Requires [`TickedInterpolation`]: the offset is laid over the pose the interpolation rebuilds
+/// every frame, which is what keeps it from piling up between ticks.
 #[derive(Component, Clone, Copy, Debug, PartialEq)]
+#[require(TickedInterpolation)]
 pub struct CorrectionSmoothing {
     /// How fast the offset decays, per second: the offset is multiplied by `exp(-rate * dt)`
     /// each frame. `12` closes most of a correction in a quarter of a second.
@@ -65,13 +74,11 @@ impl Default for CorrectionSmoothing {
 #[derive(Component, Clone, Copy, Debug, Default)]
 pub struct NoCorrectionSmoothing;
 
-/// The offset currently hiding a correction, and what was last written so it can be undone.
+/// The offset currently hiding a correction.
 #[derive(Component, Clone, Copy, Debug)]
 pub struct SmoothingOffset {
     pub translation: Vec3,
     pub rotation: Quat,
-    applied_translation: Vec3,
-    applied_rotation: Quat,
 }
 
 impl Default for SmoothingOffset {
@@ -79,8 +86,6 @@ impl Default for SmoothingOffset {
         Self {
             translation: Vec3::ZERO,
             rotation: Quat::IDENTITY,
-            applied_translation: Vec3::ZERO,
-            applied_rotation: Quat::IDENTITY,
         }
     }
 }
@@ -113,7 +118,6 @@ impl Plugin for TickedSmoothingPlugin {
             .add_systems(
                 TickedLoop,
                 (
-                    undo_offsets.in_set(TickedSystems::Restore),
                     remember_before.in_set(ClientSet::BeforeSnapshot),
                     absorb_corrections.in_set(ClientSet::AfterSnapshot),
                 ),
@@ -132,14 +136,19 @@ impl Plugin for TickedSmoothingPlugin {
 #[derive(Default)]
 struct Before(HashMap<u64, Transform>);
 
+/// The pose last presented for each smoothed entity: what the interpolation recorded after the
+/// last tick, which is the simulation's own as the presentation drew it — not the `Transform`,
+/// which between ticks holds the blend and whatever offset was laid on it.
 fn remember_before(
-    bodies: Query<(&TickTrackedEntity, &Transform), With<CorrectionSmoothing>>,
+    bodies: Query<(&TickTrackedEntity, &TickedInterpolation), With<CorrectionSmoothing>>,
     mut before: Local<Before>,
     mut out: ResMut<BeforeSnapshotTransforms>,
 ) {
     before.0.clear();
-    for (tracked, transform) in &bodies {
-        before.0.insert(tracked.0, *transform);
+    for (tracked, interpolation) in &bodies {
+        if let Some(presented) = interpolation.current() {
+            before.0.insert(tracked.0, presented);
+        }
     }
     out.0 = std::mem::take(&mut before.0);
 }
@@ -213,8 +222,6 @@ fn absorb_corrections(
                 commands.entity(entity).try_insert(SmoothingOffset {
                     translation: jump,
                     rotation: turn,
-                    applied_translation: Vec3::ZERO,
-                    applied_rotation: Quat::IDENTITY,
                 });
             }
         }
@@ -239,62 +246,46 @@ fn decay_offsets(
     }
 }
 
+/// Lay each offset over the pose the interpolation drew this frame.
+///
+/// The base is rebuilt from the recorded ticks rather than read back from the `Transform`, which
+/// already carries last frame's offset on a frame no tick ran — so the offset is set, never added
+/// to, and nothing has to be taken back later.
 fn apply_offsets(
-    mut offsets: Query<(Entity, &CorrectionSmoothing, &mut SmoothingOffset)>,
+    tick: TickInterpolation,
+    offsets: Query<(
+        Entity,
+        &CorrectionSmoothing,
+        &SmoothingOffset,
+        &TickedInterpolation,
+    )>,
     mut transforms: Query<&mut Transform>,
 ) {
-    for (entity, smoothing, mut offset) in &mut offsets {
-        let target = match smoothing.apply_to {
-            SmoothingTarget::Self_ => entity,
-            SmoothingTarget::Child(child) => child,
-        };
-        let Ok(mut transform) = transforms.get_mut(target) else {
-            continue;
-        };
+    let fraction = tick.fraction();
+    for (entity, smoothing, offset, interpolation) in &offsets {
         match smoothing.apply_to {
             SmoothingTarget::Self_ => {
-                transform.translation += offset.translation;
-                transform.rotation = offset.rotation * transform.rotation;
-                offset.applied_translation = offset.translation;
-                offset.applied_rotation = offset.rotation;
+                let Some(base) = interpolation
+                    .sample(fraction)
+                    .or_else(|| interpolation.current())
+                else {
+                    continue;
+                };
+                let Ok(mut transform) = transforms.get_mut(entity) else {
+                    continue;
+                };
+                transform.translation = base.translation + offset.translation;
+                transform.rotation = offset.rotation * base.rotation;
+                transform.scale = base.scale;
             }
-            SmoothingTarget::Child(_) => {
+            SmoothingTarget::Child(child) => {
+                let Ok(mut transform) = transforms.get_mut(child) else {
+                    continue;
+                };
                 transform.translation = offset.translation;
                 transform.rotation = offset.rotation;
             }
         }
-    }
-}
-
-/// Take back what `apply_offsets` wrote onto a simulated transform, before the tick reads it.
-///
-/// An entity with `TickedInterpolation` is put at the simulation's own value, which is what
-/// the interpolation plugin's restore does too, so the two are idempotent whichever runs first
-/// inside `Restore`. One without it gets the offset subtracted.
-fn undo_offsets(
-    mut offsets: Query<(
-        &CorrectionSmoothing,
-        &mut SmoothingOffset,
-        &mut Transform,
-        Option<&bevy_ticked::interpolation::TickedInterpolation>,
-    )>,
-) {
-    for (smoothing, mut offset, mut transform, interpolation) in &mut offsets {
-        if smoothing.apply_to != SmoothingTarget::Self_ {
-            continue;
-        }
-        if offset.applied_translation == Vec3::ZERO && offset.applied_rotation == Quat::IDENTITY {
-            continue;
-        }
-        match interpolation.and_then(|i| i.current()) {
-            Some(current) => *transform = current,
-            None => {
-                transform.translation -= offset.applied_translation;
-                transform.rotation = offset.applied_rotation.inverse() * transform.rotation;
-            }
-        }
-        offset.applied_translation = Vec3::ZERO;
-        offset.applied_rotation = Quat::IDENTITY;
     }
 }
 

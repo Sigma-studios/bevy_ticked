@@ -1,10 +1,5 @@
-//! The blend the renderer sees never reaches the simulation.
-//!
-//! `TickedInterpolationPlugin` writes a blended `Transform` for the frame. Before this suite
-//! that value stayed in the component into the next tick, so the tick integrated from a
-//! transform that was `fraction` of the way back toward the previous tick. The audit's probe
-//! measured it: a body meant to cross 99 units in 99 ticks crossed 75. `TickedSystems::Restore`
-//! puts the true transform back before anything in the loop reads it.
+//! What the tick loop shows a simulation: the tick's clock inside it, and a manual step or rewind
+//! that runs the whole loop around it.
 
 use std::time::Duration;
 
@@ -16,114 +11,26 @@ use bevy_ticked::tracked_entity::TickTrackedEntity;
 #[derive(Component, Clone, Copy)]
 struct Speed(f32);
 
+/// A simulated position along x.
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq)]
+struct X(f32);
+
 /// One unit per tick along x, integrated from `Time` so a wrong clock shows too.
-fn integrate(time: Res<Time>, mut bodies: Query<(&mut Transform, &Speed)>) {
+fn integrate(time: Res<Time>, mut bodies: Query<(&mut X, &Speed)>) {
     let dt = time.delta_secs();
-    for (mut transform, speed) in &mut bodies {
-        transform.translation.x += speed.0 * dt;
+    for (mut x, speed) in &mut bodies {
+        x.0 += speed.0 * dt;
     }
-}
-
-/// A frame that is not a whole number of ticks, so every frame ends with a real blend.
-const FRAME: Duration = Duration::from_micros(23_437);
-
-fn app() -> App {
-    let mut app = App::new();
-    app.add_plugins((MinimalPlugins, TransformPlugin))
-        .add_plugins(TickedPlugin {
-            source: TickSource::Hz(64.0),
-            ..default()
-        })
-        .add_plugins(TickedInterpolationPlugin)
-        .insert_resource(TimeUpdateStrategy::ManualDuration(FRAME))
-        .register_ticked_component::<Transform>()
-        .add_systems(TickedSimulation, integrate);
-    app.world_mut().spawn((
-        TickTrackedEntity(1),
-        Transform::default(),
-        Speed(64.0),
-        TickedInterpolation::default(),
-    ));
-    app
 }
 
 fn x(app: &mut App) -> f32 {
-    let mut q = app.world_mut().query::<&Transform>();
-    q.single(app.world()).unwrap().translation.x
+    let mut q = app.world_mut().query::<&X>();
+    q.single(app.world()).unwrap().0
 }
 
-#[test]
-fn interpolation_never_feeds_the_blend_back_into_the_simulation() {
-    let mut app = app();
-    let mut frames = 0;
-    while app.world().resource::<CurrentTick>().0 < Tick(99) {
-        app.update();
-        frames += 1;
-        assert!(frames < 1000, "the clock never reached tick 99");
-    }
-    // A frame can run two ticks, so land on 99 or 100 and expect that many units.
-    let ticks = app.world().resource::<CurrentTick>().0.0 as f32;
+/// A frame that is not a whole number of ticks.
+const FRAME: Duration = Duration::from_micros(23_437);
 
-    // What the simulation holds, not what the renderer was shown.
-    let mut q = app.world_mut().query::<&TickedInterpolation>();
-    let simulated = q
-        .single(app.world())
-        .unwrap()
-        .current()
-        .expect("two ticks have run")
-        .translation
-        .x;
-    assert!(
-        (simulated - ticks).abs() < 1e-3,
-        "{ticks} ticks at one unit per tick left the body at x = {simulated}; the audit's \
-         probe measured 75.5 at tick 99 when the blend fed back"
-    );
-}
-
-#[test]
-fn the_true_transform_is_back_before_pre_tick() {
-    #[derive(Resource, Default)]
-    struct SeenInPreTick(Vec<f32>);
-
-    let mut app = app();
-    app.init_resource::<SeenInPreTick>().add_systems(
-        TickedLoop,
-        (|bodies: Query<(&Transform, &TickedInterpolation)>, mut seen: ResMut<SeenInPreTick>| {
-            for (transform, interpolation) in &bodies {
-                if let Some(current) = interpolation.current() {
-                    seen.0.push(transform.translation.x - current.translation.x);
-                }
-            }
-        })
-        .in_set(TickedSystems::PreTick),
-    );
-    for _ in 0..40 {
-        app.update();
-    }
-    let seen = &app.world().resource::<SeenInPreTick>().0;
-    assert!(seen.len() > 10, "PreTick never saw a body with two states");
-    assert!(
-        seen.iter().all(|difference| difference.abs() < 1e-6),
-        "PreTick read a transform that differed from the simulation's: {seen:?}"
-    );
-    // And the renderer still gets a blend: after a frame the transform is between two ticks.
-    let shown = x(&mut app);
-    let mut q = app.world_mut().query::<&TickedInterpolation>();
-    let current = q
-        .single(app.world())
-        .unwrap()
-        .current()
-        .unwrap()
-        .translation
-        .x;
-    assert!(
-        shown < current,
-        "the frame ended on a partial tick, so the shown x ({shown}) should lag the simulated \
-         x ({current})"
-    );
-}
-
-/// Every frame clock reads the tick inside the simulation.
 #[test]
 fn the_frame_clocks_read_tick_values_inside_the_simulation() {
     #[derive(Resource, Default)]
@@ -192,7 +99,7 @@ fn stepping_app() -> App {
         })
         .insert_resource(TimeUpdateStrategy::ManualDuration(FRAME))
         .init_resource::<Passes>()
-        .register_ticked_component::<Transform>()
+        .register_ticked_component::<X>()
         .add_systems(TickedSimulation, integrate)
         .add_systems(
             TickedLoop,
@@ -204,7 +111,7 @@ fn stepping_app() -> App {
             ),
         );
     app.world_mut()
-        .spawn((TickTrackedEntity(1), Transform::default(), Speed(64.0)));
+        .spawn((TickTrackedEntity(1), X::default(), Speed(64.0)));
     app
 }
 

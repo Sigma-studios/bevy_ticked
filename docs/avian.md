@@ -13,14 +13,15 @@ replays bit-identically from any tick in its history.
 | `SolverConfig` | untouched | Warm starting seeds the solver with the previous step's impulses, and those are in the rolled-back `ContactGraph`, so a replay seeds from the same ones. The bundle used to zero it, which held a body driven into a wall in place for seconds. |
 | Sleeping | off (`SleepingDisabled` required on every `RigidBody`, `TimeToSleep` infinite) | The sleep state is not restored by a rollback; a body asleep here and awake there diverges at the first replayed tick. |
 | `IslandPlugin`, `IslandSleepingPlugin` | left out | Islands exist to sleep bodies. Under rollback their bookkeeping also broke: avian attaches `BodyIslandNode` through deferred observers, the history restored the historic one directly, and a body left without one panicked on its next contact (`Neither body A nor B is in an island`, run-2d, every few rounds). A game that adds `PhysicsPlugins` itself leaves them out the same way, or `finish` refuses to start. |
-| `PhysicsTransformConfig::transform_to_position` | `false` | avian would adopt a blended or camera-moved `Transform` as the body's place. A body spawned with a `Transform` is placed once, when its `RigidBody` is added. |
+| `PhysicsTransformConfig` | everything `false` (`presentation_transform_config()`) | The simulation is `Position`/`Rotation`; `Transform` is built from them in `TickedPresentation`. With the `Transform` → `Position` copy on, avian adopted a blended or camera-moved transform as the body's place; with the copy back, the picture was written inside the step. A body spawned with a `Transform` is placed once, when its `RigidBody` is added. |
+| `Collider` requires `GlobalTransform`; scale one | always | avian attaches a collider to its body only through a `GlobalTransform`, and sizes it from one — a headless body with neither collided with nothing. A collider on a child entity panics. |
 | `ContactGraph`, `ConstraintGraph`, `JointGraph` | rollback-only ticked resources, kept on leave | The solver reads last step's manifolds and the constraint colouring before it reads any body. Without them the replay diverged in every body at its first tick. |
 | `PhysicsIslands`, `BodyIslandNode` | rollback-only, **only with `allow_sleeping()`** | Islands exist only then, and have to agree with the contact graph when they do. |
 | `TickedSimulationSet::{Input, BeforePhysics, Physics, AfterPhysics}` | chained; avian's sets inside `Physics` | Where a game's systems go. |
 
 Opt-outs, each for a solo game that never rolls back: `allow_sleeping()` (which brings the
-islands back), `positions_from_transforms()`. `physics_added_by_the_game()` when
-`PhysicsPlugins` carry a length unit or collision hooks — then add them as
+islands back). `physics_added_by_the_game()` when `PhysicsPlugins` carry a length unit or
+collision hooks — then insert `presentation_transform_config()` first and add them as
 `PhysicsPlugins::new(TickedSimulation).build().disable::<IslandPlugin>().disable::<IslandSleepingPlugin>()`,
 or the plugin's `finish` panics naming the fix.
 
