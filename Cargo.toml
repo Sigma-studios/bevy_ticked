@@ -43,8 +43,9 @@ tracing = { version = "0.1", features = [
 ] }
 
 [dev-dependencies]
-# The tests and examples run whole apps; the library itself only needs the ECS.
-bevy = "0.19"
+# The tests and examples run whole apps; the library itself only needs the ECS. `debug` keeps
+# system names, which the transform guard's tests read.
+bevy = { version = "0.19", features = ["debug"] }
 avian3d = "0.7"
 # The source guard and golden helpers; tests only.
 bevy_ticked_testing = { path = "crates/bevy_ticked_testing" }

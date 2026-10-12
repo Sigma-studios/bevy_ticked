@@ -27,26 +27,29 @@ const LOCAL: u128 = 7;
 const REMOTE: u128 = 9;
 const TICK: Duration = Duration::from_micros(15_625);
 
-/// `Pos += input.dx` for the owner's input, held; and `Transform.x = Pos` for the renderer.
+/// `Pos += input.dx` for the owner's input, held.
 fn integrate(
     tick: Res<CurrentTick>,
     queue: Res<InputQueue<Input>>,
-    mut bodies: Query<(&Owner, &mut Pos, Option<&mut Transform>)>,
+    mut bodies: Query<(&Owner, &mut Pos)>,
 ) {
     let inputs = queue.at_tick_or_last(tick.0);
-    for (owner, mut pos, transform) in &mut bodies {
+    for (owner, mut pos) in &mut bodies {
         if let Some(input) = inputs.get(&owner.0) {
             pos.0 += input.dx;
-        }
-        if let Some(mut transform) = transform {
-            transform.translation.x = pos.0 as f32;
         }
     }
 }
 
-/// `Transform` is registered for rollback, so a correction that reaches back before the
-/// transforms existed would strip them; let enough ticks pass that every snapshot in these
-/// tests lands inside the transforms' history.
+/// `Transform.x = Pos` for the renderer, after every tick and after a snapshot's replay.
+fn present(mut bodies: Query<(&Pos, &mut Transform)>) {
+    for (pos, mut transform) in &mut bodies {
+        transform.translation.x = pos.0 as f32;
+    }
+}
+
+/// Let enough ticks pass after the transforms go on that the interpolation has recorded a pair,
+/// and every snapshot in these tests lands well inside the history.
 const WARM_UP: usize = 24;
 
 fn warm_up(app: &mut App) {
@@ -66,8 +69,8 @@ fn client() -> App {
         .add_plugins((TickedInterpolationPlugin, TickedSmoothingPlugin))
         .insert_resource(TimeUpdateStrategy::ManualDuration(TICK))
         .register_networked_ticked_component::<Pos>("Pos")
-        .register_ticked_component::<Transform>()
-        .add_systems(TickedSimulation, integrate);
+        .add_systems(TickedSimulation, integrate)
+        .add_systems(TickedPresentation, present);
     app.insert_resource(LocalClientPlayer(LOCAL));
     app.update();
     app
@@ -363,42 +366,6 @@ fn a_correction_beyond_max_offset_is_shown_as_a_jump() {
         (shown_x(&mut app, 2) - 500.0).abs() < 1e-3,
         "{}",
         shown_x(&mut app, 2)
-    );
-}
-
-#[test]
-fn the_simulation_never_sees_the_smoothing_offset() {
-    #[derive(Resource, Default)]
-    struct SeenInTick(Vec<f32>);
-    let mut app = client();
-    sync(&mut app);
-    with_transforms(&mut app);
-    app.init_resource::<SeenInTick>().add_systems(
-        TickedSimulation,
-        (|bodies: Query<(&TickTrackedEntity, &Transform, &Pos)>, mut seen: ResMut<SeenInTick>| {
-            for (t, transform, pos) in &bodies {
-                if t.0 == 2 {
-                    seen.0.push(transform.translation.x - pos.0 as f32);
-                }
-            }
-        })
-        .after(integrate),
-    );
-    let lead = app
-        .world()
-        .resource::<ClientTickBuffer>()
-        .target_replay_distance;
-    let current = app.world().resource::<CurrentTick>().0;
-    let packet = body(&app, current - lead, 0, 1);
-    deliver(&mut app, packet);
-    for _ in 0..10 {
-        app.update();
-    }
-    let seen = &app.world().resource::<SeenInTick>().0;
-    assert!(!seen.is_empty());
-    assert!(
-        seen.iter().all(|d| d.abs() < 1e-3),
-        "inside a tick the transform is the simulation's, never the smoothed one: {seen:?}"
     );
 }
 

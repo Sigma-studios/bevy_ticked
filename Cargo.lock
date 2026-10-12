@@ -1048,7 +1048,7 @@ dependencies = [
 [[package]]
 name = "bevy_elan"
 version = "0.1.0"
-source = "git+https://github.com/Sigma-dev/bevy_elan?rev=fb453b3#fb453b3275ae914b4e6a81e813ff1c011bffbcab"
+source = "git+https://github.com/Sigma-dev/bevy_elan?rev=9ad6f71#9ad6f719f937c5d02d7b5cb60b731cd785358a69"
 dependencies = [
  "avian3d",
  "bevy",
@@ -2024,6 +2024,7 @@ dependencies = [
  "bevy_ensemble_steam",
  "bevy_ensemble_webrtc",
  "bevy_ticked",
+ "bevy_ticked_avian",
  "bevy_ticked_networking_ensemble",
  "bevy_ticked_testing",
  "serde",

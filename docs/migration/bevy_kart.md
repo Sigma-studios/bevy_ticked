@@ -22,9 +22,10 @@ different numbers; keep the RNG in a ticked resource seeded from the tick or a n
 every reach; add `tests/sim_is_deterministic.rs` from the examples in this repository.
 
 **Watch:** bodies the game positioned through `Transform` after spawn. The bundle turns avian's
-`Transform` → `Position` sync off; move a kart by `Position`, or opt back in with
-`positions_from_transforms()` and accept that a rollback then depends on nothing having touched
-`Transform` between ticks.
+`Transform` → `Position` sync off; move a kart by `Position`. Since T21 the sync is off in the
+other direction too: the karts, items, rockets and mines are drawn from `Position`/`Rotation` by a
+`TickedPresentation` system, the wheel offsets the controller reads become a component, and the
+steering's wheel rotation moves to the presentation.
 
 ## Host changes (T17, E5)
 

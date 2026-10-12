@@ -6,7 +6,7 @@ use bevy_ensemble::{
 };
 use bevy_ensemble_webrtc::{BevyEnsembleWebrtcPlugin, JoinWebrtcLobby, RefreshLobbyList};
 use bevy_ticked::prelude::*;
-use bevy_ticked_avian::avian2d::TickedAvianPlugin;
+use bevy_ticked_avian::avian2d::{TickedAvianPlugin, presentation_transform_config};
 use bevy_ticked_networking::prelude::*;
 use bevy_ticked_networking_ensemble::local_session::{self, TickedLocalSessionPlugin};
 use bevy_ticked_networking_ensemble::{
@@ -86,7 +86,10 @@ fn main() {
         })
         // avian on the tick, replay-safe: the four body components registered under
         // `avian::*`, sleeping off, the contact graph rolled back, bodies
-        // placed by `Position`. The example used to write the registrations by hand.
+        // placed by `Position`. The example used to write the registrations by hand. avian's
+        // transform handling is off — the picture is built after the tick, below — and that is
+        // decided while the physics plugins build, so the config goes in first.
+        .insert_resource(presentation_transform_config())
         .add_plugins(PhysicsPlugins::new(TickedSimulation).with_length_unit(1.0))
         .add_plugins(TickedAvianPlugin::default())
         .insert_resource(Gravity(Vec2::ZERO))
@@ -133,14 +136,10 @@ fn main() {
         // Simulation systems (run inside TickedSimulation)
         .add_systems(
             TickedSimulation,
-            (
-                apply_inputs,
-                move_bullets,
-                bullet_collision,
-                sync_bullet_transforms,
-            )
-                .chain(),
+            (apply_inputs, move_bullets, bullet_collision).chain(),
         )
+        // What is drawn, built from the tick's state after every tick
+        .add_systems(TickedPresentation, place_bodies)
         // React to networked entity lifecycle
         .add_observer(on_entity_spawned)
         .add_observer(on_replication_mode_changed)
@@ -735,46 +734,35 @@ fn on_replication_mode_changed(
         .insert(body_kind(local_client.as_deref(), owner, Some(mode)));
 }
 
-/// Bullets have no physics body, so nothing writes their transform inside the tick the way
-/// avian writes a player's; done here, after they moved, so `TickedInterpolation` records one
-/// state per tick and blends between them.
-fn sync_bullet_transforms(
-    mut bullets: Query<(&Position, &EntityKind, &mut Transform), With<TickTrackedEntity>>,
+/// Every tracked body's transform, from its `Position` and aim, after every tick: the
+/// simulation never writes a `Transform`, and `TickedInterpolation` blends what this records.
+fn place_bodies(
+    mut tracked: Query<
+        (&Position, &AimAngle, &EntityKind, &mut Transform),
+        With<TickTrackedEntity>,
+    >,
 ) {
-    for (pos, kind, mut transform) in bullets.iter_mut() {
+    for (pos, aim, kind, mut transform) in tracked.iter_mut() {
+        transform.translation = pos.0.extend(0.0);
         if *kind == EntityKind::Bullet {
-            transform.translation = pos.0.extend(0.0);
+            transform.rotation = Quat::from_rotation_z(aim.0);
         }
     }
 }
 
-/// Per-frame visuals that are not the position: avian writes a player's transform inside the
-/// tick and bullets get theirs from `sync_bullet_transforms`; `TickedInterpolation` blends
-/// both for the renderer, so writing translations here would only fight it.
+/// The laser points where the player aims. A child of the body, so it turns without the body's
+/// own transform — which `place_bodies` keeps — being touched per frame.
 fn sync_visuals(
-    mut tracked: Query<
-        (&AimAngle, &EntityKind, &mut Transform, Option<&Children>),
-        With<TickTrackedEntity>,
-    >,
+    tracked: Query<(&AimAngle, &EntityKind, Option<&Children>), With<TickTrackedEntity>>,
     mut child_transforms: Query<&mut Transform, Without<TickTrackedEntity>>,
 ) {
-    for (aim, kind, mut transform, children) in tracked.iter_mut() {
-        match kind {
-            EntityKind::Player => {
-                // Rotate the laser child instead of the player entity.
-                // Avian owns the player's Transform.rotation (via physics Rotation),
-                // so writing to it here would fight with avian's transform sync and
-                // cause jitter during rollback+replay on the client.
-                if let Some(children) = children {
-                    for child in children.iter() {
-                        if let Ok(mut ct) = child_transforms.get_mut(child) {
-                            ct.rotation = Quat::from_rotation_z(aim.0);
-                        }
-                    }
-                }
-            }
-            EntityKind::Bullet => {
-                transform.rotation = Quat::from_rotation_z(aim.0);
+    for (aim, kind, children) in tracked.iter() {
+        if *kind != EntityKind::Player {
+            continue;
+        }
+        for child in children.into_iter().flatten() {
+            if let Ok(mut ct) = child_transforms.get_mut(*child) {
+                ct.rotation = Quat::from_rotation_z(aim.0);
             }
         }
     }

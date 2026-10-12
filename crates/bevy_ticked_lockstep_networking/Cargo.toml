@@ -24,6 +24,8 @@ bevy_ticked_networking_ensemble = { path = "../bevy_ticked_networking_ensemble",
 # controllers by. Without it every system is "<Enable the debug feature to see the name>".
 bevy = { version = "0.19", features = ["debug"] }
 avian2d = { version = "0.7", features = ["serialize"] }
+# avian under the tick in the block_placer example: no transform handling inside the tick.
+bevy_ticked_avian = { path = "../bevy_ticked_avian", default-features = false, features = ["2d"] }
 # Two peers in one process, over a link that can be told to drop and reorder. The checksum
 # exchange is the one thing here whose bug was that it was never run against a wire.
 bevy_ensemble_loopback = { workspace = true }

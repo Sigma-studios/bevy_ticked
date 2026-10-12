@@ -239,7 +239,9 @@ pub fn run_tick_schedule(world: &mut World, tick: Tick, schedule: impl ScheduleL
     // first tick of every web build down with it. The platform clock is `web_time` on wasm,
     // which reads `performance.now()`, and `std` everywhere else.
     let started = bevy::platform::time::Instant::now();
+    let guarded = crate::transform_guard::begin(world);
     world.run_schedule(schedule);
+    crate::transform_guard::end(world, guarded);
     let elapsed = started.elapsed();
 
     restore_frame_clocks(world, frame_clocks);

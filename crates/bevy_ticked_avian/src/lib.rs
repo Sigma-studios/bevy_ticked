@@ -36,14 +36,16 @@
 //! `PhysicsPlugins` itself has to leave them out the same way (`.build().disable::<IslandPlugin>()
 //! .disable::<IslandSleepingPlugin>()`), and `finish` refuses to start if it did not.
 //!
-//! **Transform → Position** is off. avian copies a changed `Transform` into `Position` before
-//! each step; the renderer's blended transform, or one the game moved for a camera, would be
-//! adopted by the simulation as the body's place (the audit's probe: 75 units in 99 ticks at
-//! 64 units a second). A body is placed by `Position` and `Rotation`; the plugin initialises
-//! both from `Transform` once, when a `RigidBody` is added with a non-identity `Transform`
-//! and default `Position`/`Rotation`, so `Transform::from_xyz` at spawn keeps working for root
-//! entities. `positions_from_transforms()` turns the sync back on for a solo game that moves
-//! bodies through `Transform` and never rolls back.
+//! **`Transform` is not avian's.** The simulation is `Position` and `Rotation`; what is drawn is
+//! built from them in `TickedPresentation`, after the tick. So avian's transform handling is off in
+//! every direction (`presentation_transform_config()`): no `Transform` → `Position` copy
+//! before a step (the renderer's blended transform used to be adopted as the body's place: 75
+//! units in 99 ticks at 64 units a second), no `Position` → `Transform` copy after one, no
+//! propagation before the step, and no collider scale taken from a transform. A body spawned with
+//! only a `Transform` is placed from it once, when its `RigidBody` arrives, so `Transform::from_xyz`
+//! at spawn keeps working. Every collider is given a `GlobalTransform` — an identity frame nothing
+//! updates — because avian attaches a collider to its body only through one; and a collider on a
+//! child of its body, whose offset avian would take from the child's `Transform`, panics.
 //!
 //! **The solver's own state is rolled back.** avian keeps every contact manifold between
 //! steps — anchors, feature ids, the impulses of the previous step — and the solver reads it
@@ -149,11 +151,22 @@ macro_rules! ticked_avian {
         pub allow_sleeping: bool,
         /// Do not add `PhysicsPlugins` even if none are present.
         pub physics_added_by_the_game: bool,
-        /// Keep avian's `Transform` → `Position` sync on. Solo games only.
-        pub positions_from_transforms: bool,
         /// Orient contact pairs, colour contact constraints and order joints by tracked id rather
         /// than by spawn order. On by default; see the crate docs.
         pub canonical_solve_order: bool,
+    }
+
+    /// avian's transform handling under the tick: none. No sync in either direction, no
+    /// propagation before the step, no collider scale taken from a `Transform`. The plugin inserts
+    /// it; a game that adds `PhysicsPlugins` itself inserts it **before** them — avian decides at
+    /// build time whether a `Position` requires a `Transform`.
+    pub fn presentation_transform_config() -> PhysicsTransformConfig {
+        PhysicsTransformConfig {
+            propagate_before_physics: false,
+            transform_to_position: false,
+            position_to_transform: false,
+            transform_to_collider_scale: false,
+        }
     }
 
     impl Default for TickedAvianPlugin {
@@ -161,7 +174,6 @@ macro_rules! ticked_avian {
             Self {
                 allow_sleeping: false,
                 physics_added_by_the_game: false,
-                positions_from_transforms: false,
                 canonical_solve_order: true,
             }
         }
@@ -179,13 +191,6 @@ macro_rules! ticked_avian {
             self
         }
 
-        /// Keep avian reading `Transform` into `Position` every step. A rollback then depends on
-        /// nothing having touched `Transform` between ticks; solo games only.
-        pub fn positions_from_transforms(mut self) -> Self {
-            self.positions_from_transforms = true;
-            self
-        }
-
         /// Leave contacts and joints in avian's own order, which follows spawn order. Two peers
         /// that spawned the same bodies in different orders then solve every contact and every
         /// joint differently. For a game that never sends a snapshot.
@@ -197,6 +202,41 @@ macro_rules! ticked_avian {
 
     impl Plugin for TickedAvianPlugin {
         fn build(&self, app: &mut App) {
+            {
+                let physics_added = app.is_plugin_added::<$avian::schedule::PhysicsSchedulePlugin>();
+                if physics_added {
+                    let config = app.world().get_resource::<PhysicsTransformConfig>();
+                    assert!(
+                        config == Some(&presentation_transform_config()),
+                        "TickedAvianPlugin: the game added PhysicsPlugins with avian's transform \
+                         handling on. Insert `presentation_transform_config()` before adding \
+                         them: avian decides at build time whether a `Position` requires a \
+                         `Transform`"
+                    );
+                } else {
+                    app.insert_resource(presentation_transform_config());
+                }
+                // avian's own systems declare the transforms they no longer touch, and it puts
+                // bevy's propagation into the tick as well, behind `propagate_before_physics`.
+                // The write check still catches any of them that runs.
+                bevy_ticked::transform_guard::TransformGuardAppExt::allow_transform_access(
+                    app,
+                    concat!(stringify!($avian), "::"),
+                );
+                bevy_ticked::transform_guard::TransformGuardAppExt::allow_transform_access(
+                    app,
+                    "bevy_transform::systems::",
+                );
+                // avian attaches a collider to its body only once both have a `GlobalTransform`:
+                // without one, `ColliderOf` is set and the body never learns it has a collider, so
+                // its bounds are never updated and it falls through everything. A body the
+                // simulation spawns on a peer that draws nothing has no transform at all, so every
+                // collider is given the frame — not a `Transform`, which nothing would then keep —
+                // and an identity one is all the hook needs.
+                app.register_required_components::<Collider, GlobalTransform>();
+                app.add_observer(no_child_colliders)
+                    .add_observer(unit_collider_scale);
+            }
             if !self.physics_added_by_the_game
                 && !app.is_plugin_added::<$avian::schedule::PhysicsSchedulePlugin>()
             {
@@ -238,12 +278,7 @@ macro_rules! ticked_avian {
                 }
             }
 
-            if !self.positions_from_transforms {
-                app.world_mut()
-                    .get_resource_or_insert_with(PhysicsTransformConfig::default)
-                    .transform_to_position = false;
-                app.add_observer(place_from_transform_once);
-            }
+            app.add_observer(place_from_transform_once);
 
             app.configure_sets(
                 TickedSimulation,
@@ -306,6 +341,37 @@ macro_rules! ticked_avian {
                      or `allow_sleeping()` for a solo game that never rolls back"
                 );
             }
+        }
+    }
+
+    /// A collider attached to a body it is not: a child collider, whose offset from the body
+    /// avian takes from the child's `Transform` — the drawn value, in a game whose simulation
+    /// leaves transforms to the presentation.
+    fn no_child_colliders(insert: On<Insert, ColliderOf>, colliders: Query<&ColliderOf>) {
+        if let Ok(of) = colliders.get(insert.entity)
+            && of.body != insert.entity
+        {
+            panic!(
+                "TickedAvianPlugin: collider {} is attached to body \
+                 {}, which is another entity. avian places a child collider from its `Transform`, \
+                 which this game leaves to the presentation; put the collider on the body itself",
+                insert.entity, of.body
+            );
+        }
+    }
+
+    /// A collider is the size it was made, never scaled by a `Transform`.
+    ///
+    /// avian sets a new collider's scale from its `GlobalTransform` — from **zero** when there is
+    /// none, which made every body the simulation spawned headless meet nothing — and from whatever
+    /// a game's sprite transform happens to say when there is one. Neither is the simulation's to
+    /// decide by, so the scale is put back to one. The per-step scale sync is off in this mode, so
+    /// this is the scale it keeps; avian recomputes the mass from it.
+    fn unit_collider_scale(insert: On<Insert, Collider>, mut colliders: Query<&mut Collider>) {
+        if let Ok(mut collider) = colliders.get_mut(insert.entity)
+            && collider.scale() != $avian::math::Vector::ONE
+        {
+            collider.set_scale($avian::math::Vector::ONE, 10);
         }
     }
 

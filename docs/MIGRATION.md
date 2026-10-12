@@ -42,6 +42,53 @@ obeys; `docs/avian.md` the physics bundle.
 | a game's `keep_the_lobby_running` | `PausePolicy::automatic_pauses = false` while not in a match | T20 |
 | `ReadoptAfterHostChange` | gone: a host change re-enters the role in one door | T20 |
 | avian's spawn-order solve (implicit) | canonical tracked-id solve order, on by default; `TickedAvianPlugin::spawn_order_dependent_solve()` for the old one | T20 |
+| a system in `TickedSimulation` writing `Transform` "for the renderer" | the same system in `TickedPresentation` | T21 |
+| `TickedSystems::Restore` | gone: nothing in the tick reads a `Transform`, so nothing is put back | T21 |
+| `TickedAvianPlugin::positions_from_transforms()` | gone | T21 |
+| `PhysicsPlugins` added by the game with avian's default transform config | `insert_resource(presentation_transform_config())` before them | T21 |
+| re-inserting `TickedInterpolation::default()` to stop a teleport being blended | `Teleported(tick)`, rolled back with the body | T21 |
+| `SmoothingOffset { .., applied_translation, applied_rotation }` | `SmoothingOffset { translation, rotation }` | T21 |
+
+## T21 — the picture is built after the tick
+
+The simulation neither reads nor writes `Transform` or `GlobalTransform`. Positions live in
+simulated components — avian's `Position`/`Rotation`, or the game's own — and what is drawn is
+built from them in a new schedule, `TickedPresentation`, which `TickedLoop` runs after every tick
+(`TickedSystems::Present`, before `PostTick` records what the interpolation blends) and a client
+runs again straight after a snapshot's replay (`ClientSet::PresentSnapshot`, before the smoothing
+measures the correction). Before, a system in the tick wrote the transform, avian copied
+`Position` into it during the step, and `TickedSystems::Restore` put the true transform back
+before every tick so the renderer's blend could not leak in. Anything that moved a body after
+that write left the picture a tick behind, and every replay rewrote presentation state.
+
+**The guard.** `TickedPlugin { transform_guard, .. }` — on by default with debug assertions —
+panics when a `TickedSimulation` system declares access to `Transform` or `GlobalTransform`
+(checked once at startup, by system name: bevy's `debug` feature is needed, and without it the
+check is skipped with a warning) or changes one it did not insert during a tick (checked around
+every run, replays included). Inserting a transform on a body the tick spawns is allowed.
+`TransformGuardAppExt::allow_transform_access(prefix)` lets a dependency's systems through the
+read check; `bevy_ticked_avian` allows avian's own.
+
+**avian.** `TickedAvianPlugin` turns avian's transform handling off in every direction
+(`presentation_transform_config()`), gives every collider a `GlobalTransform` (avian attaches a
+collider to its body only through one), sizes colliders at scale one, and panics on a collider on
+a child entity. A game that adds `PhysicsPlugins` itself inserts the config **before** them, or
+the plugin refuses to start. A body spawned with only a `Transform` is still placed from it once.
+
+**Interpolation and smoothing.** `TickedInterpolation` blends what the presentation built. A
+body that jumps carries `Teleported(tick)` — stamped by the simulation, registered for rollback
+by the game — and is drawn where it arrived. `CorrectionSmoothing` requires
+`TickedInterpolation`, measures a correction against the pose last recorded, and lays its offset
+over the pose the interpolation rebuilds each frame, so it never needs undoing.
+
+**Do** move every system that writes a `Transform` from simulated state out of
+`TickedSimulation` into `TickedPresentation`; give every interpolated entity's presentation a
+system that writes its transform each tick (avian no longer does it for bodies); stamp
+`Teleported` where the simulation teleports; read `Rotation`, not `Transform.rotation`, in
+controllers. **Delete** `TickedSystems::Restore` systems, `positions_from_transforms()`, and any
+re-insert of `TickedInterpolation` used as a snap. **Watch** game logic that reads a child's
+local `Transform` (a wheel offset, a muzzle): it becomes a simulated component. Headless test
+harnesses that read a `Transform` after a tick need the presentation systems added.
 
 ## T20 — the session lifecycle
 
@@ -308,7 +355,7 @@ put your systems in `TickedSimulationSet::{Input, BeforePhysics, AfterPhysics}`;
 bodies by `Position`. **Delete** the `avian::*` registrations, `transform_to_position:
 false`, and any `SolverConfig`/sleeping configuration the plugin now owns. **Watch** a
 game that positioned bodies through `Transform` after spawn: that path is off
-(`positions_from_transforms()` to keep it, solo only).
+(`positions_from_transforms()` kept it, solo only, until T21 removed it).
 
 ### `TickedInputPlugin`
 
@@ -1267,7 +1314,7 @@ Nothing on the wire changed. Every peer should still be rebuilt: the client's ro
 restores more, and a client from before this phase disagrees with one from after about what a
 correction leaves behind.
 
-### The blend never reaches the simulation (`TickedSystems::Restore`)
+### The blend never reaches the simulation (`TickedSystems::Restore`, removed in T21)
 
 `TickedInterpolationPlugin` writes a blended `Transform` for the renderer. It used to stay in
 the component into the next tick, which then integrated from a transform `fraction` of the way

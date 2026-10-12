@@ -16,7 +16,6 @@ pub mod minimal {
     use bevy_ticked::checksum::WorldHash;
     use bevy_ticked::interpolation::{TickedInterpolation, TickedInterpolationPlugin};
     use bevy_ticked::lifetimes::TickedEntityCommandsExt;
-    use bevy_ticked::registry::TickedAppExt;
     use bevy_ticked::tick::CurrentTick;
     use bevy_ticked::tracked_entity::{
         LocalSpawnerSlot, SpawnerSlot, TickTrackedEntity, TrackedIdAllocator, TrackedSpawner,
@@ -237,19 +236,14 @@ pub mod minimal {
     /// without a `Transform`. A test about how a body is *drawn* installs this; one about
     /// where it *is* does not.
     ///
-    /// `Transform` is registered for rollback (never the wire), so a replay restores it and
-    /// re-derives it from the replayed `Pos` rather than carrying the blend the renderer last
-    /// wrote — the T4 failure — and so a corrupted transform is put right by the next snapshot
-    /// the way a corrupted `Pos` is.
+    /// The transform is the picture's, built from `Pos` in `TickedPresentation` after every tick
+    /// and after a snapshot's replay, as a game builds it: the simulation never touches it, so
+    /// it needs no history of its own and a replay cannot leave a stale one behind.
     pub fn install_with_transform(app: &mut App) {
         install(app);
-        app.register_ticked_component_as::<Transform>("Transform")
-            .add_plugins(TickedInterpolationPlugin)
+        app.add_plugins(TickedInterpolationPlugin)
             .add_observer(attach_transform)
-            .add_systems(
-                TickedSimulation,
-                sync_transform.after(integrate).in_set(MinimalSet::Simulate),
-            );
+            .add_systems(bevy_ticked::TickedPresentation, sync_transform);
     }
 
     fn transform_at(pos: i64) -> Transform {
@@ -273,13 +267,9 @@ pub mod minimal {
         }
     }
 
-    /// `Transform.translation.x = Pos`, after the integration, so the blend and the smoothing
-    /// offset have a float to work on.
-    ///
-    /// Self-healing: a rollback restore removes a rollback-only component from every entity
-    /// the restored tick has no record of, and a body a snapshot spawned mid-replay is exactly
-    /// that for the ticks before its first capture. A body found bare gets its transform back
-    /// before this tick is captured, so it is never bare twice.
+    /// `Transform.translation.x = Pos`, so the blend and the smoothing offset have a float to
+    /// work on. A body that has none yet — one a snapshot spawned, before its observer's insert
+    /// landed — is given one.
     pub fn sync_transform(
         mut bodies: Query<(Entity, &Pos, Option<&mut Transform>), With<TickTrackedEntity>>,
         mut commands: Commands,
@@ -294,9 +284,9 @@ pub mod minimal {
         }
     }
 
-    /// [`spawn_player`] with the transform and interpolation state already on the body, so its
-    /// tick-0 capture holds a real transform rather than the observer's deferred one. Only
-    /// meaningful under [`install_with_transform`]; elsewhere the transform is dead weight.
+    /// [`spawn_player`] with the transform and interpolation state already on the body, so it is
+    /// drawn from the first frame rather than from the observer's deferred insert. Only meaningful
+    /// under [`install_with_transform`]; elsewhere the transform is dead weight.
     pub fn spawn_player_with_transform(world: &mut World, uuid: u128) -> Entity {
         let id = world.resource_mut::<TrackedIdAllocator>().next_authority();
         world

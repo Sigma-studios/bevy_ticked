@@ -13,6 +13,7 @@ pub mod tick_types;
 pub mod time;
 pub mod tracked_entity;
 pub mod tracked_index;
+pub mod transform_guard;
 pub mod world_actions;
 
 use bevy::app::{MainScheduleOrder, RunFixedMainLoop, RunFixedMainLoopSystems};
@@ -56,13 +57,6 @@ pub struct TickedLoop;
 /// System sets for ordering relative to tick advancement, within [`TickedLoop`].
 #[derive(SystemSet, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum TickedSystems {
-    /// The first thing in the loop: put the world back the way the simulation left it.
-    ///
-    /// Anything that writes a *presentation* value into a simulated component between ticks —
-    /// [`TickedInterpolationPlugin`](interpolation::TickedInterpolationPlugin) blending a
-    /// `Transform` for the renderer — undoes that write here, before any system in the loop
-    /// reads the component. Nothing else belongs in this set.
-    Restore,
     /// Runs before tick advancement (e.g. client rollback on snapshot).
     PreTick,
     /// Sample the local player's input for the tick about to run, once per tick.
@@ -74,8 +68,32 @@ pub enum TickedSystems {
     SampleInput,
     /// The core tick advancement: increment, run TickedSimulation, capture.
     Tick,
+    /// Run [`TickedPresentation`] on the state the tick just produced. After the tick, before
+    /// anything in [`PostTick`](TickedSystems::PostTick) records what is drawn.
+    Present,
     /// Runs after tick advancement (e.g. server snapshot broadcast, client input send).
     PostTick,
+}
+
+/// The schedule that turns simulated state into what is drawn: a `Transform` from a position,
+/// a sprite's angle from a cooldown, a scale from an age.
+///
+/// Run once per pass of [`TickedLoop`], in [`TickedSystems::Present`], after the tick and before
+/// [`TickedInterpolation`](interpolation::TickedInterpolation) records the pose it will blend.
+/// A client also runs it straight after a snapshot's replay, so what a correction moved is
+/// drawn where it moved to before the smoothing measures it.
+///
+/// This is the half of a game that only *reads* the simulation. Writing a presentation value
+/// from inside [`TickedSimulation`] instead puts the renderer's state in the rollback path: it is
+/// rewritten on every replay, and whatever moves a body after the write leaves the picture a
+/// tick behind. [`transform_guard`] panics on that in a debug build.
+#[derive(ScheduleLabel, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct TickedPresentation;
+
+/// Run [`TickedPresentation`] now. An exclusive system, for the places outside
+/// [`TickedSystems::Present`] that need the drawn state brought up to date.
+pub fn run_presentation(world: &mut World) {
+    world.run_schedule(TickedPresentation);
 }
 
 /// The schedule that drives [`TickedLoop`] when the tick rate is decoupled from
@@ -181,6 +199,11 @@ pub struct TickedPlugin {
     /// `Some(n)` is a game's own choice and nothing replaces it. See
     /// [`HistoryWindowChosen`].
     pub history_ticks: Option<Ticks>,
+    /// Install [`TransformGuardPlugin`](transform_guard::TransformGuardPlugin): panic when the
+    /// simulation reads or writes `Transform`. On by default in a build with debug assertions —
+    /// development and tests — and off in a release build, where the check would cost a scan of
+    /// every transform per tick to find a mistake nobody is there to see.
+    pub transform_guard: bool,
     /// How [`TickedSimulation`] runs its systems.
     ///
     /// Single-threaded by default, because the simulation is supposed to be deterministic and
@@ -210,6 +233,7 @@ impl Default for TickedPlugin {
             // max_delta.
             max_ticks_per_frame: 16,
             history_ticks: None,
+            transform_guard: cfg!(debug_assertions),
             simulation_executor: SimulationExecutor::SingleThreaded,
         }
     }
@@ -248,6 +272,7 @@ impl Plugin for TickedPlugin {
             // has one, and a client checks for it.
             .register_session_resource::<TickRateDilation>(SessionScope::Role)
             .init_schedule(TickedSimulation)
+            .init_schedule(TickedPresentation)
             .init_schedule(TickedLoop)
             .add_message::<StepForward>()
             .add_message::<StepBackward>()
@@ -268,19 +293,24 @@ impl Plugin for TickedPlugin {
         app.configure_sets(
             TickedLoop,
             (
-                TickedSystems::Restore,
                 TickedSystems::PreTick,
                 TickedSystems::SampleInput,
                 TickedSystems::Tick,
+                TickedSystems::Present,
                 TickedSystems::PostTick,
             )
                 .chain(),
         )
-        .add_systems(TickedLoop, advance_tick_system.in_set(TickedSystems::Tick));
+        .add_systems(TickedLoop, advance_tick_system.in_set(TickedSystems::Tick))
+        .add_systems(TickedLoop, run_presentation.in_set(TickedSystems::Present));
         if self.simulation_executor == SimulationExecutor::SingleThreaded {
             app.edit_schedule(TickedSimulation, |schedule| {
                 schedule.set_executor(bevy::ecs::schedule::SingleThreadedExecutor::new());
             });
+        }
+
+        if self.transform_guard {
+            app.add_plugins(transform_guard::TransformGuardPlugin);
         }
 
         app.insert_resource(MaxTicksPerFrame(self.max_ticks_per_frame));

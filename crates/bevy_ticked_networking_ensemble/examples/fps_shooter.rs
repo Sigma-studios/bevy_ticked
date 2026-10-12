@@ -20,7 +20,7 @@ use bevy_ensemble::{
 };
 use bevy_ensemble_webrtc::{BevyEnsembleWebrtcPlugin, JoinWebrtcLobby, RefreshLobbyList};
 use bevy_ticked::prelude::*;
-use bevy_ticked_avian::avian3d::TickedAvianPlugin;
+use bevy_ticked_avian::avian3d::{TickedAvianPlugin, presentation_transform_config};
 use bevy_ticked_networking::prelude::*;
 use bevy_ticked_networking_ensemble::local_session::{self, TickedLocalSessionPlugin};
 use bevy_ticked_networking_ensemble::{
@@ -146,7 +146,10 @@ fn main() {
         })
         // avian on the tick, replay-safe: the four body components registered under
         // `avian::*`, sleeping off, the contact graph rolled back, bodies
-        // placed by `Position` (the plugin places a body spawned with a `Transform` once).
+        // placed by `Position` (the plugin places a body spawned with a `Transform` once). avian's
+        // transform handling is off — what is drawn is built after the tick, in `place_bodies` —
+        // and that is decided while the physics plugins build, so the config goes in first.
+        .insert_resource(presentation_transform_config())
         .add_plugins(PhysicsPlugins::new(TickedSimulation))
         .add_plugins(TickedAvianPlugin::default())
         .insert_resource(Gravity(Vec3::NEG_Y * 9.81))
@@ -219,10 +222,12 @@ fn main() {
         )
         .add_systems(
             TickedSimulation,
-            (move_bullets, bullet_collision, sync_bullet_transforms)
+            (move_bullets, bullet_collision)
                 .chain()
                 .after(PhysicsSystems::Writeback),
         )
+        // What is drawn, built from the tick's state after every tick.
+        .add_systems(TickedPresentation, place_bodies)
         // React to networked entity lifecycle
         .add_observer(on_entity_spawned)
         .add_observer(on_replication_mode_changed)
@@ -533,12 +538,10 @@ fn set_controller_time(time: Res<Time>, mut controller_time: ResMut<ControllerTi
 /// put at the authority's state after each snapshot — and takes no input here. That is the
 /// whole of what used to be the "remote body with no input" workaround.
 ///
-/// The body's yaw is written to avian's `Rotation` (not the `Transform`): avian
-/// owns the body Transform, so we let it sync `Rotation -> Transform`, and elan's
-/// `handle_movement` then moves relative to `transform.rotation` — i.e. relative
-/// to where the player is looking. Writing the Transform directly would fight
-/// avian's transform sync and clobber the rolled-back `Position`. Pitch is
-/// view-only and handled per-frame on the camera child by `sync_camera_pitch`.
+/// The body's yaw is written to avian's `Rotation`, the simulation's own: elan's
+/// `handle_movement` moves relative to it — i.e. relative to where the player is looking — and
+/// `place_bodies` turns the drawn body to match after the tick. Pitch is view-only and handled
+/// per-frame on the camera child by `sync_camera_pitch`.
 fn apply_inputs(
     tick: Res<CurrentTick>,
     input_queue: Res<InputQueue<PlayerInput>>,
@@ -856,16 +859,16 @@ fn on_replication_mode_changed(
         .insert(body_kind(local_client.as_deref(), owner, Some(mode)));
 }
 
-/// Copy simulated `Position` onto the render `Transform` for bullets, inside the tick and
-/// after they moved, so `TickedInterpolation` records one state per tick and blends between
-/// them. Player bodies are positioned and oriented by avian's `Position`/`Rotation ->
-/// Transform` sync inside the sim, so their transforms are deliberately not touched here.
-fn sync_bullet_transforms(
-    mut bullets: Query<(&Position, &EntityKind, &mut Transform), With<TickTrackedEntity>>,
+/// Every tracked body's transform from its simulated `Position` (and a player's `Rotation`),
+/// after every tick: the simulation never writes a `Transform`, and `TickedInterpolation` blends
+/// the poses recorded from this.
+fn place_bodies(
+    mut bodies: Query<(&Position, Option<&Rotation>, &mut Transform), With<TickTrackedEntity>>,
 ) {
-    for (pos, kind, mut transform) in bullets.iter_mut() {
-        if *kind == EntityKind::Bullet {
-            transform.translation = pos.0;
+    for (pos, rotation, mut transform) in bodies.iter_mut() {
+        transform.translation = pos.0;
+        if let Some(rotation) = rotation {
+            transform.rotation = rotation.0;
         }
     }
 }

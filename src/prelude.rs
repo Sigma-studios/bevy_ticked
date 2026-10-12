@@ -1,7 +1,7 @@
 pub use crate::{
     ConfiguredTickSource, HistoryWindowChosen, MaxTicksPerFrame, RestoredThisPass, RunTickedLoop,
-    SimulationExecutor, StepOnce, TickSource, TickedLoop, TickedPlugin, TickedSimulation,
-    TickedSystems,
+    SimulationExecutor, StepOnce, TickSource, TickedLoop, TickedPlugin, TickedPresentation,
+    TickedSimulation, TickedSystems,
     checksum::{ChecksumLog, ChecksumLogPlugin, Divergence, WorldHash},
     diagnostics::TickCost,
     events::{
@@ -9,7 +9,8 @@ pub use crate::{
         TickedEvents,
     },
     interpolation::{
-        TickInterpolation, TickedInterpolation, TickedInterpolationPlugin, TickedInterpolationSet,
+        Teleported, TickInterpolation, TickedInterpolation, TickedInterpolationPlugin,
+        TickedInterpolationSet,
     },
     lifetimes::{Lifetime, TickedEntityCommandsExt, Tombstone, TrackedEntityLifetimes},
     registry::{TickedAppExt, TickedComponent, TickedComponentRegistry},
@@ -18,6 +19,7 @@ pub use crate::{
         ResourceActions, TickedResource, TickedResourceAppExt, TickedResourceRegistry,
     },
     rollback::{rollback_and_resimulate, rollback_to_tick},
+    run_presentation,
     session::{PerPeer, SessionAppExt, SessionReset, SessionResources, SessionScope},
     tick::{
         CurrentTick, DEFAULT_TICK_HZ, DEFAULT_TIMESTEP, HISTORY_BUFFER_TICKS, HistoryBufferTicks,
@@ -30,6 +32,7 @@ pub use crate::{
         TrackedIdAllocator, TrackedSpawner, TrackedWorldExt,
     },
     tracked_index::TrackedEntityIndex,
+    transform_guard::{TransformGuard, TransformGuardAppExt, TransformGuardPlugin},
     world_actions::WorldActions,
 };
 

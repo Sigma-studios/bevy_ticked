@@ -17,7 +17,8 @@ avian2d = { version = "0.7", features = ["serialize"], optional = true }
 avian3d = { version = "0.7", features = ["serialize"], optional = true }
 
 [dev-dependencies]
-bevy = "0.19"
+# `debug` keeps system names, which the transform guard's read check matches on.
+bevy = { version = "0.19", features = ["debug"] }
 bevy_ticked_testing = { path = "../bevy_ticked_testing", features = ["avian"] }
 
 [lints.clippy]
