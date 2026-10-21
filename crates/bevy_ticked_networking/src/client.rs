@@ -278,6 +278,7 @@ impl<T: TickedInput> Plugin for TickedClientPlugin<T> {
             app.insert_resource(HistoryBufferTicks(ClientTickBuffer::MAX_TICKS * 2));
         }
         crate::session::install(app);
+        crate::watchdog::install_client(app);
         // Everything the client side learns about one link and one clock, registered with the
         // session so that every door puts it back. Before the registry each of these was reset by
         // hand, in some doors and not others; the last one found was `ClientTickBuffer`, whose
@@ -346,8 +347,12 @@ fn receive_snapshot(
     mut stats: ResMut<ReplayStats>,
     mut history: ResMut<crate::replication::AuthoritativeHistory>,
     mut nack: ResMut<NackFull>,
+    mut watchdog: ResMut<crate::watchdog::SnapshotWatchdog>,
 ) {
     let tick = trigger.event().0.tick;
+    stats.snapshots_received += 1;
+    // A repeat of the applied tick is a held host still talking; see `watchdog`.
+    watchdog.arrived(tick, applied.0 == Some(tick));
     // A delta is rebuilt into the full body it describes the moment it arrives, against the
     // baseline the host built it on. Everything downstream sees full bodies only.
     let mut packet = trigger.event().0.clone();
@@ -1117,16 +1122,23 @@ fn send_local_input<T: TickedInput>(
     mut last_sent_ack: ResMut<LastSentAck>,
     mut commands: Commands,
 ) {
-    if holds.is_held() {
-        return;
-    }
     let Some(local_player) = local_player else {
         return;
     };
-    let inputs: Vec<(Tick, T)> = (tick.0.saturating_sub(INPUT_REDUNDANCY - Ticks::ONE))
-        .through(tick.0)
-        .filter_map(|t| queue.get(t, local_player.0).map(|input| (t, input.clone())))
-        .collect();
+    // A held clock presses nothing. It still asks for a full body when it needs one: a client
+    // held on a pause it can only leave by hearing the host is the one that most needs to.
+    let held = holds.is_held();
+    if held && !nack.0 {
+        return;
+    }
+    let inputs: Vec<(Tick, T)> = if held {
+        Vec::new()
+    } else {
+        (tick.0.saturating_sub(INPUT_REDUNDANCY - Ticks::ONE))
+            .through(tick.0)
+            .filter_map(|t| queue.get(t, local_player.0).map(|input| (t, input.clone())))
+            .collect()
+    };
     // A client at rest has no input to send, but it still acknowledges what it applied: the
     // host builds deltas against the newest acknowledged packet, and a client that went quiet
     // would otherwise be sent keyframes until it moved.

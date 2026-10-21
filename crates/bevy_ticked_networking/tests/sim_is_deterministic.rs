@@ -28,6 +28,20 @@ fn guard() -> SourceGuard {
                 reason: "the same two frame-side systems name the type in their signatures",
                 expires: None,
             },
+            Exception {
+                path: "src/watchdog.rs",
+                needle: "Res<Time<Real>",
+                reason: "the snapshot watchdog counts frame time without the host's word, in \
+                         `PostUpdate`, outside every tick: a silence is a wall-clock fact, and \
+                         the tick clock stands still through exactly the holds it must see past",
+                expires: None,
+            },
+            Exception {
+                path: "src/watchdog.rs",
+                needle: "Time<Real>",
+                reason: "the same two frame-side systems name the type in their signatures",
+                expires: None,
+            },
         ])
         .min_files(3)
 }

@@ -5,6 +5,16 @@ pull requests #1–#14 on this repository are the phases.
 
 ## Unreleased
 
+- **New** — a snapshot watchdog (`watchdog`). A client that has applied nothing from its host
+  for two seconds of frame time (each frame counted up to 250 ms, so a tab back from the
+  background is not one) logs an `error!` with every counter that tells the causes apart, asks
+  for a full body then and every second after — held clock or not — and says so again when
+  snapshots resume; `SnapshotWatchdog::starved_for` is there for a game that would rather leave.
+  A host logs an `error!` for a client whose inputs keep arriving but whose acknowledgement has
+  stood still as long (`AckWatch::unacknowledged`). Both read `SnapshotWatchdogPolicy`.
+  `ReplayStats` gains `snapshots_received` and `dropped_undecodable` (counted by the bridge) and a
+  `since` for windows; the bridge excuses a lobby waiting for a new host. Written after a web
+  client in run-2d played on alone, more than once, with nothing in its console to say why.
 - **Behaviour change** — the picture is built outside the simulation, and the simulation may not
   touch `Transform` (T21). A new schedule, `TickedPresentation`, runs after every tick
   (`TickedSystems::Present`) and, on a client, straight after a snapshot's replay

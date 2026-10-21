@@ -79,6 +79,20 @@ fn publish_ticked_lines(
                 replay.last_replay_distance, replay.skipped_identical, replay.dropped_stale
             ),
         );
+        // Every fate a snapshot can meet on the way in, next to how many arrived: a client
+        // that has stopped applying them reads as one of these climbing.
+        extras.set(
+            "ticked.received",
+            format!(
+                "snapshots in: {} received, {} applied, {} unknown baseline, {} before \
+                 handshake, {} undecodable",
+                replay.snapshots_received,
+                replay.snapshots_applied,
+                replay.dropped_unknown_baseline,
+                replay.dropped_before_handshake,
+                replay.dropped_undecodable
+            ),
+        );
         last.rollbacks = replay.rollbacks;
         last.ticks_replayed = replay.ticks_replayed;
     }

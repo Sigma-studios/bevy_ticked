@@ -25,6 +25,9 @@ use bevy::prelude::*;
 /// [`reset`](Self::reset) to measure a window.
 #[derive(Resource, Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ReplayStats {
+    /// Snapshots that reached the client role: decoded, past the handshake gate, and handed to
+    /// the receiving observer. Everything below is a fate one of these met.
+    pub snapshots_received: u64,
     /// Snapshots applied to the world.
     pub snapshots_applied: u64,
     /// Times the world was restored to a snapshot and predicted ticks replayed.
@@ -50,11 +53,44 @@ pub struct ReplayStats {
     /// Rewinds: an excess lead given back in one step rather than dilated away, each the
     /// ticks this client predicted past a host that had stalled.
     pub snapped_back: u64,
+    /// Snapshot packets that did not decode, counted by the transport bridge.
+    pub dropped_undecodable: u64,
 }
 
 impl ReplayStats {
     pub fn reset(&mut self) {
         *self = Self::default();
+    }
+
+    /// The counts accumulated since `earlier` was read. `last_replay_distance` is a reading, not
+    /// a count, and is this one's.
+    pub fn since(&self, earlier: &Self) -> Self {
+        Self {
+            snapshots_received: self
+                .snapshots_received
+                .saturating_sub(earlier.snapshots_received),
+            snapshots_applied: self
+                .snapshots_applied
+                .saturating_sub(earlier.snapshots_applied),
+            rollbacks: self.rollbacks.saturating_sub(earlier.rollbacks),
+            ticks_replayed: self.ticks_replayed.saturating_sub(earlier.ticks_replayed),
+            skipped_identical: self
+                .skipped_identical
+                .saturating_sub(earlier.skipped_identical),
+            dropped_stale: self.dropped_stale.saturating_sub(earlier.dropped_stale),
+            dropped_before_handshake: self
+                .dropped_before_handshake
+                .saturating_sub(earlier.dropped_before_handshake),
+            last_replay_distance: self.last_replay_distance,
+            dropped_unknown_baseline: self
+                .dropped_unknown_baseline
+                .saturating_sub(earlier.dropped_unknown_baseline),
+            deltas_applied: self.deltas_applied.saturating_sub(earlier.deltas_applied),
+            snapped_back: self.snapped_back.saturating_sub(earlier.snapped_back),
+            dropped_undecodable: self
+                .dropped_undecodable
+                .saturating_sub(earlier.dropped_undecodable),
+        }
     }
 }
 

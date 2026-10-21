@@ -12,5 +12,6 @@ pub mod server;
 pub mod session;
 pub mod smoothing;
 pub mod snapshot;
+pub mod watchdog;
 
 pub use session::{LocalSoloPlayer, SessionDoor, TickedSession, dispose_world, restart_session};
