@@ -209,6 +209,7 @@ impl<T: TickedInput> Plugin for TickedServerPlugin<T> {
         crate::replication::install_owner(app);
         crate::pause::install(app);
         crate::session::install(app);
+        crate::watchdog::install_server(app);
         app.insert_resource(SendEvery(self.send_every.max(Ticks::ONE)))
             .insert_resource(DeltaPolicy {
                 keyframe_every: self.keyframe_every.max(1),
@@ -290,8 +291,10 @@ fn collect_network_inputs<T: TickedInput>(
     mut margins: ResMut<InputMargins>,
     mut newest: ResMut<NewestInputTick>,
     mut stats: ResMut<InputStats>,
+    mut ack_watch: ResMut<crate::watchdog::AckWatch>,
 ) {
     let event = trigger.event();
+    ack_watch.input_from(event.sender);
     let oldest_accepted = tick.0.saturating_sub(window.0);
     let newest_accepted = tick.0.saturating_add(MAX_INPUT_LEAD_TICKS);
     if event.tick < oldest_accepted || event.tick > newest_accepted {

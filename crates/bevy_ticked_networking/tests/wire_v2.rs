@@ -243,7 +243,16 @@ fn client_app() -> App {
 
 #[test]
 fn a_delta_against_an_unknown_baseline_is_dropped_and_a_full_body_asked_for() {
+    #[derive(Resource, Default)]
+    struct AskedForFull(bool);
+
     let mut app = client_app();
+    app.init_resource::<AskedForFull>().add_observer(
+        |sent: On<bevy_ticked_networking::messages::SendNetworkInput<Input>>,
+         mut asked: ResMut<AskedForFull>| {
+            asked.0 |= sent.event().nack_full;
+        },
+    );
     let packet = SnapshotPacket {
         seq: 1,
         tick: Tick(3),
@@ -264,11 +273,11 @@ fn a_delta_against_an_unknown_baseline_is_dropped_and_a_full_body_asked_for() {
             .holds(TickHoldReason::AwaitingSync),
         "still waiting for a world it can apply"
     );
+    // Held, and asking anyway: a clock held until the host's world arrives must not also hold
+    // back the request for it.
     assert!(
-        app.world()
-            .resource::<bevy_ticked_networking::client::NackFull>()
-            .0,
-        "the next input packet asks the host for a full body"
+        app.world().resource::<AskedForFull>().0,
+        "the next input packet asks the host for a full body, held clock or not"
     );
 }
 

@@ -25,4 +25,5 @@ pub use crate::{
         EntityRecord, FullBody, SnapshotBody, SnapshotPacket, apply_full_body, build_full_body,
         decode_packet, encode_packet,
     },
+    watchdog::{SnapshotWatchdog, SnapshotWatchdogPolicy},
 };

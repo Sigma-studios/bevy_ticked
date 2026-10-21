@@ -162,6 +162,7 @@ impl Plugin for TickedEnsembleSessionPlugin {
                     forget_mismatch,
                     end_a_visit_without_a_role,
                     list_recipients,
+                    excuse_the_wait_for_a_new_host,
                 )
                     .chain(),
             );
@@ -612,6 +613,18 @@ fn list_recipients(
     uuids.sort_unstable();
     if recipients.0 != uuids {
         recipients.0 = uuids;
+    }
+}
+
+/// A lobby waiting for its new host hears no snapshots, and is not starved for it.
+fn excuse_the_wait_for_a_new_host(
+    waiting: Query<(), (With<Lobby>, With<AwaitingHost>)>,
+    watchdog: Option<ResMut<bevy_ticked_networking::watchdog::SnapshotWatchdog>>,
+) {
+    if let Some(mut watchdog) = watchdog
+        && !waiting.is_empty()
+    {
+        watchdog.excuse();
     }
 }
 

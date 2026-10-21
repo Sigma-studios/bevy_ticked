@@ -172,6 +172,9 @@ fn forward_received_snapshots(
             continue;
         }
         let Some(packet) = decode_packet(&msg.message.bytes) else {
+            if let Some(stats) = stats.as_mut() {
+                stats.dropped_undecodable += 1;
+            }
             warn_once!(
                 "a snapshot packet of {} bytes did not decode and was dropped (said once; a \
                  peer on a corrupting link produces these at frame rate)",
