@@ -30,7 +30,9 @@ fn the_buffer_controllers_are_not_left_to_the_executor() {
     app.update();
 
     let schedules = app.world().resource::<Schedules>();
-    let update = schedules.get(Update).expect("an app has an Update schedule");
+    let update = schedules
+        .get(Update)
+        .expect("an app has an Update schedule");
     let name = |key| {
         update
             .systems()
@@ -48,7 +50,9 @@ fn the_buffer_controllers_are_not_left_to_the_executor() {
         .filter(|(left, right)| {
             let pair = [left.as_str(), right.as_str()];
             pair.iter().any(|name| name.contains("adapt_tick_buffer"))
-                && pair.iter().any(|name| name.contains("size_buffer_from_margin"))
+                && pair
+                    .iter()
+                    .any(|name| name.contains("size_buffer_from_margin"))
         })
         .collect();
     assert!(

@@ -144,6 +144,16 @@ impl AuthoritativeHistory {
         }
     }
 
+    /// Forget every whole body kept by `seq`, and keep the records by tick.
+    ///
+    /// For a new connection to the same host: it numbers its packets afresh, so a `seq` from the
+    /// old connection names a different packet on the new one, and a delta rebuilt against it
+    /// would be rebuilt against the wrong world. Ticks keep their meaning, and what is drawn from
+    /// them stays.
+    pub fn forget_bodies(&mut self) {
+        self.bodies.clear();
+    }
+
     /// The body the packet `seq` carried, if still held.
     pub fn body_at_seq(&self, seq: u32) -> Option<&crate::snapshot::FullBody> {
         self.bodies.get(&seq).map(|(_, body)| body)
