@@ -5,6 +5,19 @@ pull requests #1–#14 on this repository are the phases.
 
 ## Unreleased
 
+- **New** — a client whose link to its host breaks is held, not left to play alone, and resumes in
+  place when the host reaches it again (bevy_ensemble's `Reconnectable`). The bridge holds the
+  clock with `TickHoldReason::AwaitingHost` (new) for as long as the lobby is `AwaitingHost`, for a
+  reconnect and a migration alike; on a reconnect it triggers `client::HostLinkReset` (new), which
+  forgets everything kept by `seq` from the old connection — the acknowledgement, the bodies
+  deltas are rebuilt against (`AuthoritativeHistory::forget_bodies`, new), a snapshot still
+  pending — because the host numbers the new connection's snapshots from one again. When the host
+  is back the clock waits on `AwaitingSync`, as at a join, and the first snapshot carries the
+  client to where the host is (`SnapshotApplied::first`). On the host nothing changes: the seat's
+  removal is a `PeerLeft` as before, and the new seat is verified and welcomed as a joiner's. The
+  testing harness gains `break_link`, `set_reconnection` and `with_reconnection`. Written after a
+  web client's connection to a native host failed mid-countdown and it played on alone for ninety
+  seconds.
 - **New** — a snapshot watchdog (`watchdog`). A client that has applied nothing from its host
   for two seconds of frame time (each frame counted up to 250 ms, so a tab back from the
   background is not one) logs an `error!` with every counter that tells the causes apart, asks

@@ -80,6 +80,39 @@ pub struct NackFull(pub bool);
 #[derive(Resource, Default, Debug, Clone, Copy)]
 pub struct LastAppliedSeq(pub Option<u32>);
 
+/// Trigger when this client reaches the same host again over a new connection.
+///
+/// The host forgets a client whose connection ended — its acknowledgements, its baselines, the
+/// numbering of the snapshots it was sent — and numbers them afresh on the new one. What this
+/// client kept by `seq` describes the old numbering: acknowledged as is, it names a packet the
+/// host never sent on this connection, and the first delta built against a `seq` both numberings
+/// reach would be rebuilt against the wrong world. So it goes: the acknowledgement, the bodies
+/// kept for deltas, a snapshot still waiting from the old connection.
+///
+/// What was applied stays applied, and ticks keep their meaning: the host's clock did not restart.
+/// The ensemble bridge triggers this when a lobby starts waiting for its host to come back.
+#[derive(Event, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HostLinkReset;
+
+fn forget_the_old_link(
+    _: On<HostLinkReset>,
+    mut applied_seq: ResMut<LastAppliedSeq>,
+    mut sent_ack: ResMut<LastSentAck>,
+    mut nack: ResMut<NackFull>,
+    mut pending: ResMut<PendingSnapshot>,
+    mut pending_tick: ResMut<PendingSnapshotTick>,
+    history: Option<ResMut<crate::replication::AuthoritativeHistory>>,
+) {
+    applied_seq.0 = None;
+    sent_ack.0 = None;
+    nack.0 = false;
+    pending.0 = None;
+    pending_tick.0 = None;
+    if let Some(mut history) = history {
+        history.forget_bodies();
+    }
+}
+
 /// How many ticks ahead of the server the client runs (its prediction lead).
 ///
 /// The client must lead the server by enough that its inputs arrive before the
@@ -296,6 +329,7 @@ impl<T: TickedInput> Plugin for TickedClientPlugin<T> {
             .init_resource::<HealthWarnings>()
             .add_message::<SnapshotApplied>()
             .add_observer(receive_snapshot)
+            .add_observer(forget_the_old_link)
             .init_session_resource_scoped::<AuthoritySequenceAfterSnapshot>(SessionScope::Role)
             .configure_sets(
                 TickedLoop,

@@ -88,6 +88,10 @@ pub enum TickHoldReason {
     /// The session's host is gone and a new one is taking over: a lockstep peer waits until the
     /// survivors have agreed on the last tick the old host ruled.
     HostMigration,
+    /// A client whose host is out of reach: the link to it broke and is being made again, or a
+    /// successor is being named. Nothing the host decides can arrive, so nothing is predicted —
+    /// a client that ran on would be playing in a world nobody else is in.
+    AwaitingHost,
     /// A game's own reason, for something not listed.
     Custom(u8),
 }

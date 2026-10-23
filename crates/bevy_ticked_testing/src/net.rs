@@ -236,6 +236,25 @@ impl TickedNetwork {
         self.net.reconnect(peer);
     }
 
+    /// The link between a client and its host fails at both ends, both still in the lobby. See
+    /// [`LoopbackNetwork::break_link`]; [`reconnect`](Self::reconnect) is the host reaching it
+    /// again.
+    pub fn break_link(&mut self, peer: PeerId) {
+        self.net.break_link(peer);
+    }
+
+    /// Make every lobby reconnectable with this window, or none of them. See
+    /// [`LoopbackNetwork::set_reconnection`].
+    pub fn set_reconnection(&mut self, reconnection: Option<bevy_ensemble::Reconnectable>) {
+        self.net.set_reconnection(reconnection);
+    }
+
+    /// Builder form of [`set_reconnection`](Self::set_reconnection).
+    pub fn with_reconnection(mut self, reconnection: bevy_ensemble::Reconnectable) -> Self {
+        self.net.set_reconnection(Some(reconnection));
+        self
+    }
+
     /// Make every lobby migratable with these waits, or none of them. See
     /// [`LoopbackNetwork::set_host_migration`].
     pub fn set_host_migration(&mut self, migration: Option<bevy_ensemble::HostMigratable>) {

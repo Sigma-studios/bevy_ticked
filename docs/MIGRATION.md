@@ -49,6 +49,22 @@ obeys; `docs/avian.md` the physics bundle.
 | re-inserting `TickedInterpolation::default()` to stop a teleport being blended | `Teleported(tick)`, rolled back with the body | T21 |
 | `SmoothingOffset { .., applied_translation, applied_rotation }` | `SmoothingOffset { translation, rotation }` | T21 |
 
+## A broken link is held, and made again
+
+Pins bevy_ensemble `e5fff24`, which now holds a client's place when its link to the host breaks
+and the host can reach it again (`Reconnectable`, on by default in the WebRTC backend). The bridge does this crate's half
+by itself; a consumer has three things to know.
+
+- **`TickHoldReason::AwaitingHost`** is new: a client's clock is held while its lobby is
+  `AwaitingHost` — a reconnect, or a migration's wait. A `match` over the reasons needs the arm.
+  Show it on screen (the lobby's `AwaitingHost` says which wait, and how long it has left) instead
+  of a world that stopped for no reason.
+- **`client::HostLinkReset`** is the event a transport layer triggers when it reaches the same host
+  over a new connection. The bridge triggers it; a consumer with its own transport should too.
+- **The first snapshot after a reconnect is `SnapshotApplied { first: true }`**, as at a join: the
+  client was held behind the host and is carried to it in one step. Anything that eases or
+  announces on a correction treats it as a resync.
+
 ## T21 — the picture is built after the tick
 
 The simulation neither reads nor writes `Transform` or `GlobalTransform`. Positions live in

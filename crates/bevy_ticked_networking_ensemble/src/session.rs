@@ -140,6 +140,8 @@ impl Plugin for TickedEnsembleSessionPlugin {
             .remove_at_session_end::<SoloHandedToLobby>(SessionScope::Role)
             .init_session_resource::<Visiting>()
             .add_observer(forget_departed_client)
+            .add_observer(hold_while_the_host_is_out_of_reach)
+            .add_observer(resync_when_the_host_is_back)
             // Sized at the join door itself, before the first tick: a snapshot that arrived with
             // the role is applied in that tick and closes the `Update` window below.
             .add_systems(
@@ -614,6 +616,74 @@ fn list_recipients(
     if recipients.0 != uuids {
         recipients.0 = uuids;
     }
+}
+
+/// The lobby lost its host, or its link to it: the clock holds until the host is back.
+///
+/// Nothing the host decides can arrive while this lasts. A client that predicted on would play in
+/// a world nobody else is in — the others standing still, a countdown stuck on its last second —
+/// and be yanked back the moment the host returned. Held, it stands still with everyone else, and
+/// a game says why on screen from [`AwaitingHost`].
+///
+/// A wait for the *same* host is a new connection on its way, and what this client kept by `seq`
+/// from the old one is forgotten now ([`HostLinkReset`]); a wait for a successor ends in a
+/// [`HostChanged`], which starts the session over anyway.
+///
+/// [`HostLinkReset`]: bevy_ticked_networking::client::HostLinkReset
+fn hold_while_the_host_is_out_of_reach(
+    added: On<Add, AwaitingHost>,
+    lobbies: Query<&AwaitingHost, Without<Host>>,
+    holds: Option<ResMut<TickHolds>>,
+    mut commands: Commands,
+) {
+    let Ok(awaiting) = lobbies.get(added.entity) else {
+        return;
+    };
+    if let Some(mut holds) = holds {
+        holds.hold(TickHoldReason::AwaitingHost);
+    }
+    if awaiting.is_reconnect() {
+        commands.trigger(bevy_ticked_networking::client::HostLinkReset);
+    }
+}
+
+/// The host is back over a new connection: the clock runs again from the first snapshot it sends,
+/// as at a join — the hold this client was under put it behind, and the snapshot carries it to
+/// where the host is in one step ([`SnapshotApplied::first`] says so to whatever eases or
+/// announces).
+///
+/// Only while the lobby stands: its going ends the session, and the leave door does the rest.
+///
+/// [`SnapshotApplied::first`]: bevy_ticked_networking::client::SnapshotApplied
+fn resync_when_the_host_is_back(
+    removed: On<Remove, AwaitingHost>,
+    lobbies: Query<&AwaitingHost>,
+    holds: Option<ResMut<TickHolds>>,
+    mut commands: Commands,
+) {
+    if let Some(mut holds) = holds {
+        holds.release(TickHoldReason::AwaitingHost);
+    }
+    let Ok(awaiting) = lobbies.get(removed.entity) else {
+        return;
+    };
+    if !awaiting.is_reconnect() {
+        return;
+    }
+    let lobby = removed.entity;
+    commands.queue(move |world: &mut World| {
+        // A client's lobby: one this peer was promoted to host in the same change is a door of
+        // its own.
+        let stands = world
+            .get_entity(lobby)
+            .is_ok_and(|lobby| lobby.contains::<Lobby>() && !lobby.contains::<Host>());
+        if stands && world.contains_resource::<LocalClientPlayer>() {
+            info!("the host is back; holding the clock for its world, as at a join");
+            world
+                .resource_mut::<TickHolds>()
+                .hold(TickHoldReason::AwaitingSync);
+        }
+    });
 }
 
 /// A lobby waiting for its new host hears no snapshots, and is not starved for it.

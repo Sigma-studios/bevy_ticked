@@ -299,7 +299,7 @@ fn register(world: &mut World, entry: Entry) {
 ///   stands, so a host that keeps its solo world can rewind to the start of its session like a
 ///   fresh one.
 /// - The clock is released from every hold that belonged to a session: waiting for a first
-///   snapshot, a soft hold, a session pause, a replay. A game's own holds — its pause menu — are
+///   snapshot, a soft hold, a session pause, a replay, a host out of reach. A game's own holds — its pause menu — are
 ///   the game's, and survive.
 ///
 /// The world itself is not touched: whether it stays (a host, a solo player) or goes (a client,
@@ -319,6 +319,7 @@ pub fn reset_session_state(world: &mut World) {
             TickHoldReason::SoftHold,
             TickHoldReason::SessionPause,
             TickHoldReason::Replaying,
+            TickHoldReason::AwaitingHost,
         ] {
             holds.release(reason);
         }
