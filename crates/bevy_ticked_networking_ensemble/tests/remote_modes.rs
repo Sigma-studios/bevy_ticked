@@ -448,7 +448,7 @@ fn relayed_inputs_cover_the_first_margin_of_the_replay() {
 
 // ── Correction smoothing ─────────────────────────────────────────────────────
 
-fn attach_smoothing(add: On<Add, TickTrackedEntity>, mut commands: Commands) {
+fn attach_smoothing(add: On<Add<TickTrackedEntity>>, mut commands: Commands) {
     commands
         .entity(add.entity)
         .insert(CorrectionSmoothing::default());

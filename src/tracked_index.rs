@@ -107,7 +107,7 @@ impl TrackedEntityIndex {
 }
 
 pub(crate) fn index_tracked(
-    add: On<Add, TickTrackedEntity>,
+    add: On<Add<TickTrackedEntity>>,
     tracked: Query<&TickTrackedEntity>,
     mut index: ResMut<TrackedEntityIndex>,
 ) {
@@ -117,7 +117,7 @@ pub(crate) fn index_tracked(
 }
 
 pub(crate) fn unindex_tracked(
-    remove: On<Remove, TickTrackedEntity>,
+    remove: On<Remove<TickTrackedEntity>>,
     // `Allow<Disabled>`, because the entity this is called about is usually a tombstone, and a
     // tombstone is `Disabled`. A default query filter hides one, so without this the reaper
     // destroyed the entity and the id went on naming it — and the next spawn to mint that id was

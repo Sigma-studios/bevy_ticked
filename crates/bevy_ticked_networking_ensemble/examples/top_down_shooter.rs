@@ -650,7 +650,7 @@ fn body_kind(
 /// A snapshot-spawned entity gets its `TickTrackedEntity` last, after every networked component
 /// including `Owner`, so this is where the owner is known and the body kind can be chosen.
 fn on_entity_spawned(
-    trigger: On<Add, TickTrackedEntity>,
+    trigger: On<Add<TickTrackedEntity>>,
     mut commands: Commands,
     query: Query<(
         &EntityKind,
@@ -721,7 +721,7 @@ fn on_entity_spawned(
 /// A body handed from one mode to the other after it spawned — a game predicting a remote
 /// player it is wrestling with, or giving up on that — changes physics body with it.
 fn on_replication_mode_changed(
-    trigger: On<Insert, ReplicationMode>,
+    trigger: On<Insert<ReplicationMode>>,
     mut commands: Commands,
     players: Query<(&EntityKind, Option<&Owner>, &ReplicationMode)>,
     local_client: Option<Res<LocalClientPlayer>>,

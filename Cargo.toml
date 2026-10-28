@@ -11,23 +11,25 @@ members = [
     "crates/bevy_ticked_testing",
     "crates/bevy_ticked_avian",
 ]
+# A dependency of one example, kept here only until it has a release on this Bevy; not ours to lint.
+exclude = ["vendor/bevy_elan"]
 
 # bevy_ensemble is pinned here, once, by commit. Every crate in this workspace takes it with
 # `workspace = true`, so bumping the transport is one edit and one `cargo update -p bevy_ensemble`
 # rather than a hunt through six manifests and a lock file that had quietly fallen nine commits
 # behind the branch they all named.
 [workspace.dependencies]
-bevy_ensemble = { git = "https://github.com/Sigma-studios/bevy_ensemble", rev = "e5fff24" }
-bevy_ensemble_webrtc = { git = "https://github.com/Sigma-studios/bevy_ensemble", rev = "e5fff24" }
-bevy_ensemble_steam = { git = "https://github.com/Sigma-studios/bevy_ensemble", rev = "e5fff24" }
-bevy_ensemble_loopback = { git = "https://github.com/Sigma-studios/bevy_ensemble", rev = "e5fff24" }
+bevy_ensemble = { git = "https://github.com/Sigma-studios/bevy_ensemble", rev = "4ce1c62" }
+bevy_ensemble_webrtc = { git = "https://github.com/Sigma-studios/bevy_ensemble", rev = "4ce1c62" }
+bevy_ensemble_steam = { git = "https://github.com/Sigma-studios/bevy_ensemble", rev = "4ce1c62" }
+bevy_ensemble_loopback = { git = "https://github.com/Sigma-studios/bevy_ensemble", rev = "4ce1c62" }
 
 [dependencies]
 # `web` is what points `bevy::platform`'s `Instant` at `web_time` on wasm; without it that
 # clock falls back to `std`, whose wasm implementation panics. It costs nothing off wasm —
 # both the dependency and the `cfg` behind it are `target_arch = "wasm32"` only — and
 # relying on a consumer to enable it means the crate builds a broken web binary on its own.
-bevy = { version = "0.19", default-features = false, features = [
+bevy = { version = "0.20", default-features = false, features = [
     "std",
     "bevy_log",
     "web",
@@ -45,8 +47,8 @@ tracing = { version = "0.1", features = [
 [dev-dependencies]
 # The tests and examples run whole apps; the library itself only needs the ECS. `debug` keeps
 # system names, which the transform guard's tests read.
-bevy = { version = "0.19", features = ["debug"] }
-avian3d = "0.7"
+bevy = { version = "0.20", features = ["debug"] }
+avian3d = "0.8"
 # The source guard and golden helpers; tests only.
 bevy_ticked_testing = { path = "crates/bevy_ticked_testing" }
 

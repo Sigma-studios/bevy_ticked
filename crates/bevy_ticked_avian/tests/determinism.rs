@@ -21,6 +21,38 @@ fn a_stack_of_boxes_replays_bit_identically_with_the_documented_bundle() {
     assert_replays_identically::<AvianHash>(&mut app, Tick(40), Ticks(96));
 }
 
+/// Under `f64`, the same stack fifty kilometres from the origin — where an `f32` position
+/// resolves to about four millimetres — replays bit-identically and stands on its ground there.
+#[cfg(feature = "f64")]
+#[test]
+fn a_stack_fifty_kilometres_out_replays_bit_identically_in_f64() {
+    use avian3d::prelude::Position;
+    use bevy::math::DVec3;
+    use bevy::prelude::*;
+    use bevy_ticked::tracked_entity::TickTrackedEntity;
+
+    const FAR: DVec3 = DVec3::new(50_000.0, 0.0, -50_000.0);
+    let mut app = peer_app(HOST_UUID, avian::install);
+    spawn_stack(app.world_mut(), BOXES);
+    let world = app.world_mut();
+    for mut position in world.query::<&mut Position>().iter_mut(world) {
+        position.0 += FAR;
+    }
+    assert_replays_identically::<AvianHash>(&mut app, Tick(40), Ticks(96));
+
+    let world = app.world_mut();
+    for position in world
+        .query_filtered::<&Position, With<TickTrackedEntity>>()
+        .iter(world)
+    {
+        let local = position.0 - FAR;
+        assert!(
+            local.y > 0.0 && local.length() < 20.0,
+            "a box fifty kilometres out left its stack: {local}"
+        );
+    }
+}
+
 /// The negative control. With sleeping allowed, a body that fell asleep during the live run
 /// is asleep when the replay begins from a tick where it was still moving: the solver skips
 /// it, the hashes part, and the check says so.
@@ -61,17 +93,23 @@ fn sleeping_is_disabled_for_tracked_bodies_or_the_replay_diverges() {
 }
 
 /// The stack's trace, sampled every eight ticks for four seconds, matches the recorded one.
-/// Re-record with `UPDATE_GOLDEN=1` and read the diff.
+/// Re-record with `UPDATE_GOLDEN=1` and read the diff. One trace per precision: under `f64` the
+/// positions, and so every step after the first, are other numbers.
 #[test]
 fn the_avian_stack_golden_matches() {
     let mut app = peer_app(HOST_UUID, avian::install);
     spawn_stack(app.world_mut(), BOXES);
     let trace = record_trace::<AvianHash>(&mut app, 256, 8);
-    check_golden(
-        Path::new(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/golden/avian_stack.trace"
-        )),
-        &trace,
-    );
+    check_golden(Path::new(AVIAN_STACK_GOLDEN), &trace);
 }
+
+#[cfg(not(feature = "f64"))]
+const AVIAN_STACK_GOLDEN: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/golden/avian_stack.trace"
+);
+#[cfg(feature = "f64")]
+const AVIAN_STACK_GOLDEN: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/golden/avian_stack_f64.trace"
+);

@@ -16,6 +16,9 @@ replays bit-identically from any tick in its history.
 | `PhysicsTransformConfig` | everything `false` (`presentation_transform_config()`) | The simulation is `Position`/`Rotation`; `Transform` is built from them in `TickedPresentation`. With the `Transform` → `Position` copy on, avian adopted a blended or camera-moved transform as the body's place; with the copy back, the picture was written inside the step. A body spawned with a `Transform` is placed once, when its `RigidBody` is added. |
 | `Collider` requires `GlobalTransform`; scale one | always | avian attaches a collider to its body only through a `GlobalTransform`, and sizes it from one — a headless body with neither collided with nothing. A collider on a child entity panics. |
 | `ContactGraph`, `ConstraintGraph`, `JointGraph` | rollback-only ticked resources, kept on leave | The solver reads last step's manifolds and the constraint colouring before it reads any body. Without them the replay diverged in every body at its first tick. |
+| Canonical solve order | colouring rebuilt at the start of avian's solver, after it applies the narrow phase's queued contact changes | Since avian 0.8 the narrow phase only queues which contacts started or stopped generating constraints (`ContactStatusChangeQueue`); the graph is up to date only once the solver has applied them. |
+| `SolverBodies`, `ContactStatusChangeQueue` (avian 0.8) | not rolled back | The solver's per-body arrays are refilled from the bodies every step. The queue is drained at the start of every step; a body tombstoned after the step leaves entries in it across the tick boundary, and a replay from either side of that is still bit-identical (`tests/despawn_after_the_step.rs`). |
+| Precision | `f32` (default) or `f64`, this crate's features | avian refuses two collision backends at once, so the crate takes avian without its defaults and asks for one. Under `f64` only world-space positions are double. |
 | `PhysicsIslands`, `BodyIslandNode` | rollback-only, **only with `allow_sleeping()`** | Islands exist only then, and have to agree with the contact graph when they do. |
 | `TickedSimulationSet::{Input, BeforePhysics, Physics, AfterPhysics}` | chained; avian's sets inside `Physics` | Where a game's systems go. |
 
@@ -37,8 +40,10 @@ topple and tumble:
   `allow_sleeping()`, the first body sleeps at tick 218 and a replay across it diverges at
   its first tick; the bundle replays the same window cleanly.
 - **`the_avian_stack_golden_matches`**: the trace sampled every eight ticks for four seconds
-  matches `tests/golden/avian_stack.trace`. Re-record with `UPDATE_GOLDEN=1` and read the
-  diff.
+  matches `tests/golden/avian_stack.trace` (`avian_stack_f64.trace` under `f64`). Re-record with
+  `UPDATE_GOLDEN=1` and read the diff.
+- **`a_stack_fifty_kilometres_out_replays_bit_identically_in_f64`** (`f64` only): the same
+  stack moved 50 km from the origin replays bit-identically and stays on its ground.
 - **Warm starting**: the first test passes with it on and with it zeroed; the contact graph
   is what carries the impulses across a rollback. It was zeroed until bevy_kart measured what
   that costs against stacked wall contacts: the kart driven into a wall was held there, two
@@ -62,3 +67,6 @@ islands then had to agree with it or the solver panicked on a contact id it no l
    you missed, the way it found the contact graph.
 5. Kinematic bodies for interpolated remote entities on clients, so the solver does not
    fight the drawn position.
+6. Far from the origin, `f64` (`default-features = false, features = ["3d", "f64"]`, and avian
+   without its defaults everywhere it is named): place far bodies by `Position`, since a
+   `Transform` is `f32`, and draw relative to the camera. Both peers build the same precision.

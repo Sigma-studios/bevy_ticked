@@ -28,7 +28,7 @@
 //! tombstones rather than destroys, so a correction that says the thing is still alive brings
 //! it back intact. A plain `despawn` on a tracked entity is caught by an observer that records
 //! the death; a rewind past it rebuilds the entity through the spawn path, re-dressed by the
-//! game's `On<Add, TickTrackedEntity>` observer, with its local-only state lost. Harmless and
+//! game's `On<Add<TickTrackedEntity>>` observer, with its local-only state lost. Harmless and
 //! loud: it warns once, naming the id.
 
 use std::collections::BTreeMap;
@@ -426,7 +426,7 @@ pub fn reset(world: &mut World, entity: Entity) {
 /// from an allocator that is rolled back with everything else, so a replay that spawns something
 /// different at the tick a pellet used to be spawned mints the pellet's id for it, finds the
 /// pellet's tombstone and reuses it. The game's presentation is local-only and hangs off
-/// `On<Add, TickTrackedEntity>`, which never runs again — and what is left is the new entity
+/// `On<Add<TickTrackedEntity>>`, which never runs again — and what is left is the new entity
 /// wearing the old one's clothes: a ragdoll's head drawn as a torso, a blast's mesh still on
 /// screen at the radius it had when its id was handed on.
 ///
@@ -491,7 +491,7 @@ pub(crate) fn reap_all(world: &mut World) {
 /// A plain `despawn` on a tracked entity: record the death so a rewind can rebuild it, and say
 /// so once.
 pub(crate) fn record_plain_despawn(
-    despawn: On<Despawn, TickTrackedEntity>,
+    despawn: On<Despawn<TickTrackedEntity>>,
     // `Allow<Disabled>`, or the `tombstoned` arm below is unreachable: a tombstone is `Disabled`,
     // and a default query filter hides one, so the fetch failed before it could be asked.
     tracked: Query<(&TickTrackedEntity, Has<Tombstone>), Allow<Disabled>>,

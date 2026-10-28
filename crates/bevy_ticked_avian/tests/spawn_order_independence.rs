@@ -65,7 +65,7 @@ fn spawn_labelled(world: &mut World, order: Order, label: u32, bundle: impl Bund
 }
 
 /// A tick's worth of bodies, as `(label, bits)` sorted by label.
-type Frame = Vec<(u32, Vec<u32>)>;
+type Frame = Vec<(u32, Vec<u64>)>;
 
 /// The first tick at which two traces differ, and which body.
 fn first_divergence(a: &[Frame], b: &[Frame]) -> Option<(usize, u32)> {
@@ -105,6 +105,7 @@ const HINGE_LABEL: u32 = 100;
 #[cfg(feature = "3d")]
 mod three_d {
     use super::*;
+    use avian3d::math::ToRealPrecision;
     use avian3d::prelude::*;
     use bevy_ticked_avian::avian3d::TickedAvianPlugin;
     use bevy_ticked_testing::fixtures::avian::install_with;
@@ -142,10 +143,12 @@ mod three_d {
             .iter(world)
             .map(|(l, p, r, v, w)| {
                 let mut bits = Vec::new();
-                bits.extend(p.0.to_array().map(f32::to_bits));
-                bits.extend(r.0.to_array().map(f32::to_bits));
-                bits.extend(v.0.to_array().map(f32::to_bits));
-                bits.extend(w.0.to_array().map(f32::to_bits));
+                // A position is `f64` under avian's `f64` feature, everything else `f32`.
+                #[allow(clippy::useless_conversion, reason = "u32 bits under f32")]
+                bits.extend(p.0.to_array().map(|c| u64::from(c.to_bits())));
+                bits.extend(r.0.to_array().map(|c| u64::from(c.to_bits())));
+                bits.extend(v.0.to_array().map(|c| u64::from(c.to_bits())));
+                bits.extend(w.0.to_array().map(|c| u64::from(c.to_bits())));
                 (l.0, bits)
             })
             .collect();
@@ -225,7 +228,7 @@ mod three_d {
                 (
                     RigidBody::Dynamic,
                     Collider::cuboid(0.9, 0.9, 0.9),
-                    Position(Vec3::new(x, 4.0 + y, 0.2 * x)),
+                    Position(Vec3::new(x, 4.0 + y, 0.2 * x).real()),
                     Rotation(Quat::from_rotation_z(0.3)),
                     AngularVelocity(Vec3::new(0.5, 0.0, 2.0)),
                 ),
@@ -304,6 +307,7 @@ mod three_d {
 #[cfg(feature = "2d")]
 mod two_d {
     use super::*;
+    use avian2d::math::ToRealPrecision;
     use avian2d::prelude::*;
     use bevy_ticked_avian::avian2d::TickedAvianPlugin;
 
@@ -347,10 +351,11 @@ mod two_d {
             .iter(world)
             .map(|(l, p, r, v, w)| {
                 let mut bits = Vec::new();
-                bits.extend(p.0.to_array().map(f32::to_bits));
-                bits.extend([r.cos.to_bits(), r.sin.to_bits()]);
-                bits.extend(v.0.to_array().map(f32::to_bits));
-                bits.push(w.0.to_bits());
+                #[allow(clippy::useless_conversion, reason = "u32 bits under f32")]
+                bits.extend(p.0.to_array().map(|c| u64::from(c.to_bits())));
+                bits.extend([r.cos, r.sin].map(|c| u64::from(c.to_bits())));
+                bits.extend(v.0.to_array().map(|c| u64::from(c.to_bits())));
+                bits.push(u64::from(w.0.to_bits()));
                 (l.0, bits)
             })
             .collect();
@@ -428,7 +433,7 @@ mod two_d {
                 (
                     RigidBody::Dynamic,
                     Collider::rectangle(0.9, 0.9),
-                    Position(Vec2::new(x, 4.0 + y)),
+                    Position(Vec2::new(x, 4.0 + y).real()),
                     Rotation::radians(0.3),
                     AngularVelocity(2.0),
                 ),

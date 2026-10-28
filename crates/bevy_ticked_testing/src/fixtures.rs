@@ -95,7 +95,7 @@ pub mod minimal {
         Sample,
     }
 
-    fn attach_visual(add: On<Add, TickTrackedEntity>, mut commands: Commands) {
+    fn attach_visual(add: On<Add<TickTrackedEntity>>, mut commands: Commands) {
         commands.entity(add.entity).insert(Visual);
     }
 
@@ -253,7 +253,7 @@ pub mod minimal {
     /// Every tracked entity gets a transform and an interpolation state, whichever peer spawned
     /// it: a body a snapshot spawns on a client arrives with its networked components only.
     fn attach_transform(
-        add: On<Add, TickTrackedEntity>,
+        add: On<Add<TickTrackedEntity>>,
         bodies: Query<(Option<&Pos>, Has<Transform>)>,
         mut commands: Commands,
     ) {
@@ -443,18 +443,21 @@ pub mod avian {
                 &LinearVelocity,
                 &AngularVelocity,
             )>();
-            let mut rows: Vec<(u64, [u32; 13])> = bodies
+            // A position is `f64` under avian's `f64` feature and `f32` otherwise; the rest
+            // of a body is `f32` either way.
+            let mut rows: Vec<(u64, [u64; 3], [u32; 10])> = bodies
                 .iter(world)
                 .map(|(id, p, r, v, w)| {
-                    let mut bits = [0u32; 13];
-                    bits[0..3].copy_from_slice(&p.0.to_array().map(f32::to_bits));
-                    bits[3..7].copy_from_slice(&r.0.to_array().map(f32::to_bits));
-                    bits[7..10].copy_from_slice(&v.0.to_array().map(f32::to_bits));
-                    bits[10..13].copy_from_slice(&w.0.to_array().map(f32::to_bits));
-                    (id.0, bits)
+                    #[allow(clippy::useless_conversion, reason = "u32 bits under f32")]
+                    let position = p.0.to_array().map(|c| u64::from(c.to_bits()));
+                    let mut bits = [0u32; 10];
+                    bits[0..4].copy_from_slice(&r.0.to_array().map(f32::to_bits));
+                    bits[4..7].copy_from_slice(&v.0.to_array().map(f32::to_bits));
+                    bits[7..10].copy_from_slice(&w.0.to_array().map(f32::to_bits));
+                    (id.0, position, bits)
                 })
                 .collect();
-            rows.sort_unstable_by_key(|(id, _)| *id);
+            rows.sort_unstable_by_key(|(id, ..)| *id);
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
             rows.hash(&mut hasher);
             Self(hasher.finish())

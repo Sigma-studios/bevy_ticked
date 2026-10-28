@@ -272,7 +272,7 @@ impl TrackedIdAllocator {
 /// under that player's slot, so every peer mints the same id. If the id has a tombstone (a
 /// rewind undid this very spawn a moment ago), the tombstone is revived with the new bundle
 /// on it, so the `Entity` is the one the game already held — and [`redress`] fires the game's
-/// `On<Add, TickTrackedEntity>` observer again, because an id handed back is not a promise that
+/// `On<Add<TickTrackedEntity>>` observer again, because an id handed back is not a promise that
 /// it has come back as the same thing.
 #[derive(SystemParam)]
 pub struct TrackedSpawner<'w, 's> {

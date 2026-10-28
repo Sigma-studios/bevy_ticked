@@ -218,7 +218,7 @@ pub fn send_client_loaded_after_snapshot_applied<S: JoinSnapshot>(
 /// pending join that outlived its client used to pin the tracker's floor for the rest of the
 /// session.
 pub fn forget_departed_client_joins<S: JoinSnapshot>(
-    removed: On<Remove, LobbyClient>,
+    removed: On<Remove<LobbyClient>>,
     uuids: Query<&LobbyClientPlayerUuid>,
     mut pending_client_joins: ResMut<PendingClientJoins>,
     mut last_requests: ResMut<LastJoinSnapshotRequests>,

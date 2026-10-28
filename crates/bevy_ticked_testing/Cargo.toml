@@ -9,26 +9,27 @@ description = "Two-peer harness, probes, assertions and guardrails for testing b
 default = []
 # The lockstep vocabulary: `TickedNetwork::lockstep`, `ActionScript` runners, checksum agreement.
 lockstep = ["dep:bevy_ticked_lockstep_networking"]
-# avian3d fixtures for rollback-purity and determinism tests.
+# avian3d fixtures for rollback-purity and determinism tests. In the precision bevy_ticked_avian
+# is built with (its `f32` or `f64`), which is the game's to pick.
 avian = ["dep:avian3d", "dep:bevy_ticked_avian"]
 
 [dependencies]
-bevy = { version = "0.19", default-features = false, features = ["std", "serialize", "bevy_log"] }
+bevy = { version = "0.20", default-features = false, features = ["std", "serialize", "bevy_log"] }
 bevy_ticked = { path = "../.." }
 bevy_ticked_networking = { path = "../bevy_ticked_networking" }
 bevy_ticked_networking_ensemble = { path = "../bevy_ticked_networking_ensemble" }
 bevy_ticked_lockstep_networking = { path = "../bevy_ticked_lockstep_networking", optional = true, default-features = false }
 bevy_ensemble = { workspace = true }
 bevy_ensemble_loopback = { workspace = true }
-avian3d = { version = "0.7", features = ["serialize"], optional = true }
-bevy_ticked_avian = { path = "../bevy_ticked_avian", features = ["3d"], optional = true }
+avian3d = { version = "0.8", default-features = false, features = ["3d", "serialize"], optional = true }
+bevy_ticked_avian = { path = "../bevy_ticked_avian", default-features = false, features = ["3d"], optional = true }
 serde = { version = "1", features = ["derive"] }
 postcard = { version = "1", features = ["alloc"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["registry"] }
 
 [dev-dependencies]
-bevy = "0.19"
+bevy = "0.20"
 
 [lints.clippy]
 too_many_arguments = "allow"

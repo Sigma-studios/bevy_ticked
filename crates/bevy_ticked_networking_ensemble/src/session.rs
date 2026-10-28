@@ -192,11 +192,11 @@ struct LobbyTrackingPlugin;
 
 impl Plugin for LobbyTrackingPlugin {
     fn build(&self, app: &mut App) {
-        app.add_observer(|add: On<Add, Lobby>, mut commands: Commands| {
+        app.add_observer(|add: On<Add<Lobby>>, mut commands: Commands| {
             commands.insert_resource(TickedSessionLobby(add.entity));
         })
         .add_observer(
-            |remove: On<Remove, Lobby>,
+            |remove: On<Remove<Lobby>>,
              lobby: Option<Res<TickedSessionLobby>>,
              mut commands: Commands| {
                 if lobby.is_some_and(|lobby| lobby.0 == remove.entity) {
@@ -593,7 +593,7 @@ fn end_a_visit_without_a_role(
 /// this same removal, one flush later, and the uuid is still on the client entity while `Remove`
 /// runs.
 fn forget_departed_client(
-    remove: On<Remove, LobbyClient>,
+    remove: On<Remove<LobbyClient>>,
     uuids: Query<&LobbyClientPlayerUuid>,
     mut commands: Commands,
 ) {
@@ -631,7 +631,7 @@ fn list_recipients(
 ///
 /// [`HostLinkReset`]: bevy_ticked_networking::client::HostLinkReset
 fn hold_while_the_host_is_out_of_reach(
-    added: On<Add, AwaitingHost>,
+    added: On<Add<AwaitingHost>>,
     lobbies: Query<&AwaitingHost, Without<Host>>,
     holds: Option<ResMut<TickHolds>>,
     mut commands: Commands,
@@ -656,7 +656,7 @@ fn hold_while_the_host_is_out_of_reach(
 ///
 /// [`SnapshotApplied::first`]: bevy_ticked_networking::client::SnapshotApplied
 fn resync_when_the_host_is_back(
-    removed: On<Remove, AwaitingHost>,
+    removed: On<Remove<AwaitingHost>>,
     lobbies: Query<&AwaitingHost>,
     holds: Option<ResMut<TickHolds>>,
     mut commands: Commands,

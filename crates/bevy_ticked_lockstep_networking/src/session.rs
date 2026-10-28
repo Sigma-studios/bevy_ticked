@@ -133,7 +133,7 @@ pub enum LockstepSimulationSet {
 /// A client that is gone leaves the simulation on the next tick, and the host stops waiting
 /// on it now.
 fn queue_departure(
-    removed: On<Remove, LobbyClient>,
+    removed: On<Remove<LobbyClient>>,
     uuids: Query<&LobbyClientPlayerUuid>,
     participants: Query<(Entity, &LobbyParticipant), With<LockstepLobbyParticipant>>,
     mut pending: ResMut<PendingSystemActions>,

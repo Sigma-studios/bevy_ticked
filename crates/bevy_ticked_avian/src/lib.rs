@@ -97,6 +97,13 @@
 //!
 //! One plugin per dimension: [`avian3d::TickedAvianPlugin`] (feature `3d`) and
 //! [`avian2d::TickedAvianPlugin`] (feature `2d`); a workspace that uses both enables both.
+//!
+//! # Precision
+//!
+//! Feature `f32` (default) or `f64` picks avian's. Under `f64` world-space positions are
+//! double precision, for a world wider than an `f32` resolves; everything else stays `f32`. avian
+//! refuses both collision backends at once, so with `f64` this crate's default features are off,
+//! and so are avian's wherever it is named. See `docs/avian.md`.
 
 #[cfg(not(any(feature = "2d", feature = "3d")))]
 compile_error!("bevy_ticked_avian: enable the `2d` feature, the `3d` feature, or both");
@@ -117,15 +124,16 @@ pub enum TickedSimulationSet {
 }
 
 macro_rules! ticked_avian {
-    ($avian:ident, [$($joint:ty),* $(,)?], $place_from:item) => {
+    ($avian:ident, [$($joint:ty),* $(,)?], $scale:ty, $place_from:item) => {
     use $avian::collision::contact_types::{ContactGraph, ContactId};
     use $avian::dynamics::solver::constraint_graph::ConstraintGraph;
     use $avian::dynamics::solver::islands::{
         BodyIslandNode, IslandPlugin, IslandSleepingPlugin, PhysicsIslands,
     };
     use $avian::dynamics::joints::EntityConstraint;
-    use $avian::dynamics::solver::joint_graph::JointGraph;
+    use $avian::dynamics::joints::joint_graph::JointGraph;
     use bevy::ecs::storage::TableId;
+    use $avian::math::ToRealPrecision;
     use $avian::physics_transform::PhysicsTransformConfig;
     use $avian::prelude::*;
     use bevy::prelude::*;
@@ -311,10 +319,16 @@ macro_rules! ticked_avian {
                     PhysicsSchedule,
                     (
                         orient_new_contact_pairs.in_set(BroadPhaseSystems::Last),
+                        // The narrow phase only queues which contacts started and stopped
+                        // generating constraints; the solver applies the queue to the constraint
+                        // graph as it starts, then the joint graph's changes. The colouring is
+                        // rebuilt from that graph, so after both. (The contact half also runs in
+                        // `PhysicsStepSystems::First`, so it cannot be ordered against by name.)
                         (recolor_constraint_graph, $(reseat_joints::<$joint>,)*)
                             .chain()
-                            .after(PhysicsStepSystems::NarrowPhase)
-                            .before(PhysicsStepSystems::Solver),
+                            .in_set(PhysicsStepSystems::Solver)
+                            .after($avian::dynamics::solver::apply_joint_graph_changes)
+                            .before(SolverSystems::PrepareSolverBodies),
                     ),
                 );
             }
@@ -347,7 +361,7 @@ macro_rules! ticked_avian {
     /// A collider attached to a body it is not: a child collider, whose offset from the body
     /// avian takes from the child's `Transform` — the drawn value, in a game whose simulation
     /// leaves transforms to the presentation.
-    fn no_child_colliders(insert: On<Insert, ColliderOf>, colliders: Query<&ColliderOf>) {
+    fn no_child_colliders(insert: On<Insert<ColliderOf>>, colliders: Query<&ColliderOf>) {
         if let Ok(of) = colliders.get(insert.entity)
             && of.body != insert.entity
         {
@@ -367,18 +381,18 @@ macro_rules! ticked_avian {
     /// a game's sprite transform happens to say when there is one. Neither is the simulation's to
     /// decide by, so the scale is put back to one. The per-step scale sync is off in this mode, so
     /// this is the scale it keeps; avian recomputes the mass from it.
-    fn unit_collider_scale(insert: On<Insert, Collider>, mut colliders: Query<&mut Collider>) {
+    fn unit_collider_scale(insert: On<Insert<Collider>>, mut colliders: Query<&mut Collider>) {
         if let Ok(mut collider) = colliders.get_mut(insert.entity)
-            && collider.scale() != $avian::math::Vector::ONE
+            && collider.scale() != <$scale>::ONE
         {
-            collider.set_scale($avian::math::Vector::ONE, 10);
+            collider.set_scale(<$scale>::ONE, 10);
         }
     }
 
     /// With the per-step sync off, a body spawned with a `Transform` and nothing else would start
     /// at the origin: place it once, when its `RigidBody` arrives with the transform.
     fn place_from_transform_once(
-        add: On<Add, RigidBody>,
+        add: On<Add<RigidBody>>,
         bodies: Query<(&Transform, &Position, &Rotation)>,
         mut commands: Commands,
     ) {
@@ -462,7 +476,7 @@ macro_rules! ticked_avian {
     /// manifolds in [`ContactKey`] order, so the solve order is a function of which pairs touch
     /// and nothing else.
     fn recolor_constraint_graph(
-        mut contact_graph: ResMut<ContactGraph>,
+        contact_graph: Res<ContactGraph>,
         mut constraint_graph: ResMut<ConstraintGraph>,
         tracked: Query<(Option<&TickTrackedEntity>, Option<&ColliderOf>)>,
         bodies: Query<&TickTrackedEntity>,
@@ -495,13 +509,12 @@ macro_rules! ticked_avian {
 
         constraint_graph.clear();
         for &(_, _, id, manifolds) in order.iter() {
-            let Some((edge, pair)) = contact_graph.get_mut_by_id(id) else {
+            let Some((_, pair)) = contact_graph.get_by_id(id) else {
                 continue;
             };
             debug_assert_eq!(manifolds, pair.manifolds.len());
-            edge.constraint_handles.clear();
             for _ in 0..manifolds {
-                constraint_graph.push_manifold(edge, pair);
+                constraint_graph.push_manifold(pair);
             }
         }
     }
@@ -612,9 +625,10 @@ pub mod avian3d {
             PrismaticJoint,
             DistanceJoint
         ],
+        Vec3,
         fn place_from(transform: &Transform) -> (Position, Rotation) {
             (
-                Position(transform.translation),
+                Position(transform.translation.real()),
                 Rotation(transform.rotation),
             )
         }
@@ -627,9 +641,10 @@ pub mod avian2d {
     ticked_avian!(
         avian2d,
         [FixedJoint, RevoluteJoint, PrismaticJoint, DistanceJoint],
+        Vec2,
         fn place_from(transform: &Transform) -> (Position, Rotation) {
             (
-                Position(transform.translation.truncate()),
+                Position(transform.translation.truncate().real()),
                 Rotation::radians(transform.rotation.to_scaled_axis().z),
             )
         }

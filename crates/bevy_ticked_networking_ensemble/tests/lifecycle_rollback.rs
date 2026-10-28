@@ -197,7 +197,7 @@ fn on_add_fires_once_for_a_predicted_spawn_confirmed_by_the_host() {
     struct Added(Vec<u64>);
     let Session { mut net, a, .. } = session(Link::cable());
     net.app_mut(a).init_resource::<Added>().add_observer(
-        |add: On<Add, TickTrackedEntity>,
+        |add: On<Add<TickTrackedEntity>>,
          tracked: Query<&TickTrackedEntity>,
          mut added: ResMut<Added>| {
             if let Ok(t) = tracked.get(add.entity) {

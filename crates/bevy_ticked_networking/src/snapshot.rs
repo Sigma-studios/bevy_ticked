@@ -267,7 +267,7 @@ pub struct Applied {
 /// Snapshot-implies-existence, with the lifetimes deciding what absence means:
 /// - an id in the body but not local is **spawned** — or its tombstone **revived**, if this
 ///   peer despawned it and the authority says it is still there — its components inserted
-///   first and `TickTrackedEntity` last, so an `On<Add, TickTrackedEntity>` observer sees them;
+///   first and `TickTrackedEntity` last, so an `On<Add<TickTrackedEntity>>` observer sees them;
 /// - a local tracked id not in the body is **tombstoned** if it was born at or before `tick`
 ///   (the authority has seen it and does not have it); one born after `tick` is left to the
 ///   rollback, which knows whether the replay spawns it again. That is what lets a client
