@@ -5,20 +5,29 @@ edition = "2024"
 description = "The avian physics bundle that replays bit-identically under bevy_ticked"
 
 [features]
-default = ["3d"]
+default = ["3d", "f32"]
 2d = ["dep:avian2d"]
 3d = ["dep:avian3d"]
+# avian's precision, which this crate picks for it (avian refuses `parry-f32` and `parry-f64`
+# together, so a crate that takes avian with its default features rules out `f64`). `f32` is
+# avian's default. `f64` keeps world-space positions (`Position`, ray and shape-cast origins) in
+# double precision, for worlds wider than an `f32` resolves; everything else in avian stays
+# `f32`. For `f64`, turn this crate's default features off, and avian's in every crate that
+# names it.
+f32 = ["avian2d?/parry-f32", "avian3d?/parry-f32"]
+f64 = ["avian2d?/parry-f64", "avian3d?/parry-f64"]
 
 [dependencies]
-bevy = { version = "0.19", default-features = false, features = ["std", "bevy_log"] }
+bevy = { version = "0.20", default-features = false, features = ["std", "bevy_log"] }
 bevy_ticked = { path = "../.." }
 bevy_ticked_networking = { path = "../bevy_ticked_networking", default-features = false }
-avian2d = { version = "0.7", features = ["serialize"], optional = true }
-avian3d = { version = "0.7", features = ["serialize"], optional = true }
+# Without avian's default features, so that the precision above is the only one asked for.
+avian2d = { version = "0.8", default-features = false, features = ["2d", "serialize", "xpbd_joints"], optional = true }
+avian3d = { version = "0.8", default-features = false, features = ["3d", "serialize", "xpbd_joints"], optional = true }
 
 [dev-dependencies]
 # `debug` keeps system names, which the transform guard's read check matches on.
-bevy = { version = "0.19", features = ["debug"] }
+bevy = { version = "0.20", features = ["debug"] }
 bevy_ticked_testing = { path = "../bevy_ticked_testing", features = ["avian"] }
 
 [lints.clippy]

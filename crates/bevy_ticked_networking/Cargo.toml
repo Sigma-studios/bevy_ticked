@@ -11,7 +11,7 @@ window = ["bevy/bevy_window"]
 lz4 = ["dep:lz4_flex"]
 
 [dependencies]
-bevy = { version = "0.19", default-features = false, features = ["std", "bevy_log", "bevy_state"] }
+bevy = { version = "0.20", default-features = false, features = ["std", "bevy_log", "bevy_state"] }
 bevy_ticked = { path = "../.." }
 lz4_flex = { version = "0.11", optional = true, default-features = false, features = ["safe-encode", "safe-decode"] }
 postcard = { version = "1", features = ["alloc"] }
@@ -19,7 +19,7 @@ serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 # The tests and examples run whole apps; the library itself only needs the ECS.
-bevy = "0.19"
+bevy = "0.20"
 # The source guard and golden helpers; tests only.
 bevy_ticked_testing = { path = "../bevy_ticked_testing" }
 

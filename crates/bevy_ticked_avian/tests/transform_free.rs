@@ -1,6 +1,7 @@
 //! avian under the tick never reads or writes `Transform`: whatever is done to one between ticks,
 //! the bodies move exactly as they would have if nobody had touched it.
 
+use ::avian3d::math::{ToF32Precision, ToRealPrecision};
 use ::avian3d::prelude::*;
 use bevy::prelude::*;
 use bevy_ticked::checksum::WorldHash;
@@ -41,7 +42,7 @@ fn run(scrambled: bool) -> AvianHash {
         .query_filtered::<&Position, With<TickTrackedEntity>>();
     let lowest = boxes
         .iter(app.world())
-        .map(|position| position.0.y)
+        .map(|position| position.0.y.f32())
         .fold(f32::MAX, f32::min);
     assert!(
         lowest > 0.0,
@@ -69,14 +70,14 @@ fn a_body_without_a_transform_lands_on_the_ground() {
     app.world_mut().spawn((
         RigidBody::Static,
         Collider::cuboid(40.0, 1.0, 40.0),
-        Position(Vec3::new(0.0, -0.5, 0.0)),
+        Position(Vec3::new(0.0, -0.5, 0.0).real()),
     ));
     let body = app
         .world_mut()
         .spawn((
             RigidBody::Dynamic,
             Collider::cuboid(1.0, 1.0, 1.0),
-            Position(Vec3::new(0.0, 3.0, 0.0)),
+            Position(Vec3::new(0.0, 3.0, 0.0).real()),
         ))
         .id();
     assert!(

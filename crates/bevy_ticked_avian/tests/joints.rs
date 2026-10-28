@@ -7,6 +7,7 @@
 //! tombstone revives the same entity, and re-inserting `RigidBody` on it is an insert, not an
 //! add — a `Transform` would not be read again.
 
+use avian3d::math::{ToF32Precision, ToRealPrecision};
 use avian3d::prelude::*;
 use bevy::prelude::*;
 use bevy_ticked::TickedSimulation;
@@ -38,7 +39,7 @@ fn body(at: Vec3) -> impl Bundle {
     (
         RigidBody::Dynamic,
         Collider::cuboid(HALF_LINK * 2.0, 0.25, 0.25),
-        Position(at),
+        Position(at.real()),
         Rotation::default(),
         LinearVelocity::ZERO,
         AngularVelocity::ZERO,
@@ -49,7 +50,7 @@ fn spawn_ground(world: &mut World) {
     world.spawn((
         RigidBody::Static,
         Collider::cuboid(40.0, 1.0, 40.0),
-        Position(Vec3::new(0.0, -0.5, 0.0)),
+        Position(Vec3::new(0.0, -0.5, 0.0).real()),
     ));
 }
 
@@ -79,7 +80,7 @@ fn joint_gap(world: &World, parent: Entity, child: Entity) -> f32 {
         let rotation = world
             .get::<Rotation>(entity)
             .expect("a link has a rotation");
-        position.0 + rotation.0 * local
+        position.0.f32() + rotation.0 * local
     };
     anchor(parent, Vec3::X * HALF_LINK).distance(anchor(child, Vec3::NEG_X * HALF_LINK))
 }
@@ -104,6 +105,7 @@ fn a_jointed_chain_replays_bit_identically() {
             .get::<Position>(free_end)
             .unwrap()
             .0
+            .f32()
             .distance(started_at)
             > 0.5,
         "the chain did not move; the replay compared a still world"

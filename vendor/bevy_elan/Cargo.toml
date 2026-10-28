@@ -1,0 +1,28 @@
+# A copy of https://github.com/Sigma-dev/bevy_elan at 9ad6f71 (MIT, see LICENSE), moved to
+# Bevy 0.20 / avian 0.8 here because upstream has no release for them yet. Only the example
+# `fps_shooter` uses it. Delete this directory and go back to the git dependency once upstream
+# has a Bevy 0.20 commit.
+[package]
+name = "bevy_elan"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "A simple force-based first-person character controller and FPS look camera for Bevy, built on the Avian physics engine."
+repository = "https://github.com/Sigma-dev/bevy_elan"
+keywords = ["bevy", "gamedev", "fps", "character-controller", "avian"]
+categories = ["game-development"]
+publish = false
+
+[features]
+# Derive serde on the controller's persistent state (LastGrounded / LastJump)
+# so it can be snapshotted/rolled back by a tick-networking layer.
+serialize = ["dep:serde"]
+
+[dependencies]
+bevy = "0.20"
+avian3d = "0.8"
+serde = { version = "1", features = ["derive"], optional = true }
+
+[lints.clippy]
+too_many_arguments = "allow"
+type_complexity = "allow"

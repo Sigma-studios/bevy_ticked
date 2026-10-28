@@ -69,7 +69,7 @@ fn client() -> App {
         .register_ticked_component::<Beat>()
         .add_systems(TickedSimulation, beat)
         .add_systems(Update, count_changed)
-        .add_observer(|_: On<Insert, Pos>, mut counts: ResMut<Counts>| counts.inserted += 1);
+        .add_observer(|_: On<Insert<Pos>>, mut counts: ResMut<Counts>| counts.inserted += 1);
     app.insert_resource(LocalClientPlayer(LOCAL));
     app.update();
     app

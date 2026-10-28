@@ -315,7 +315,7 @@ pub(crate) fn plugin(app: &mut App) {
 /// `SendMode::Reliable`: this is the one message in this crate that must not be dropped. An
 /// unreliable handshake that goes missing is a session that never starts.
 fn announce_registry(
-    verified: On<Add, HandshakeVerified>,
+    verified: On<Add<HandshakeVerified>>,
     components: Option<Res<TickedComponentRegistry>>,
     resources: Option<Res<TickedResourceRegistry>>,
     clients: Query<(), With<LobbyClient>>,

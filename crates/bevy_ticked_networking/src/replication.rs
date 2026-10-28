@@ -260,7 +260,7 @@ impl Plugin for RemoteInterpolationPlugin {
 /// An entity that appears with the local player's `Owner` is predicted; one that appears with
 /// anybody else's keeps the default.
 fn mark_owned_on_add(
-    add: On<Add, Owner>,
+    add: On<Add<Owner>>,
     local: Option<Res<LocalClientPlayer>>,
     owners: Query<&Owner>,
     mut commands: Commands,

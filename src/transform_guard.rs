@@ -22,7 +22,7 @@
 
 use bevy::ecs::change_detection::Tick as ChangeTick;
 use bevy::ecs::schedule::Schedules;
-use bevy::ecs::system::System;
+use bevy::ecs::system::{System, SystemAccess};
 use bevy::prelude::*;
 
 use crate::TickedSimulation;
@@ -141,7 +141,12 @@ fn audit_simulation_reads(world: &mut World) {
         let Some(system) = graph.systems.get_mut(key) else {
             continue;
         };
-        let access = system.initialize(world);
+        // An exclusive system reads everything, so it says nothing about transforms in
+        // particular; it is skipped as a read-all shared system is.
+        let access = match system.initialize(world) {
+            SystemAccess::Shared(access) => access,
+            SystemAccess::None | SystemAccess::Exclusive => continue,
+        };
         let access = access.combined_access();
         if access.has_read_all() {
             continue;

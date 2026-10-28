@@ -5,6 +5,26 @@ pull requests #1–#14 on this repository are the phases.
 
 ## Unreleased
 
+- **Behaviour change** — Bevy 0.20 and avian 0.8 (rustc 1.97.1), on bevy_ensemble `4ce1c62`.
+  Observers take the component inside the event (`On<Add<T>>`). avian's narrow phase now queues
+  which contacts start and stop generating constraints and its solver applies the queue as it
+  starts, so `bevy_ticked_avian` rebuilds the canonical colouring there, after the queue, rather
+  than between the narrow phase and the solver. Replays stay bit-identical (every avian test,
+  and `tests/despawn_after_the_step.rs` for a body tombstoned after the step, whose contacts wait
+  in that queue across the tick boundary); the results themselves change with avian's new CCD and
+  solver, so recorded replays and golden traces must be re-recorded. `AvianHash` hashes positions
+  as 64-bit, which changes every trace recorded with it.
+- **New** — avian's `f64`: `bevy_ticked_avian` features `f32` (default) and `f64` pick avian's
+  precision, and the crate (and `bevy_ticked_testing`'s `avian` fixture) take avian without its
+  default features, which would otherwise always ask for `parry-f32` and so rule `f64` out.
+  Under `f64` a `Position` is a `DVec3`/`DVec2` on the wire and in the history; rotations,
+  velocities and colliders stay `f32`, as in avian. The whole avian suite passes under `f64`, in
+  2D and 3D, with its own golden, plus a stack fifty kilometres from the origin that replays
+  bit-identically (CI runs it). A game that relied on this crate for avian's default features
+  (debug rendering, `collider-from-mesh`, `parallel`, picking, scenes) names them on its own avian
+  dependency. The `fps_shooter` example takes a copy of bevy_elan moved to Bevy 0.20
+  (`vendor/bevy_elan`) until upstream has one.
+
 - **New** — a client whose link to its host breaks is held, not left to play alone, and resumes in
   place when the host reaches it again (bevy_ensemble's `Reconnectable`). The bridge holds the
   clock with `TickHoldReason::AwaitingHost` (new) for as long as the lobby is `AwaitingHost`, for a

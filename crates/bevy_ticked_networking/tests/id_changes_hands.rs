@@ -59,7 +59,7 @@ struct Dressed;
 #[derive(Component, Debug)]
 struct Kept;
 
-fn dress(add: On<Add, TickTrackedEntity>, mut commands: Commands) {
+fn dress(add: On<Add<TickTrackedEntity>>, mut commands: Commands) {
     commands.entity(add.entity).insert(Dressed);
 }
 

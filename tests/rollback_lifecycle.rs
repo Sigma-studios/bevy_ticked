@@ -23,7 +23,7 @@ struct Tag;
 #[derive(Component, Debug, Default)]
 struct Dressed;
 
-fn dress(add: On<Add, TickTrackedEntity>, mut commands: Commands) {
+fn dress(add: On<Add<TickTrackedEntity>>, mut commands: Commands) {
     commands.entity(add.entity).insert(Dressed);
 }
 

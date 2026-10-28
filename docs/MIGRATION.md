@@ -48,6 +48,36 @@ obeys; `docs/avian.md` the physics bundle.
 | `PhysicsPlugins` added by the game with avian's default transform config | `insert_resource(presentation_transform_config())` before them | T21 |
 | re-inserting `TickedInterpolation::default()` to stop a teleport being blended | `Teleported(tick)`, rolled back with the body | T21 |
 | `SmoothingOffset { .., applied_translation, applied_rotation }` | `SmoothingOffset { translation, rotation }` | T21 |
+| `On<Add, TickTrackedEntity>` (any lifecycle event) | `On<Add<TickTrackedEntity>>` | Bevy 0.20 |
+| avian's default features, through `bevy_ticked_avian` | avian without them; `bevy_ticked_avian`'s `f32` (default) or `f64` | Bevy 0.20 |
+
+## Bevy 0.20 and avian 0.8
+
+Pins bevy_ensemble `4ce1c62` (Bevy 0.20; see its `docs/MIGRATION.md`). Needs rustc 1.97.1.
+Bevy's own changes are in its guide (<https://bevy.org/learn/migration-guides/0-19-to-0-20/>),
+avian's in `migration-guides/0.7-to-0.8.md` in its repository; what this repository adds:
+
+- **Observers:** `On<Add, TickTrackedEntity>` is `On<Add<TickTrackedEntity>>`, for every
+  lifecycle event and every component here (`Owner`, `ReplicationMode`, …).
+- **Re-record** recorded replays and golden traces of avian scenes: avian 0.8 solves differently
+  (new CCD, solver changes). A replay is still bit-identical to its live run. Traces recorded with
+  `bevy_ticked_testing`'s `AvianHash` change regardless: positions are hashed as 64-bit now.
+- **avian's features.** `bevy_ticked_avian` takes avian with `default-features = false` and picks
+  its precision with its own `f32` (default) or `f64`. A game that had avian's default features
+  only through this crate names them on its own avian dependency. A game that turns this crate's
+  default features off (`features = ["2d"]`) keeps `f32` by naming it, or by taking avian with its
+  defaults itself, as the examples do.
+- **`f64`**, for a world wider than an `f32` resolves (four millimetres at fifty kilometres):
+  ```toml
+  bevy_ticked_avian = { git = "https://github.com/Sigma-studios/bevy_ticked", rev = "…", default-features = false, features = ["3d", "f64"] }
+  avian3d = { version = "0.8", default-features = false, features = ["3d", "parry-f64", "xpbd_joints", "serialize"] }
+  ```
+  Every crate in the build that names avian has to leave its default features off: avian refuses
+  `parry-f32` and `parry-f64` together. `Position` holds a `DVec3` (`DVec2`); place bodies with
+  `Position`, not a `Transform` (`f32`), when they are far out, and build the drawn `Transform`
+  relative to the camera in `TickedPresentation`. Both peers of a session build with the same
+  precision: the wire name `avian::Position` is the same in both and the handshake does not tell
+  them apart.
 
 ## A broken link is held, and made again
 
