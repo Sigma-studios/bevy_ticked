@@ -2183,9 +2183,7 @@ dependencies = [
  "avian3d",
  "bevy",
  "bevy_ticked_testing",
- "log",
  "serde",
- "tracing",
 ]
 
 [[package]]

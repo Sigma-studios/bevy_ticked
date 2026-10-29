@@ -5,6 +5,11 @@ pull requests #1–#14 on this repository are the phases.
 
 ## Unreleased
 
+- **Behaviour change** — the crate no longer caps log levels (`log`/`tracing`
+  `max_level_debug` + `release_max_level_warn`). Cargo features unify across a build, so the cap
+  hid every `info!` of every crate in the games' release binaries, and their `trace!` in debug
+  builds. A game that wants the cap sets those features in its own `Cargo.toml`. The crate's own
+  `info!` lines are rare events (rewinds, host changes), not per tick.
 - **Behaviour change** — Bevy 0.20 and avian 0.8 (rustc 1.97.1), on bevy_ensemble `4ce1c62`.
   Observers take the component inside the event (`On<Add<T>>`). avian's narrow phase now queues
   which contacts start and stop generating constraints and its solver applies the queue as it

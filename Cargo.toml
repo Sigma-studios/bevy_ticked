@@ -35,14 +35,6 @@ bevy = { version = "0.20", default-features = false, features = [
     "web",
 ] }
 serde = { version = "1", features = ["derive"] }
-log = { version = "0.4", features = [
-    "max_level_debug",
-    "release_max_level_warn",
-] }
-tracing = { version = "0.1", features = [
-    "max_level_debug",
-    "release_max_level_warn",
-] }
 
 [dev-dependencies]
 # The tests and examples run whole apps; the library itself only needs the ECS. `debug` keeps
