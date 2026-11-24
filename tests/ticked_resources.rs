@@ -174,3 +174,75 @@ fn reset_all_returns_every_registered_resource_to_default() {
         "a registered resource the game never inserted is not inserted behind its back"
     );
 }
+
+/// State another library keeps in a resource that is not `Clone`: what [`TickedMirror`] is for.
+#[derive(Resource, Default)]
+struct Queue(Vec<u32>);
+
+#[derive(Clone, Default)]
+struct QueueMirror(Vec<u32>);
+
+impl TickedMirror for QueueMirror {
+    fn read(world: &World) -> Self {
+        Self(world.resource::<Queue>().0.clone())
+    }
+
+    fn write(self, world: &mut World) {
+        world.resource_mut::<Queue>().0 = self.0;
+    }
+}
+
+/// The library reacting to a restore through an observer, the way avian queues a tombstoned
+/// body's contacts: while components are put back, before the resources are.
+fn queue_on_insert(insert: On<Insert<Height>>, heights: Query<&Height>, mut queue: ResMut<Queue>) {
+    if let Ok(height) = heights.get(insert.entity) {
+        queue.0.push(height.0 as u32 + 1000);
+    }
+}
+
+fn mirror_app() -> App {
+    let mut app = app();
+    app.init_resource::<Queue>()
+        .register_ticked_mirror::<QueueMirror>()
+        .add_observer(queue_on_insert);
+    app
+}
+
+#[test]
+fn a_mirror_rolls_back_state_that_is_not_a_clone_resource() {
+    let mut app = mirror_app();
+    app.world_mut().spawn((TickTrackedEntity(1), Height(0)));
+    app.world_mut().resource_mut::<Queue>().0.clear();
+
+    step(&mut app);
+    app.world_mut().resource_mut::<Queue>().0 = vec![7];
+    step(&mut app);
+    let tick = app.world().resource::<CurrentTick>().0;
+    app.world_mut().resource_mut::<Queue>().0 = vec![8, 9];
+    step(&mut app);
+
+    restore(&mut app, tick);
+    assert_eq!(app.world().resource::<Queue>().0, vec![7]);
+}
+
+#[test]
+fn a_mirror_is_written_back_after_the_components_it_reacts_to() {
+    let mut app = mirror_app();
+    let entity = app
+        .world_mut()
+        .spawn((TickTrackedEntity(1), Height(0)))
+        .id();
+    app.world_mut().resource_mut::<Queue>().0.clear();
+
+    step(&mut app);
+    let tick = app.world().resource::<CurrentTick>().0;
+    app.world_mut().entity_mut(entity).insert(Height(5));
+    app.world_mut().resource_mut::<Queue>().0.clear();
+    step(&mut app);
+
+    // Restoring `Height` re-inserts it, and the observer queues something on the way; the
+    // mirror is written last, so what the queue held at `tick` is what stands.
+    restore(&mut app, tick);
+    assert_eq!(app.world().get::<Height>(entity), Some(&Height(0)));
+    assert_eq!(app.world().resource::<Queue>().0, Vec::<u32>::new());
+}

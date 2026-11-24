@@ -5,6 +5,20 @@ pull requests #1–#14 on this repository are the phases.
 
 ## Unreleased
 
+- **Fix** — a rewind across a `ContactId` that changed hands no longer diverges. avian 0.8 reuses
+  a freed contact id for the next pair that starts touching, and queues contacts that stop
+  generating constraints in `ContactStatusChangeQueue`. A restore tombstones a body spawned
+  inside the window *before* it puts the graphs back, so avian's observer queued that body's
+  contacts by their ids at the window's end — one of which the restored graph gives to another
+  pair — and the next step took that pair out of the solve. `bevy_ticked_avian` now rolls the
+  queue back with the graphs (`tests/contact_id_reuse.rs`; seen in run-2d as a ragdoll lying on
+  the floor, with a death and a pickup in the same window).
+- **New** — `TickedMirror` and `register_ticked_mirror`: rollback for state a ticked resource
+  cannot hold (a resource that is not `Clone`, or several), through a copy read when the other
+  resources are captured and written back after everything else is restored, so it wins over
+  whatever observers wrote while existence and components were put back.
+  `TickedResourceRegistry::index_of_mirror` says whether one is registered.
+
 - **Behaviour change** — the crate no longer caps log levels (`log`/`tracing`
   `max_level_debug` + `release_max_level_warn`). Cargo features unify across a build, so the cap
   hid every `info!` of every crate in the games' release binaries, and their `trace!` in debug

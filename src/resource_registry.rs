@@ -173,6 +173,19 @@ impl TickedResourceRegistry {
         }
     }
 
+    /// Roll back state that cannot be a ticked resource itself, through a copy: see
+    /// [`TickedMirror`]. Rollback only, and kept when the session ends, like
+    /// [`register_kept_on_leave`](Self::register_kept_on_leave): the state belongs to a library
+    /// that keeps it consistent with the world on its own.
+    pub fn register_mirror<M: TickedMirror>(&mut self) {
+        self.register_kept_on_leave::<Mirrored<M>>();
+        let inner = Arc::make_mut(&mut self.inner);
+        let index = inner.type_indices[&TypeId::of::<Mirrored<M>>()];
+        let entry = &mut inner.entries[index as usize];
+        entry.capture = capture_mirror::<M>;
+        entry.restore = restore_mirror::<M>;
+    }
+
     /// Register a networked resource. Called by the networking crate. The name is required: it
     /// is the resource's identity on the wire.
     ///
@@ -258,6 +271,11 @@ impl TickedResourceRegistry {
     /// The registration index: position in registration order, meaningful in this process only.
     pub fn index_of<R: TickedResource>(&self) -> Option<u16> {
         self.inner.type_indices.get(&TypeId::of::<R>()).copied()
+    }
+
+    /// As [`index_of`](Self::index_of), for a [`TickedMirror`].
+    pub fn index_of_mirror<M: TickedMirror>(&self) -> Option<u16> {
+        self.index_of::<Mirrored<M>>()
     }
 
     fn frozen(&self) -> &FrozenResources {
@@ -471,6 +489,43 @@ fn reset_resource<R: TickedResource>(world: &mut World) {
     clear_resource::<R>(world);
 }
 
+/// Rollback state another library keeps where a [`TickedResource`] cannot be: in a resource that
+/// is not `Clone`, or spread over several. A copy is read out of the world when every other
+/// resource is captured, and written back when every other resource has been restored.
+///
+/// "When every other resource has been restored" is the point. A restore puts back existence
+/// first, then components, then resources, and a library that reacts to the first two through
+/// observers — avian queueing contact changes when a body is tombstoned — does so while its own
+/// resources still hold the future being rolled away from. State written then outlives the
+/// restore unless it is rolled back as well, and written back last.
+pub trait TickedMirror: Clone + Default + Send + Sync + 'static {
+    /// The state as it stands, at the end of a tick.
+    fn read(world: &World) -> Self;
+    /// Put it back, after a restore.
+    fn write(self, world: &mut World);
+}
+
+/// The history's copy of a [`TickedMirror`]. A resource so the ordinary history can keep it.
+#[derive(Resource, Clone, Default)]
+struct Mirrored<M: TickedMirror>(M);
+
+fn capture_mirror<M: TickedMirror>(world: &mut World, tick: Tick) {
+    let value = Mirrored(M::read(world));
+    world
+        .get_resource_or_insert_with(ResourceActions::<Mirrored<M>>::default)
+        .set_tick(tick, value);
+}
+
+fn restore_mirror<M: TickedMirror>(world: &mut World, tick: Tick) {
+    let saved = world
+        .get_resource::<ResourceActions<Mirrored<M>>>()
+        .and_then(|actions| actions.at_tick(tick).cloned());
+    // As `restore_resource`: nothing saved is nothing to guess.
+    if let Some(Mirrored(value)) = saved {
+        value.write(world);
+    }
+}
+
 /// Register a resource for rollback.
 pub trait TickedResourceAppExt {
     /// Captured and rolled back, never sent.
@@ -478,6 +533,8 @@ pub trait TickedResourceAppExt {
     /// As [`register_ticked_resource`](Self::register_ticked_resource), but not reset to
     /// `Default` when the session ends. See [`TickedResourceRegistry::register_kept_on_leave`].
     fn register_ticked_resource_kept_on_leave<R: TickedResource>(&mut self) -> &mut Self;
+    /// Roll back a [`TickedMirror`]. See [`TickedResourceRegistry::register_mirror`].
+    fn register_ticked_mirror<M: TickedMirror>(&mut self) -> &mut Self;
 }
 
 impl TickedResourceAppExt for App {
@@ -496,6 +553,15 @@ impl TickedResourceAppExt for App {
         self.world_mut()
             .resource_mut::<TickedResourceRegistry>()
             .register_kept_on_leave::<R>();
+        self
+    }
+
+    fn register_ticked_mirror<M: TickedMirror>(&mut self) -> &mut Self {
+        self.init_resource::<TickedResourceRegistry>();
+        self.init_resource::<ResourceActions<Mirrored<M>>>();
+        self.world_mut()
+            .resource_mut::<TickedResourceRegistry>()
+            .register_mirror::<M>();
         self
     }
 }

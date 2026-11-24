@@ -16,7 +16,7 @@ pub use crate::{
     registry::{TickedAppExt, TickedComponent, TickedComponentRegistry},
     require_steerable_tick_source,
     resource_registry::{
-        ResourceActions, TickedResource, TickedResourceAppExt, TickedResourceRegistry,
+        ResourceActions, TickedMirror, TickedResource, TickedResourceAppExt, TickedResourceRegistry,
     },
     rollback::{rollback_and_resimulate, rollback_to_tick},
     run_presentation,

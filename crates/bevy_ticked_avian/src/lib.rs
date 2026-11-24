@@ -55,7 +55,11 @@
 //! registers `ContactGraph` as a rollback-only ticked resource, and with it the state that
 //! must agree with it: `ConstraintGraph` (which contacts are constraints, in which colour —
 //! the solve order) and `JointGraph`, plus `PhysicsIslands` and each body's `BodyIslandNode`
-//! when sleeping is allowed and islands therefore exist. Cloned once per tick into the history,
+//! when sleeping is allowed and islands therefore exist. And the queue of contact changes the
+//! next step applies to that graph (`ContactStatusChangeQueue`, through a `TickedMirror`), which
+//! is written back last: a restore tombstones the bodies a window spawned before it restores the
+//! graphs, and avian's observers queue their contacts by ids that, after a rewind, can name
+//! another pair. Cloned once per tick into the history,
 //! restored with everything else, kept rather than emptied when the session ends. Spawn and
 //! despawn bodies through the tracked paths (`despawn_ticked`) so the entities a restored graph
 //! names still exist.
@@ -126,6 +130,7 @@ pub enum TickedSimulationSet {
 macro_rules! ticked_avian {
     ($avian:ident, [$($joint:ty),* $(,)?], $scale:ty, $place_from:item) => {
     use $avian::collision::contact_types::{ContactGraph, ContactId};
+    use $avian::collision::narrow_phase::{ContactStatusChange, ContactStatusChangeQueue};
     use $avian::dynamics::solver::constraint_graph::ConstraintGraph;
     use $avian::dynamics::solver::islands::{
         BodyIslandNode, IslandPlugin, IslandSleepingPlugin, PhysicsIslands,
@@ -139,7 +144,9 @@ macro_rules! ticked_avian {
     use bevy::prelude::*;
     use bevy_ticked::TickedSimulation;
     use bevy_ticked::registry::{TickedAppExt, TickedComponentRegistry};
-    use bevy_ticked::resource_registry::{TickedResourceAppExt, TickedResourceRegistry};
+    use bevy_ticked::resource_registry::{
+        TickedMirror, TickedResourceAppExt, TickedResourceRegistry,
+    };
     use bevy_ticked::tracked_entity::TickTrackedEntity;
     use bevy_ticked_networking::networked_registry::NetworkedTickedAppExt;
 
@@ -272,6 +279,21 @@ macro_rules! ticked_avian {
             register_resource_if_missing::<ContactGraph>(app);
             register_resource_if_missing::<ConstraintGraph>(app);
             register_resource_if_missing::<JointGraph>(app);
+            // And the queue of contacts that started or stopped generating constraints, which
+            // the next step applies to the constraint graph. A restore tombstones a body spawned
+            // inside the window before it puts the graphs back, so avian's observer queues that
+            // body's contacts by the ids they have at the window's end; one of those ids can be a
+            // contact the restored graph gives to another pair, which the next step then took out
+            // of the solve. See `ContactStatusChanges`.
+            let mirrored = app
+                .world()
+                .get_resource::<TickedResourceRegistry>()
+                .is_some_and(|registry| {
+                    registry.index_of_mirror::<ContactStatusChanges>().is_some()
+                });
+            if !mirrored {
+                app.register_ticked_mirror::<ContactStatusChanges>();
+            }
             // Islands only exist when sleeping does. Registering them without the plugin would
             // be harmless (a missing resource is skipped) but would document a promise the
             // bundle no longer makes.
@@ -579,6 +601,32 @@ macro_rules! ticked_avian {
         }
         for &(_, _, entity) in rows.iter() {
             world.entity_mut(entity).remove::<Reseated>();
+        }
+    }
+
+    /// avian's [`ContactStatusChangeQueue`], rolled back with the graphs it is applied to.
+    ///
+    /// Usually empty at a tick boundary, and not always: a body despawned after the step leaves
+    /// its contacts queued for the next one. A restore writes back the queue the tick ended with,
+    /// last, over whatever avian's observers queued while the restore tombstoned and revived
+    /// bodies against the graphs of the future it is rolling away from.
+    #[derive(Clone, Default)]
+    pub struct ContactStatusChanges(Vec<ContactStatusChange>);
+
+    impl TickedMirror for ContactStatusChanges {
+        fn read(world: &World) -> Self {
+            Self(
+                world
+                    .get_resource::<ContactStatusChangeQueue>()
+                    .map(|queue| queue.0.clone())
+                    .unwrap_or_default(),
+            )
+        }
+
+        fn write(self, world: &mut World) {
+            if let Some(mut queue) = world.get_resource_mut::<ContactStatusChangeQueue>() {
+                queue.0 = self.0;
+            }
         }
     }
 
