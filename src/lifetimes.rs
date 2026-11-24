@@ -419,6 +419,57 @@ pub fn reset(world: &mut World, entity: Entity) {
     }
 }
 
+/// A tracked entity's simulated state the moment it was minted: every registered component it
+/// had once the spawn and the observers it fired were done, and which it did not have.
+///
+/// For the one case a revive cannot get right on its own. A replay that runs a spawn again mints
+/// the same id onto the same tombstone, and deliberately leaves it as it is — its local-only
+/// state is the game's to keep across rollbacks (see [`reset`]) — then inserts the bundle. An
+/// insert overwrites what the bundle names and nothing else, so a component the spawn brought
+/// without naming it (a required one, a body's rotation, one its observer put on) or one the
+/// simulation added during the entity's life kept the value it had when the rewind tombstoned
+/// it: the end of the window, not the spawn. The replay diverged on the tick of the spawn.
+/// [`return_to_spawn_state`] puts the registered types the bundle does not name back to this.
+/// Local-only components are not registered, and not touched.
+#[derive(Component)]
+pub struct SpawnState(pub(crate) Vec<Option<Box<dyn std::any::Any + Send + Sync>>>);
+
+/// Note what `entity` was minted as: see [`SpawnState`]. After the spawn's observers, and after
+/// the commands they queued.
+pub(crate) fn record_spawn_state(world: &mut World, entity: Entity) {
+    let Some(registry) = world.get_resource::<TickedComponentRegistry>().cloned() else {
+        return;
+    };
+    if world.get_entity(entity).is_err() {
+        return;
+    }
+    let state = registry.spawn_state(world, entity);
+    world.entity_mut(entity).insert(state);
+}
+
+/// The same spawn run again onto its tombstone: every registered type the bundle `B` does not name
+/// goes back to what it was when the entity was first minted. See [`SpawnState`].
+pub(crate) fn return_to_spawn_state<B: Bundle>(world: &mut World, entity: Entity) {
+    let Some(registry) = world.get_resource::<TickedComponentRegistry>().cloned() else {
+        return;
+    };
+    let named: Vec<std::any::TypeId> = {
+        let explicit = world.register_bundle::<B>().explicit_components().to_vec();
+        explicit
+            .iter()
+            .filter_map(|id| world.components().get_info(*id)?.type_id())
+            .collect()
+    };
+    let Ok(mut entity_mut) = world.get_entity_mut(entity) else {
+        return;
+    };
+    let Some(state) = entity_mut.take::<SpawnState>() else {
+        return;
+    };
+    registry.apply_spawn_state(world, entity, &state, &named);
+    world.entity_mut(entity).insert(state);
+}
+
 /// Fire `Add<TickTrackedEntity>` again, so the game's spawn observer dresses this entity for
 /// what it has just become.
 ///

@@ -1,5 +1,5 @@
 use std::{
-    any::{TypeId, type_name},
+    any::{Any, TypeId, type_name},
     collections::HashMap,
     sync::{Arc, OnceLock},
 };
@@ -8,8 +8,8 @@ use crate::tick_types::Tick;
 use bevy::prelude::*;
 
 use crate::{
-    resource_registry::TickedResourceRegistry, tracked_entity::TickTrackedEntity,
-    world_actions::WorldActions,
+    lifetimes::SpawnState, resource_registry::TickedResourceRegistry,
+    tracked_entity::TickTrackedEntity, world_actions::WorldActions,
 };
 
 /// FNV-1a starting value, shared by every registry hash so that the two index spaces are folded
@@ -92,6 +92,10 @@ struct RegisteredTickedComponent {
     capture: fn(&mut World, Tick),
     restore: fn(&mut World, Tick),
     restore_one: fn(&mut World, Tick, u64, Entity),
+    /// The component on one entity as it stands, for a [`SpawnState`].
+    snapshot_one: fn(&World, Entity) -> Option<Box<dyn Any + Send + Sync>>,
+    /// Put one entity's component back to a [`SpawnState`]'s copy, or take it off if it had none.
+    apply_one: fn(&mut World, Entity, Option<&(dyn Any + Send + Sync)>),
     truncate_after: fn(&mut World, Tick),
     prune_before: fn(&mut World, Tick),
     clear: fn(&mut World),
@@ -246,6 +250,8 @@ impl TickedComponentRegistry {
             capture: capture_component::<T>,
             restore: restore_component::<T>,
             restore_one: restore_one_component::<T>,
+            snapshot_one: snapshot_one_component::<T>,
+            apply_one: apply_one_component::<T>,
             truncate_after: truncate_component::<T>,
             prune_before: prune_component::<T>,
             clear: clear_component::<T>,
@@ -419,6 +425,33 @@ impl TickedComponentRegistry {
         }
         if let Some(resources) = world.get_resource::<TickedResourceRegistry>().cloned() {
             resources.restore_all(world, tick);
+        }
+    }
+
+    /// Every registered component on `entity`, as it stands. See [`SpawnState`].
+    pub(crate) fn spawn_state(&self, world: &World, entity: Entity) -> SpawnState {
+        SpawnState(
+            self.inner
+                .entries
+                .iter()
+                .map(|entry| (entry.snapshot_one)(world, entity))
+                .collect(),
+        )
+    }
+
+    /// Put `entity`'s registered components back to `state`, except the types in `named`: on
+    /// where `state` had them, off where it did not.
+    pub(crate) fn apply_spawn_state(
+        &self,
+        world: &mut World,
+        entity: Entity,
+        state: &SpawnState,
+        named: &[TypeId],
+    ) {
+        for (entry, saved) in self.inner.entries.iter().zip(&state.0) {
+            if !named.contains(&entry.type_id) {
+                (entry.apply_one)(world, entity, saved.as_deref());
+            }
         }
     }
 
@@ -804,6 +837,30 @@ fn restore_one_component<T: TickedComponent>(
         .cloned();
     if let Some(component) = saved {
         world.entity_mut(entity).insert(component);
+    }
+}
+
+fn snapshot_one_component<T: TickedComponent>(
+    world: &World,
+    entity: Entity,
+) -> Option<Box<dyn Any + Send + Sync>> {
+    world
+        .get::<T>(entity)
+        .map(|component| Box::new(component.clone()) as Box<dyn Any + Send + Sync>)
+}
+
+fn apply_one_component<T: TickedComponent>(
+    world: &mut World,
+    entity: Entity,
+    saved: Option<&(dyn Any + Send + Sync)>,
+) {
+    match saved.and_then(|saved| saved.downcast_ref::<T>()) {
+        Some(component) => {
+            world.entity_mut(entity).insert(component.clone());
+        }
+        None => {
+            world.entity_mut(entity).remove::<T>();
+        }
     }
 }
 

@@ -42,13 +42,8 @@ fn spawn_b(tick: Res<CurrentTick>, mut spawner: TrackedSpawner) {
             (
                 RigidBody::Dynamic,
                 Collider::cuboid(1.0, 1.0, 1.0),
-                // In the tick, so `Position`: the simulation does not write transforms. And all
-                // of the state, named: the replay mints B again onto its tombstone, which keeps
-                // whatever the bundle leaves out from the end of the window.
+                // In the tick, so `Position`: the simulation does not write transforms.
                 Position::from_xyz(0.0, 0.6, 0.0),
-                Rotation::default(),
-                LinearVelocity::ZERO,
-                AngularVelocity::ZERO,
             ),
         );
     }

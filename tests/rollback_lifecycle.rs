@@ -246,6 +246,60 @@ fn a_tombstone_reused_by_the_same_spawn_keeps_its_local_only_state() {
     );
 }
 
+/// Simulated, and required by [`Spinner`]: a spawn of `(Height, Spinner)` gets one without naming it.
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq)]
+struct Spin(i32);
+
+#[derive(Component, Clone, Copy, Debug, PartialEq)]
+#[require(Spin)]
+struct Spinner;
+
+/// Simulated, and put on during the entity's life rather than by its spawn.
+#[derive(Component, Clone, Copy, Debug, PartialEq)]
+struct Bruised;
+
+#[test]
+fn a_tombstone_reused_by_the_same_spawn_starts_its_simulated_state_from_the_spawn() {
+    // The same spawn replayed keeps its local-only state (above), and its *simulated* state is
+    // what a fresh spawn would have: the bundle's values, what the spawn brought with it, and
+    // nothing the simulation added later. It used to keep whatever the tombstone held when the
+    // rewind tombstoned it -- a spin, a bruise, from the end of the window -- and the replay
+    // diverged from the live run on the tick of the spawn.
+    let mut app = app();
+    app.register_ticked_component::<Spin>()
+        .register_ticked_component::<Bruised>();
+    app.world_mut().spawn_tracked(Height(1));
+    step(&mut app);
+    let top = app.world_mut().spawn_tracked((Height(5), Spinner));
+    assert_eq!(app.world().get::<Spin>(top), Some(&Spin(0)));
+    step(&mut app);
+    app.world_mut().entity_mut(top).insert((Spin(9), Bruised));
+    step(&mut app);
+
+    rollback_to_tick(app.world_mut(), Tick(1));
+    let again = app.world_mut().spawn_tracked((Height(6), Spinner));
+
+    assert_eq!(again, top, "the same spawn, the same entity");
+    assert_eq!(
+        app.world().get::<Height>(again),
+        Some(&Height(6)),
+        "the bundle's values"
+    );
+    assert_eq!(
+        app.world().get::<Spin>(again),
+        Some(&Spin(0)),
+        "what the spawn brought with it, as it brought it"
+    );
+    assert!(
+        app.world().get::<Bruised>(again).is_none(),
+        "and nothing the simulation put on afterwards"
+    );
+    assert!(
+        app.world().get::<Dressed>(again).is_some(),
+        "local-only state is still the game's"
+    );
+}
+
 #[test]
 fn restoring_a_tick_where_an_entity_was_alive_rebuilds_it_through_the_spawn_path() {
     let mut app = app();

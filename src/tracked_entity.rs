@@ -47,7 +47,7 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::lifetimes::{redress, reset, revive};
+use crate::lifetimes::{record_spawn_state, redress, reset, return_to_spawn_state, revive};
 use crate::registry::{FNV_OFFSET, TickedComponentRegistry, fnv_fold};
 use crate::tracked_index::TrackedEntityIndex;
 
@@ -330,6 +330,11 @@ impl TrackedSpawner<'_, '_> {
                         }
                         entity.insert((bundle, minted_as));
                         entity.world_scope(|world| {
+                            if !changed_hands {
+                                // The same thing again, from where it started rather than where
+                                // the window left it. See `SpawnState`.
+                                return_to_spawn_state::<B>(world, e);
+                            }
                             revive(world, e, id.0, tick);
                             if changed_hands {
                                 // After the bundle, so the observer sees what it is now.
@@ -337,9 +342,24 @@ impl TrackedSpawner<'_, '_> {
                             }
                         });
                     });
+                // A different thing now: noted as minted, after the observers `redress` fired.
+                self.commands.queue(move |world: &mut World| {
+                    if world
+                        .get_entity(entity)
+                        .is_ok_and(|e| !e.contains::<crate::lifetimes::SpawnState>())
+                    {
+                        record_spawn_state(world, entity);
+                    }
+                });
                 entity
             }
-            None => self.commands.spawn((bundle, id, minted_as)).id(),
+            None => {
+                let entity = self.commands.spawn((bundle, id, minted_as)).id();
+                // After the spawn's observers and whatever they queued. See `SpawnState`.
+                self.commands
+                    .queue(move |world: &mut World| record_spawn_state(world, entity));
+                entity
+            }
         }
     }
 }
@@ -389,15 +409,26 @@ impl TrackedWorldExt for World {
                     reset(self, entity);
                 }
                 self.entity_mut(entity).insert((bundle, minted_as));
+                if !changed_hands {
+                    return_to_spawn_state::<B>(self, entity);
+                }
                 revive(self, entity, id.0, tick);
                 if changed_hands {
                     redress(self, entity, id.0);
+                    self.flush();
+                    record_spawn_state(self, entity);
                 }
                 entity
             }
             // `SpawnedAs` on a fresh spawn too, as `TrackedSpawner` does: without it the first
             // replay to revive this id's tombstone reads "changed hands" and dresses it again.
-            None => self.spawn((bundle, id, minted_as)).id(),
+            None => {
+                let entity = self.spawn((bundle, id, minted_as)).id();
+                // After the spawn's observers and whatever they queued. See `SpawnState`.
+                self.flush();
+                record_spawn_state(self, entity);
+                entity
+            }
         }
     }
 }

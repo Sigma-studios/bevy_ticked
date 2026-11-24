@@ -5,6 +5,16 @@ pull requests #1–#14 on this repository are the phases.
 
 ## Unreleased
 
+- **Fix** — a replay that runs a spawn again starts the entity's simulated state from the spawn.
+  The same bundle minted onto its tombstone is reused as it is, so the game keeps its local-only
+  state across rollbacks; but an insert overwrites only what the bundle names, so a registered
+  component the spawn brought without naming it (a required one — a body's `Rotation` — or one its
+  observer put on), or one the simulation added later, kept the value it had at the end of the
+  window, and the replay diverged on the tick of the spawn. Every tracked entity now keeps a
+  `SpawnState` (its registered components once the spawn and its observers were done), and the
+  replayed spawn puts every registered type the bundle does not name back to it. Local-only
+  components are not registered, and not touched
+  (`a_tombstone_reused_by_the_same_spawn_starts_its_simulated_state_from_the_spawn`).
 - **Fix** — a snapshot repeating the applied tick counts as the host's word only once it has been
   rebuilt. A delta against a baseline the client no longer holds is dropped on arrival, and used
   to keep `SnapshotWatchdog` from ever reporting a starvation all the same
