@@ -8,8 +8,13 @@
 
 use std::time::Duration;
 
+use bevy_ticked_networking::client::AppliedSnapshotTick;
 use bevy_ticked_networking::diagnostics::ReplayStats;
+use bevy_ticked_networking::messages::ReceivedNetworkSnapshot;
 use bevy_ticked_networking::pause::{PauseReason, PauseSession, ResumeSession};
+use bevy_ticked_networking::snapshot::{
+    DeltaBody, MARGIN_UNMEASURED, SnapshotBody, SnapshotPacket,
+};
 use bevy_ticked_networking::watchdog::{AckWatch, SnapshotWatchdog};
 use bevy_ticked_networking_ensemble::EnsembleInputMessage;
 use bevy_ticked_testing::fixtures::minimal::{self, Input, seat_everyone};
@@ -158,6 +163,50 @@ fn a_paused_host_does_not_starve_its_clients() {
     net.app_mut(host).world_mut().write_message(ResumeSession);
     net.run(SECOND);
     assert_eq!(starved_for(&net, client), None);
+}
+
+/// A repeat of the applied tick is the host's word only if it can be read. A delta against a
+/// baseline this client no longer holds is dropped on arrival, and must not keep the client from
+/// starving: it used to count as heard before it was rebuilt.
+#[test]
+fn a_repeat_that_cannot_be_rebuilt_does_not_keep_a_client_from_starving() {
+    let mut net = session();
+    let (host, client) = (net.host(), net.client());
+
+    silence_snapshots(&mut net, host, client);
+    for _ in 0..3 * SECOND + SECOND / 2 {
+        let applied = net
+            .app(client)
+            .world()
+            .resource::<AppliedSnapshotTick>()
+            .0
+            .expect("synced");
+        let unreadable = SnapshotPacket {
+            seq: u32::MAX,
+            tick: applied,
+            your_margin: MARGIN_UNMEASURED,
+            body: SnapshotBody::Delta(DeltaBody {
+                baseline_seq: u32::MAX - 1,
+                ..Default::default()
+            }),
+        };
+        net.app_mut(client)
+            .world_mut()
+            .trigger(ReceivedNetworkSnapshot(unreadable));
+        net.run(1);
+    }
+    assert!(
+        net.app(client)
+            .world()
+            .resource::<ReplayStats>()
+            .dropped_unknown_baseline
+            > 0,
+        "the repeats really were unreadable"
+    );
+    assert!(
+        starved_for(&net, client).is_some(),
+        "repeats that cannot be rebuilt are not the host's word"
+    );
 }
 
 #[test]

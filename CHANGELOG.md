@@ -5,6 +5,10 @@ pull requests #1–#14 on this repository are the phases.
 
 ## Unreleased
 
+- **Fix** — a snapshot repeating the applied tick counts as the host's word only once it has been
+  rebuilt. A delta against a baseline the client no longer holds is dropped on arrival, and used
+  to keep `SnapshotWatchdog` from ever reporting a starvation all the same
+  (`a_repeat_that_cannot_be_rebuilt_does_not_keep_a_client_from_starving`).
 - **Fix** — a rewind across a `ContactId` that changed hands no longer diverges. avian 0.8 reuses
   a freed contact id for the next pair that starts touching, and queues contacts that stop
   generating constraints in `ContactStatusChangeQueue`. A restore tombstones a body spawned

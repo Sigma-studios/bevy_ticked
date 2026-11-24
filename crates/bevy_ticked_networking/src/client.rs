@@ -385,8 +385,7 @@ fn receive_snapshot(
 ) {
     let tick = trigger.event().0.tick;
     stats.snapshots_received += 1;
-    // A repeat of the applied tick is a held host still talking; see `watchdog`.
-    watchdog.arrived(tick, applied.0 == Some(tick));
+    watchdog.arrived(tick);
     // A delta is rebuilt into the full body it describes the moment it arrives, against the
     // baseline the host built it on. Everything downstream sees full bodies only.
     let mut packet = trigger.event().0.clone();
@@ -408,6 +407,11 @@ fn receive_snapshot(
     }
     if let SnapshotBody::Full(body) = &packet.body {
         history.record_body(packet.seq, tick, body);
+    }
+    // A repeat of the applied tick is a held host still talking; see `watchdog`. Only once
+    // rebuilt: a delta against a baseline this client has lost returned above, unread.
+    if applied.0 == Some(tick) {
+        watchdog.repeated();
     }
     let newest_seen = applied
         .0

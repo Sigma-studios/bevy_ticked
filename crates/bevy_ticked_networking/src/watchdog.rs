@@ -16,9 +16,10 @@
 //!
 //! # The client: [`SnapshotWatchdog`]
 //!
-//! The host's word has arrived when a snapshot is applied, or when one repeats the tick already
-//! applied — a host whose clock is held, by a pause, sends the same tick every half second, and
-//! that is a host still talking. Frame time since then is counted, and once it passes
+//! The host's word has arrived when a snapshot is applied, or when one that can be read repeats
+//! the tick already applied — a host whose clock is held, by a pause, sends the same tick every
+//! half second, and that is a host still talking. A delta this client cannot rebuild is not: it
+//! is dropped on arrival, and says nothing it can use. Frame time since then is counted, and once it passes
 //! [`SnapshotWatchdogPolicy::starved_after`] the client is *starved*:
 //!
 //! - `error!`, once per episode, with every counter that tells the causes apart: how many
@@ -97,7 +98,7 @@ pub struct SnapshotWatchdog {
     silent_for: Duration,
     /// The newest tick applied when last looked at, to see a new one.
     last_applied: Option<Tick>,
-    /// Set by the receiving observer: a snapshot repeated the applied tick.
+    /// Set by the receiving observer: a snapshot it could read repeated the applied tick.
     heard_repeat: bool,
     /// Set by [`excuse`](Self::excuse): the silence is expected, this frame.
     excused: bool,
@@ -128,10 +129,14 @@ impl SnapshotWatchdog {
         self.excused = true;
     }
 
-    /// A snapshot for `tick` arrived. `repeat`: it was for the tick already applied.
-    pub(crate) fn arrived(&mut self, tick: Tick, repeat: bool) {
+    /// A snapshot for `tick` arrived, readable or not.
+    pub(crate) fn arrived(&mut self, tick: Tick) {
         self.newest_arrived = self.newest_arrived.max(Some(tick));
-        self.heard_repeat |= repeat;
+    }
+
+    /// A snapshot repeated the tick already applied, and was rebuilt into a full body.
+    pub(crate) fn repeated(&mut self) {
+        self.heard_repeat = true;
     }
 
     fn heard(&mut self, stats: Option<ReplayStats>) {
