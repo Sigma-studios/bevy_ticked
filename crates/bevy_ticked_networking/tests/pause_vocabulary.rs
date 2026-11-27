@@ -45,7 +45,7 @@ fn deliver_first_snapshot(app: &mut App) {
     let registry = app.world().resource::<TickedComponentRegistry>().clone();
     registry.capture_all(app.world_mut(), Tick(0));
     let mut packet = SnapshotPacket::full(Tick::ZERO, build_full_body(app.world_mut(), Tick::ZERO));
-    packet.your_margin = 2;
+    packet.your_margin = bevy_ticked_networking::client::ClientTickBuffer::DEFAULT_MARGIN as i16;
     app.world_mut().trigger(ReceivedNetworkSnapshot(packet));
 }
 

@@ -16,6 +16,31 @@ pub trait TickedInput: Serialize + DeserializeOwned + Clone + Send + Sync + 'sta
 
 impl<T> TickedInput for T where T: Serialize + DeserializeOwned + Clone + Send + Sync + 'static {}
 
+/// How a game carries what a late input did onto the next tick the host runs.
+///
+/// An input that reaches the host after its tick has run is filed on the next tick instead (see
+/// [`collect_network_inputs`](crate::server)), which is a tick of staleness rather than a lost
+/// input — for a held key. A *tap* is two inputs, the press and the release, and on a jittery link
+/// they can arrive together: the release, being newer, takes the next tick, and the press is never
+/// run at all. The player saw their character jump, and the host never did.
+///
+/// With this resource on the host, whatever is about to replace a late input on that next tick
+/// first gets [`fold`](Self::fold)ed with it, so a press survives being overtaken by its own
+/// release. Without it, nothing changes. Insert it on the host; it does nothing on a client.
+#[derive(Resource)]
+pub struct LateInputFold<T> {
+    /// Carry into `next` — what the host will run on its next tick — whatever `late` did that
+    /// `ran` did not and that `next` would undo. `ran` is what the host ran for that player on
+    /// the tick it last ran, so a press is `late` holding a button `ran` did not.
+    ///
+    /// Called with `late` being either an input that arrived after its tick, or what the next
+    /// tick held before `next` replaced it, which may itself carry an earlier fold.
+    pub fold: fn(next: &mut T, late: &T, ran: &T),
+    /// Inputs later than this are not folded: a press that late would surprise the player more
+    /// than losing it. A game with an input buffer — a jump buffered for 100 ms — uses that.
+    pub max_age: Ticks,
+}
+
 /// The furthest ahead of the host's tick an input may be stamped and still be accepted.
 ///
 /// **Must equal the client's tick-buffer ceiling** (`ClientTickBuffer::MAX_TICKS`): a client can

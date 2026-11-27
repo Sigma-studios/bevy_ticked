@@ -139,6 +139,12 @@ impl TickedInterpolation {
         self.current
     }
 
+    /// The transform the tick before [`current`](Self::current) left: with it, which way the
+    /// entity was going.
+    pub fn previous(&self) -> Option<Transform> {
+        self.previous
+    }
+
     /// The blend of the last two tick states at `fraction` through the tick.
     ///
     /// `None` until two ticks have been seen, so the first frame after a spawn

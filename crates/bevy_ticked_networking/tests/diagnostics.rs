@@ -68,7 +68,7 @@ fn snapshot_matching(client: &mut App, tick: Tick) -> SnapshotPacket {
     let registry = client.world().resource::<TickedComponentRegistry>().clone();
     registry.capture_all(client.world_mut(), tick);
     let mut packet = SnapshotPacket::full(tick, build_full_body(client.world_mut(), tick));
-    packet.your_margin = 2;
+    packet.your_margin = bevy_ticked_networking::client::ClientTickBuffer::DEFAULT_MARGIN as i16;
     packet
 }
 

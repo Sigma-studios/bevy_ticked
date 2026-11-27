@@ -154,8 +154,16 @@ impl SnapshotStats {
 pub struct InputStats {
     /// Inputs accepted into the queue, redundant copies included.
     pub received: u64,
-    /// Inputs that arrived for a tick the host had already run.
+    /// Inputs that arrived for a tick the host had already run, redundant copies included: a
+    /// copy of an input the host had on time counts here too.
     pub late: u64,
+    /// Ticks of input the host received for the first time: each tick a client stamped,
+    /// counted once however many redundant copies of it arrived.
+    pub new_ticks: u64,
+    /// Of [`new_ticks`](Self::new_ticks), the ones whose first copy came after the host had run
+    /// the tick. Each is an input the host did not have when it needed it, so the share of
+    /// these is the number a prediction lead exists to keep near zero.
+    pub late_new_ticks: u64,
     /// Inputs refused because their tick was outside the window the host keeps: older than
     /// `HistoryBufferTicks` behind the host, or further ahead than `MAX_INPUT_LEAD_TICKS`. Not
     /// counted in `received`, and never seen by the queue or the margins.
@@ -200,5 +208,148 @@ impl HealthWarnings {
             warn!("{} (said once; counted from now on)", message());
         }
         *counter = counter.saturating_add(1);
+    }
+}
+
+/// Corrections to the bodies this client controls: what its own player sees jump.
+///
+/// A body the client owns is predicted from its own inputs, so a correction to it means the
+/// host ran something else — usually an input that reached it too late — and the player's own
+/// character snaps. [`CorrectionSmoothing`](crate::smoothing::CorrectionSmoothing) leaves such a
+/// body unsmoothed on purpose, so these are drawn exactly as counted.
+///
+/// Measured on every owned entity with a
+/// [`TickedInterpolation`](bevy_ticked::interpolation::TickedInterpolation): its pose at the
+/// current tick before a snapshot was applied, against the pose the presentation draws at the
+/// same tick after the rollback and replay. Inserted by
+/// [`TickedClientPlugin`](crate::client::TickedClientPlugin).
+#[derive(Resource, Debug, Clone, Copy, PartialEq)]
+pub struct OwnCorrectionStats {
+    /// The smallest correction counted, in world units. Smaller ones are rounding rather than
+    /// anything a player sees; set it to what one unit is worth in the game.
+    pub threshold: f32,
+    /// Corrections of at least [`threshold`](Self::threshold).
+    pub corrections: u64,
+    /// Of those, the ones that pushed the body back against the way it was moving: the snap a
+    /// player feels as being pulled backwards.
+    pub against_motion: u64,
+    /// Distance of the counted corrections, summed.
+    pub total_offset: f32,
+    pub max_offset: f32,
+    pub last_offset: f32,
+}
+
+impl Default for OwnCorrectionStats {
+    fn default() -> Self {
+        Self {
+            threshold: 1.0,
+            corrections: 0,
+            against_motion: 0,
+            total_offset: 0.0,
+            max_offset: 0.0,
+            last_offset: 0.0,
+        }
+    }
+}
+
+impl OwnCorrectionStats {
+    /// Zero the counts, keeping the threshold.
+    pub fn reset(&mut self) {
+        *self = Self {
+            threshold: self.threshold,
+            ..Self::default()
+        };
+    }
+}
+
+/// The poses of this client's own bodies before a snapshot pass, and the tick they are for.
+#[derive(Resource, Default)]
+struct OwnPosesBefore {
+    tick: Option<bevy_ticked::tick_types::Tick>,
+    /// Entity, pose at `tick`, and the pose the tick before it.
+    poses: Vec<(Entity, Transform, Option<Transform>)>,
+}
+
+pub(crate) fn install_own_corrections(app: &mut App) {
+    use crate::client::ClientSet;
+    app.init_resource::<OwnCorrectionStats>()
+        .init_resource::<OwnPosesBefore>()
+        .add_systems(
+            bevy_ticked::TickedLoop,
+            (
+                remember_own_poses.in_set(ClientSet::BeforeSnapshot),
+                measure_own_corrections.in_set(ClientSet::AfterSnapshot),
+            ),
+        );
+}
+
+fn remember_own_poses(
+    tick: Res<bevy_ticked::tick::CurrentTick>,
+    local: Option<Res<crate::client::LocalClientPlayer>>,
+    bodies: Query<(
+        Entity,
+        &crate::replication::Owner,
+        &bevy_ticked::interpolation::TickedInterpolation,
+    )>,
+    mut before: ResMut<OwnPosesBefore>,
+) {
+    before.poses.clear();
+    before.tick = None;
+    let Some(local) = local else {
+        return;
+    };
+    before.tick = Some(tick.0);
+    for (entity, owner, interpolation) in &bodies {
+        if owner.0 != local.0 {
+            continue;
+        }
+        if let Some(current) = interpolation.current() {
+            before
+                .poses
+                .push((entity, current, interpolation.previous()));
+        }
+    }
+}
+
+fn measure_own_corrections(
+    tick: Res<bevy_ticked::tick::CurrentTick>,
+    mut applied: MessageReader<crate::client::SnapshotApplied>,
+    bodies: Query<&Transform>,
+    before: Res<OwnPosesBefore>,
+    mut stats: ResMut<OwnCorrectionStats>,
+) {
+    let mut any = false;
+    let mut first = false;
+    for message in applied.read() {
+        any = true;
+        first |= message.first;
+    }
+    // The initial sync is the world arriving, not a correction; and a replay too long for one
+    // frame leaves the clock short of the tick the poses were taken at, where they cannot be
+    // compared.
+    if !any || first || before.tick != Some(tick.0) {
+        return;
+    }
+    for &(entity, was, previous) in &before.poses {
+        // The `Transform` the snapshot's presentation pass wrote from the replayed state: a
+        // replay re-runs the simulation, not the per-tick interpolation record.
+        let Ok(now) = bodies.get(entity) else {
+            continue;
+        };
+        let jump = now.translation - was.translation;
+        let distance = jump.length();
+        if distance < stats.threshold {
+            continue;
+        }
+        stats.corrections += 1;
+        stats.total_offset += distance;
+        stats.max_offset = stats.max_offset.max(distance);
+        stats.last_offset = distance;
+        let motion = previous.map_or(Vec3::ZERO, |previous| {
+            was.translation - previous.translation
+        });
+        if jump.dot(motion) < 0.0 {
+            stats.against_motion += 1;
+        }
     }
 }

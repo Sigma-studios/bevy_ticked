@@ -139,24 +139,31 @@ fn forget_the_old_link(
 /// each other even though neither matched the name — but every readout built on
 /// it reported a number a third larger than the lead it claimed to be, and the
 /// one test that asserted on it needed an eight-tick tolerance to pass.
-#[derive(Resource, Clone, Copy, Debug)]
+#[derive(Resource, Clone, Debug)]
 pub struct ClientTickBuffer {
     /// Target replay distance, in ticks: what `current_tick - snapshot_tick`
     /// converges to. See the note on the type — this is not the lead.
     pub target_replay_distance: Ticks,
-    /// Desired input-arrival margin: inputs should reach the server this many
-    /// ticks early, to absorb jitter and once-per-frame delivery.
+    /// Desired input-arrival margin of the *worst* recent input: the server reports the worst
+    /// of a client's inputs since its last snapshot ([`InputMargins`]), the client keeps the
+    /// worst round trip of the last second, and the lead is sized so that an input that
+    /// unlucky arrives this many ticks before its tick runs. One is on time.
     ///
-    /// A field rather than a constant because the right value is a property of
-    /// the link: it has to cover how late an *unlucky* packet is, not an average
-    /// one, and a link with 40 ms of jitter needs more than two ticks of it. A
-    /// transport that measures jitter can size this with
-    /// [`seed_from_rtt`](Self::seed_from_rtt); [`DEFAULT_MARGIN`](Self::DEFAULT_MARGIN)
-    /// is the floor and the fallback.
+    /// The jitter is in the measurement, not here. This used to be steered against the latest
+    /// input and so had to carry the jitter itself — sized from a ping before the first
+    /// snapshot, then frozen — and a link that got worse mid-match kept a margin sized for the
+    /// link it had been. With the worst of the last second as the measurement, the lead follows
+    /// the link as it is now, and this is only the headroom kept over it.
+    ///
+    /// [`InputMargins`]: crate::server::InputMargins
     pub target_margin: i64,
     /// EWMA accumulator for the target, so per-snapshot margin jitter doesn't
     /// make it wander.
     smoothed: f64,
+    /// The round trips measured over the last [`MARGIN_WINDOW`](Self::MARGIN_WINDOW) of this
+    /// client's ticks, oldest first: the tick each was measured on, and the round trip in ticks.
+    /// The worst of them is what the target is sized for. See [`observe`](Self::observe).
+    recent_round_trips: std::collections::VecDeque<(Tick, i64)>,
     /// Consecutive applied snapshots that showed an excess of [`SNAP_BACK_TICKS`] or more.
     /// See [`converge_lead`].
     excess_streak: u32,
@@ -170,13 +177,14 @@ pub struct ClientTickBuffer {
 
 impl Default for ClientTickBuffer {
     fn default() -> Self {
-        // Until a margin has been measured or a transport has seeded one. Six
-        // ticks of replay distance is a 62 ms round trip — see `seed_from_rtt`
-        // for why guessing here is survivable but not free.
+        // Until a margin has been measured or a transport has seeded one. Five
+        // ticks of replay distance is a 62 ms round trip and the one-tick margin —
+        // see `seed_from_rtt` for why guessing here is survivable but not free.
         Self {
-            target_replay_distance: Ticks(6),
+            target_replay_distance: Ticks(5),
             target_margin: Self::DEFAULT_MARGIN,
-            smoothed: 6.0,
+            smoothed: 5.0,
+            recent_round_trips: std::collections::VecDeque::new(),
             excess_streak: 0,
             settling_until: Tick::ZERO,
         }
@@ -193,14 +201,13 @@ impl SessionReset for NackFull {}
 impl SessionReset for AuthoritySequenceAfterSnapshot {}
 
 impl ClientTickBuffer {
-    /// Input-arrival margin used until something measures a better one.
-    pub const DEFAULT_MARGIN: i64 = 2;
-    /// Floor on the margin. Below two ticks there is no room for once-per-frame
-    /// delivery, let alone jitter.
-    pub const MIN_MARGIN: i64 = 2;
-    /// Ceiling on the margin, so a pathological jitter measurement cannot spend
-    /// the whole prediction budget on headroom.
-    pub const MAX_MARGIN: i64 = 12;
+    /// Headroom kept over the worst recent input: it arrives one tick early, which is just in
+    /// time. See [`target_margin`](Self::target_margin).
+    pub const DEFAULT_MARGIN: i64 = 1;
+    /// How far back the worst reported margin is taken from: a second at 64 Hz. Long enough to
+    /// hold a link's recent spikes, short enough that a bad moment stops costing lead a second
+    /// after it passes.
+    pub const MARGIN_WINDOW: Ticks = Ticks(64);
     /// Never target less replay distance than this.
     const MIN_TICKS: Ticks = Ticks(2);
     /// Cap it so a pathological connection can't make prediction explode.
@@ -210,6 +217,13 @@ impl ClientTickBuffer {
 
     /// Update the target from an observed replay distance
     /// (`current_tick - snapshot_tick`) and the server-measured input margin.
+    ///
+    /// Each report measures a round trip, `replay_distance - margin`, and the target is the worst
+    /// round trip of the last [`MARGIN_WINDOW`](Self::MARGIN_WINDOW) plus `target_margin`: the
+    /// replay distance at which the unluckiest recent input would still arrive `target_margin`
+    /// ticks early. A round trip does not depend on the lead — a rewind, a lead taken in one
+    /// step, a host dropping ticks all move the replay distance and the margin by the same
+    /// amount — so readings from before any of them still hold after it.
     ///
     /// With `replay_distance = lead + one_way` and `margin = lead - one_way`,
     /// `replay_distance - margin + target_margin` is `2 * one_way + target_margin`
@@ -222,8 +236,33 @@ impl ClientTickBuffer {
     /// supply a negative value could not call it at all, and the target froze at
     /// whatever it last saw for as long as the client was behind — which was
     /// forever, because being behind is self-sustaining.
-    fn observe(&mut self, replay_distance: i64, margin: i64) {
-        let raw = (replay_distance - margin + self.target_margin)
+    fn observe(&mut self, now: Tick, replay_distance: i64, margin: i64) {
+        // A clock that went back — a new session on a kept resource — makes every reading ahead
+        // of it meaningless.
+        if self
+            .recent_round_trips
+            .back()
+            .is_some_and(|&(at, _)| at > now)
+        {
+            self.recent_round_trips.clear();
+        }
+        let round_trip = replay_distance - margin;
+        self.recent_round_trips.push_back((now, round_trip));
+        let since = now.saturating_sub(Self::MARGIN_WINDOW);
+        while self
+            .recent_round_trips
+            .front()
+            .is_some_and(|&(at, _)| at < since)
+        {
+            self.recent_round_trips.pop_front();
+        }
+        let worst = self
+            .recent_round_trips
+            .iter()
+            .map(|&(_, round_trip)| round_trip)
+            .max()
+            .unwrap_or(round_trip);
+        let raw = (worst + self.target_margin)
             .clamp(Self::MIN_TICKS.0 as i64, Self::MAX_TICKS.0 as i64) as f64;
         self.smoothed = (1.0 - Self::SMOOTHING) * self.smoothed + Self::SMOOTHING * raw;
         self.target_replay_distance =
@@ -233,10 +272,10 @@ impl ClientTickBuffer {
     /// Size the target from a measured round trip and round-trip jitter, before
     /// any input has made the trip for [`observe`](Self::observe) to read.
     ///
-    /// The steady state `observe` converges to is `rtt + target_margin` ticks, so
-    /// that is what this sets — and the margin itself comes from the jitter,
-    /// because the margin's whole job is to cover the packets that arrive late
-    /// rather than the ones that arrive on time.
+    /// The steady state `observe` converges to is the round trip of the *worst* input of the
+    /// last second plus [`target_margin`](Self::target_margin), and the worst trip is roughly
+    /// the mean plus the jitter — so that is what this sets. The margin is left alone: the
+    /// jitter is a guess about the link, and the measurement replaces it within a second.
     ///
     /// This crate has no transport and cannot measure either value; a bridge that
     /// has one calls this. Skipping it is survivable — `observe` converges within
@@ -257,9 +296,7 @@ impl ClientTickBuffer {
         let in_ticks = |d: core::time::Duration| {
             (d.as_secs_f64() / timestep.as_secs_f64().max(f64::EPSILON)).ceil()
         };
-        self.target_margin =
-            (in_ticks(round_trip_jitter) as i64).clamp(Self::MIN_MARGIN, Self::MAX_MARGIN);
-        let raw = (in_ticks(round_trip) + self.target_margin as f64)
+        let raw = (in_ticks(round_trip) + in_ticks(round_trip_jitter) + self.target_margin as f64)
             .clamp(Self::MIN_TICKS.0 as f64, Self::MAX_TICKS.0 as f64);
         self.smoothed = raw;
         self.target_replay_distance = Ticks(raw.round() as u64);
@@ -298,6 +335,7 @@ impl<T: TickedInput> Plugin for TickedClientPlugin<T> {
     fn build(&self, app: &mut App) {
         crate::input::install_input_queue::<T>(app);
         crate::replication::install_owner(app);
+        crate::diagnostics::install_own_corrections(app);
         crate::pause::install(app);
         // A rollback never reaches further back than one one-way trip plus the lead, and the
         // lead is capped at `MAX_TICKS`; twice that is every tick a snapshot could still name.
@@ -651,7 +689,7 @@ fn handle_server_snapshot<T: TickedInput>(world: &mut World) {
     {
         world
             .resource_mut::<ClientTickBuffer>()
-            .observe(replay_distance, margin);
+            .observe(current_tick, replay_distance, margin);
     }
 
     if snapshot_tick >= current_tick {
@@ -886,7 +924,7 @@ fn accept_identical<T: TickedInput>(
     {
         world
             .resource_mut::<ClientTickBuffer>()
-            .observe(replay_distance, margin);
+            .observe(current_tick, replay_distance, margin);
     }
     let target = world.resource::<ClientTickBuffer>().target_replay_distance;
     match converge_lead(
@@ -1262,11 +1300,14 @@ mod tests {
         // state that most needs the target to keep moving, because it is self-sustaining.
         let mut buffer = ClientTickBuffer::default();
         let (replay_distance, margin) = behind(6, -2);
-        for _ in 0..200 {
-            buffer.observe(replay_distance, margin);
+        for at in 0..200 {
+            buffer.observe(Tick(at), replay_distance, margin);
         }
         // 2 * one_way + margin.
-        assert_eq!(buffer.target_replay_distance, Ticks(14));
+        assert_eq!(
+            buffer.target_replay_distance,
+            Ticks(12 + ClientTickBuffer::DEFAULT_MARGIN as u64)
+        );
     }
 
     #[test]
@@ -1283,8 +1324,8 @@ mod tests {
 
         let mut observed = ClientTickBuffer::default();
         let (replay_distance, margin) = behind(one_way_ticks, seeded.target_margin);
-        for _ in 0..500 {
-            observed.observe(replay_distance, margin);
+        for at in 0..500 {
+            observed.observe(Tick(at), replay_distance, margin);
         }
 
         assert_eq!(
@@ -1294,9 +1335,39 @@ mod tests {
     }
 
     #[test]
-    fn a_jittery_link_is_given_more_margin_than_a_clean_one() {
-        // The margin is headroom for the *unlucky* packet. Two ticks of it is under water
-        // on a link with 40 ms of variation, which is where the input loss came from.
+    fn the_target_covers_the_worst_margin_of_the_last_second_then_lets_it_go() {
+        // One late input among early ones: the target grows to cover it at once, and gives the
+        // lead back once that input is a second old.
+        let mut buffer = ClientTickBuffer::default();
+        let (replay_distance, early) = behind(4, 6);
+        let mut at = 0;
+        let mut feed = |buffer: &mut ClientTickBuffer, margin: i64, ticks: u64| {
+            for _ in 0..ticks {
+                buffer.observe(Tick(at), replay_distance, margin);
+                at += 1;
+            }
+        };
+        feed(&mut buffer, early, 200);
+        let settled = buffer.target_replay_distance;
+        feed(&mut buffer, early - 3, 1);
+        feed(&mut buffer, early, 40);
+        assert_eq!(
+            buffer.target_replay_distance,
+            settled + Ticks(3),
+            "three ticks of lateness is three ticks more lead, while it is in the window"
+        );
+        feed(&mut buffer, early, 200);
+        assert_eq!(
+            buffer.target_replay_distance, settled,
+            "and gone once it is not"
+        );
+    }
+
+    #[test]
+    fn a_jittery_link_starts_with_more_lead_than_a_clean_one() {
+        // The lead is steered so that the *worst* recent input is on time, and the worst trip is
+        // about the mean plus the jitter. Before the first measurement the seed is that guess;
+        // the margin itself stays the headroom over the worst, whatever the link.
         let timestep = core::time::Duration::from_secs_f64(1.0 / 64.0);
         let round_trip = core::time::Duration::from_millis(60);
 
@@ -1306,17 +1377,15 @@ mod tests {
         let mut jittery = ClientTickBuffer::default();
         jittery.seed_from_rtt(round_trip, core::time::Duration::from_millis(40), timestep);
 
-        assert_eq!(clean.target_margin, ClientTickBuffer::MIN_MARGIN);
-        assert!(
-            jittery.target_margin > clean.target_margin,
-            "jitter bought no extra headroom: {} against {}",
-            jittery.target_margin,
-            clean.target_margin
+        assert_eq!(clean.target_margin, ClientTickBuffer::DEFAULT_MARGIN);
+        assert_eq!(
+            jittery.target_margin, clean.target_margin,
+            "the jitter is in the measurement, not the margin"
         );
-        assert!(jittery.target_margin <= ClientTickBuffer::MAX_MARGIN);
-        assert!(
-            jittery.target_replay_distance > clean.target_replay_distance,
-            "the extra margin has to show up in the distance the client actually keeps"
+        assert_eq!(
+            jittery.target_replay_distance.0 - clean.target_replay_distance.0,
+            3,
+            "40 ms of jitter is three more ticks of lead at 64 Hz"
         );
     }
 

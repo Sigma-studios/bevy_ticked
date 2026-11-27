@@ -51,6 +51,31 @@ obeys; `docs/avian.md` the physics bundle.
 | `On<Add, TickTrackedEntity>` (any lifecycle event) | `On<Add<TickTrackedEntity>>` | Bevy 0.20 |
 | avian's default features, through `bevy_ticked_avian` | avian without them; `bevy_ticked_avian`'s `f32` (default) or `f64` | Bevy 0.20 |
 
+## The lead covers the unlucky input
+
+Nothing on the wire changed shape; what `your_margin` means did, so both peers need this commit
+(the join handshake already insists).
+
+- **`your_margin` is the worst first-arrival margin since the last snapshot to that client**, not
+  the margin of the newest input. Redundant copies and stragglers no longer move it.
+- **`ClientTickBuffer` sizes its target for the worst round trip of the last second.** Each report
+  gives `replay_distance - margin`, which does not depend on the lead, and the target is the worst
+  of those plus `target_margin`. `target_margin` is the headroom kept over that worst input:
+  `DEFAULT_MARGIN` is now 1 (on time) and `MIN_MARGIN`/`MAX_MARGIN` are gone. A game that set
+  `target_margin` to carry jitter sets it back to the default: the jitter is in the measurement.
+- **`seed_from_rtt` adds the jitter to the starting replay distance**, and leaves the margin alone.
+  The unmeasured default replay distance is 5 (the same 62 ms guess, with the one-tick margin).
+- **A test that hands a client a snapshot it built itself** and wants a steady state reports
+  `ClientTickBuffer::DEFAULT_MARGIN` as `your_margin`; a hard-coded 2 now reads as a lead one tick
+  too long and the client trims it.
+- **Optional: `LateInputFold<T>`** on the host keeps a late press from being overwritten by its own
+  release on the next tick. `fold(next, late, ran)` carries into `next` what `late` pressed that
+  `ran` (what the host last ran for that player) did not; `max_age` bounds how late. A game
+  without one keeps the old behaviour.
+- **`InputStats::late`** counts margin-zero inputs too (their tick had already run); `new_ticks`
+  and `late_new_ticks` count each input tick once. **`OwnCorrectionStats`** counts corrections to
+  the client's own bodies, with a `threshold` in world units (default 1).
+
 ## Bevy 0.20 and avian 0.8
 
 Pins bevy_ensemble `4ce1c62` (Bevy 0.20; see its `docs/MIGRATION.md`). Needs rustc 1.97.1.

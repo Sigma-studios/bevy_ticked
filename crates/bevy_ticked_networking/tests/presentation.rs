@@ -88,7 +88,7 @@ fn body(app: &App, tick: Tick, local: i32, remote: i32) -> SnapshotPacket {
             .with(owner, &Owner(REMOTE)),
     );
     let mut packet = SnapshotPacket::full(tick, body);
-    packet.your_margin = 2;
+    packet.your_margin = bevy_ticked_networking::client::ClientTickBuffer::DEFAULT_MARGIN as i16;
     packet
 }
 

@@ -463,9 +463,9 @@ impl SessionReset for TickBufferSeeded {}
 /// where they meet. `bevy_ticked_networking` stays transport-free, which is the property that
 /// makes it usable over anything.
 ///
-/// Jitter matters more than the mean here, and is the reason this touches the margin at all.
-/// The margin is headroom for the *unlucky* packet, and it was a hardcoded two ticks — under
-/// water on any link with more than ~30 ms of variation, where every spike costs a keypress.
+/// Jitter counts as much as the mean: the lead is steered so that the *worst* recent input is on
+/// time, and the worst trip is about the mean plus the jitter. Within a second of play the
+/// server's measurement takes over from both.
 ///
 /// # The window
 ///
@@ -497,8 +497,8 @@ fn seed_tick_buffer(
     buffer.seed_from_rtt(rtt.0, jitter, ticked.timestep());
     debug!(
         "sized the prediction buffer from the link: rtt {:.0?}, jitter {:.0?} -> \
-         replay distance {} ticks, margin {} ticks",
-        rtt.0, jitter, buffer.target_replay_distance, buffer.target_margin,
+         replay distance {} ticks",
+        rtt.0, jitter, buffer.target_replay_distance,
     );
 }
 

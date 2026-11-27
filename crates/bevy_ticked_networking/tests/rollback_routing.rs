@@ -91,7 +91,7 @@ fn client() -> App {
 /// history with the current world, which is the very thing the rollback must not see.
 fn deliver(app: &mut App, tick: Tick) {
     let mut packet = SnapshotPacket::full(tick, build_full_body(app.world_mut(), tick));
-    packet.your_margin = 2;
+    packet.your_margin = bevy_ticked_networking::client::ClientTickBuffer::DEFAULT_MARGIN as i16;
     app.world_mut().trigger(ReceivedNetworkSnapshot(packet));
 }
 
@@ -167,7 +167,7 @@ fn a_client_rollback_unpublishes_events_from_ticks_the_authority_erased() {
         current - lead,
         build_full_body(app.world_mut(), current - lead),
     );
-    packet.your_margin = 2;
+    packet.your_margin = bevy_ticked_networking::client::ClientTickBuffer::DEFAULT_MARGIN as i16;
     if let bevy_ticked_networking::snapshot::SnapshotBody::Full(body) = &mut packet.body {
         let index = app
             .world()

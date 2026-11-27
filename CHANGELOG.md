@@ -5,6 +5,33 @@ pull requests #1–#14 on this repository are the phases.
 
 ## Unreleased
 
+- **Behaviour change** — the prediction lead covers a client's unlucky inputs, not its average
+  one. The host reported the margin of whichever input was newest when a snapshot went out, and
+  the client steered the average of those to `target_margin` (two ticks, sized from a ping before
+  the first snapshot and never again). On a link with 40 ms of jitter one input in eleven reached
+  the host after its tick, each one a backward snap of the player's own body; a link that got worse
+  mid-match kept the margin of the link it had been. Now the host reports the worst first-arrival
+  margin since its last snapshot to that client, the client sizes its target for the worst round
+  trip of the last second (`replay_distance - margin`, which a rewind or a dropped host tick does
+  not move), and `target_margin` is the headroom over that worst input: one tick. Measured in
+  run-2d over 16 seeds of scripted play: congested Wi-Fi (60 ms, ±40, 2% loss) went from 8.8% of
+  inputs late and 34–43 backward corrections to none, for 18% more replayed ticks; a clean 50 ms
+  link leads a tick less and replays 25% fewer ticks. `ClientTickBuffer::MIN_MARGIN` and
+  `MAX_MARGIN` are gone, `DEFAULT_MARGIN` is 1, the unmeasured default replay distance is 5, and
+  `seed_from_rtt` adds the jitter to the replay distance rather than to the margin. See
+  `docs/MIGRATION.md`.
+- **New** — `LateInputFold<T>`: a game's way to keep a press that reaches the host late. A late
+  input is filed on the next tick, and a tap's press used to be overwritten there by its own
+  release when both arrived together. With the resource on the host, whatever replaces a late
+  input on that tick is folded with it first, against `InputsRan<T>` (the input the host actually
+  ran, recorded after each tick), up to `max_age`. Without it nothing changes
+  (`tests/late_inputs.rs`).
+- **New** — `OwnCorrectionStats`: corrections to the bodies the client controls, the snaps the
+  player sees (smoothing leaves those bodies alone on purpose), with those against the body's
+  motion counted apart. `InputStats::new_ticks` and `late_new_ticks` count each input tick once,
+  however many redundant copies arrive, and `InputStats::late` now counts an input for the tick
+  the host has just run, which it had already run. `TickedInterpolation::previous`.
+
 - **Fix** — a replay that runs a spawn again starts the entity's simulated state from the spawn.
   The same bundle minted onto its tombstone is reused as it is, so the game keeps its local-only
   state across rollbacks; but an insert overwrites only what the bundle names, so a registered

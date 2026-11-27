@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::marker::PhantomData;
 
 use bevy::prelude::*;
@@ -15,7 +15,7 @@ use bevy_ticked::{
 use crate::{
     delta::{Baseline, Baselines, Compression, DeltaPolicy, SendRates, build_delta, layouts_of},
     diagnostics::{InputStats, SnapshotStats},
-    input::{InputQueue, MAX_INPUT_LEAD_TICKS, TickedInput},
+    input::{InputQueue, LateInputFold, MAX_INPUT_LEAD_TICKS, TickedInput},
     messages::{ReceivedNetworkInput, ReceivedSnapshotAck, SendNetworkSnapshot},
     snapshot::{
         FullBody, MARGIN_UNMEASURED, RelayedInput, SnapshotBody, SnapshotPacket, build_full_body,
@@ -47,22 +47,37 @@ pub struct SnapshotSeq(pub HashMap<u128, u32>);
 #[derive(Resource, Default, Debug, Clone)]
 pub struct LastAck(pub HashMap<u128, u32>);
 
-/// Latest input-arrival margin (in ticks) per client, measured by the server:
-/// `input.tick - server_tick` at arrival. Sent to clients in each snapshot so they
-/// can size their prediction lead from the real thing (see [`WorldSnapshot`]).
+/// Each client's input-arrival margin, in ticks, as reported to it in the next snapshot: the
+/// *worst* of `input.tick - server_tick` over the first copies of its inputs that arrived since
+/// the last snapshot sent to it. The client keeps the worst of these over the last second and
+/// sizes its prediction lead from that (see [`ClientTickBuffer`](crate::client::ClientTickBuffer)).
 ///
-/// [`WorldSnapshot`]: crate::snapshot::WorldSnapshot
+/// The worst, and not the latest, because the lead exists for the unlucky input. It used to be
+/// the latest input at the moment of sending — one sample per snapshot, the rest unseen — which
+/// the client then averaged; so on a link with 40 ms of jitter it steered the *average* input to
+/// two ticks early, and every input more than a tick later than that missed its tick: one in
+/// eleven of them on congested Wi-Fi, each a snap of the player's own body.
+///
+/// First copies only: a redundant copy arrives later than the copy before it by construction,
+/// and a straggler from a reordered packet says how late a packet was, not its input.
 #[derive(Resource, Default, Debug)]
 pub struct InputMargins(pub HashMap<u128, MeasuredMargin>);
 
 /// One client's input-arrival margin and the tick it was measured at.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MeasuredMargin {
-    /// How many ticks ahead of the server the input arrived; negative is late.
+    /// How many ticks ahead of the server the worst input since the last report arrived.
+    /// `CurrentTick` is the tick the server last ran, so one or more is on time and zero or less
+    /// is late.
     pub ticks: i64,
-    /// The server tick at which it arrived.
+    /// The server tick at which the newest first copy arrived.
     pub at: Tick,
 }
+
+/// Clients whose [`InputMargins`] entry has gone out in a snapshot: the next input starts a new
+/// worst rather than folding into the one already reported.
+#[derive(Resource, Default, Debug)]
+pub struct MarginsReported(pub std::collections::HashSet<u128>);
 
 /// A margin older than this, in server ticks, is not reported. Inputs come every tick with
 /// three ticks of redundancy, so a client that has sent nothing for a quarter of a second has
@@ -70,6 +85,54 @@ pub struct MeasuredMargin {
 /// no longer hold. Reporting it as current let the client's target wander; reporting zero
 /// instead was worse (see [`MARGIN_UNMEASURED`]).
 pub const MARGIN_STALE_TICKS: Ticks = Ticks(16);
+
+/// The input the host ran for each client on the tick it last ran.
+///
+/// Recorded after the tick rather than read back from the queue later, because by then the queue
+/// holds what *should* have run: a late input is filed on its own tick when it arrives, after
+/// that tick has gone. A press is a button held in a late input and not in this — see
+/// [`LateInputFold`]. Kept only when the game registers one.
+#[derive(Resource)]
+pub struct InputsRan<T>(pub HashMap<u128, T>);
+
+impl<T> core::fmt::Debug for InputsRan<T> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "InputsRan({} players)", self.0.len())
+    }
+}
+
+impl<T> Default for InputsRan<T> {
+    fn default() -> Self {
+        Self(HashMap::new())
+    }
+}
+impl<T: Send + Sync + 'static> SessionReset for InputsRan<T> {}
+impl<T: Send + Sync + 'static> PerPeer for InputsRan<T> {
+    fn forget(&mut self, peer: u128) {
+        self.0.remove(&peer);
+    }
+}
+
+/// PostTick: what each client's input was on the tick that just ran. See [`InputsRan`].
+fn remember_inputs_ran<T: TickedInput>(
+    tick: Res<CurrentTick>,
+    queue: Res<InputQueue<T>>,
+    newest: Res<NewestInputTick>,
+    mut ran: ResMut<InputsRan<T>>,
+) {
+    for &sender in newest.0.keys() {
+        if let Some(input) = queue.get_or_last(tick.0, sender) {
+            ran.0.insert(sender, input.clone());
+        }
+    }
+}
+
+/// The input ticks each client has delivered, within the window the host keeps.
+///
+/// Every tick is sent several times over (see [`collect_network_inputs`]); this tells its first
+/// copy, the one that says whether the input reached the host in time, from the redundant ones.
+#[derive(Resource, Default, Debug)]
+pub struct DeliveredInputTicks(pub HashMap<u128, BTreeSet<Tick>>);
 
 /// The highest input tick seen from each client so far.
 ///
@@ -93,6 +156,18 @@ impl PerPeer for LastAck {
 }
 impl SessionReset for InputMargins {}
 impl PerPeer for InputMargins {
+    fn forget(&mut self, peer: u128) {
+        self.0.remove(&peer);
+    }
+}
+impl SessionReset for MarginsReported {}
+impl PerPeer for MarginsReported {
+    fn forget(&mut self, peer: u128) {
+        self.0.remove(&peer);
+    }
+}
+impl SessionReset for DeliveredInputTicks {}
+impl PerPeer for DeliveredInputTicks {
     fn forget(&mut self, peer: u128) {
         self.0.remove(&peer);
     }
@@ -229,6 +304,9 @@ impl<T: TickedInput> Plugin for TickedServerPlugin<T> {
             .init_per_peer_resource::<NackedFull>()
             .init_per_peer_resource::<InputMargins>()
             .init_per_peer_resource::<NewestInputTick>()
+            .init_per_peer_resource::<DeliveredInputTicks>()
+            .init_per_peer_resource::<MarginsReported>()
+            .init_per_peer_resource::<InputsRan<T>>()
             .init_per_peer_resource::<SnapshotSeq>()
             .init_per_peer_resource::<LastAck>()
             .init_session_resource_scoped::<PassesHeld>(SessionScope::Role)
@@ -236,7 +314,11 @@ impl<T: TickedInput> Plugin for TickedServerPlugin<T> {
             .add_observer(record_ack)
             .add_systems(
                 TickedLoop,
-                broadcast_snapshot::<T>.in_set(TickedSystems::PostTick),
+                (
+                    broadcast_snapshot::<T>,
+                    remember_inputs_ran::<T>.run_if(resource_exists::<LateInputFold<T>>),
+                )
+                    .in_set(TickedSystems::PostTick),
             );
     }
 
@@ -290,6 +372,10 @@ fn collect_network_inputs<T: TickedInput>(
     mut queue: ResMut<InputQueue<T>>,
     mut margins: ResMut<InputMargins>,
     mut newest: ResMut<NewestInputTick>,
+    mut delivered: ResMut<DeliveredInputTicks>,
+    mut reported: ResMut<MarginsReported>,
+    fold: Option<Res<LateInputFold<T>>>,
+    ran: Res<InputsRan<T>>,
     mut stats: ResMut<InputStats>,
     mut ack_watch: ResMut<crate::watchdog::AckWatch>,
 ) {
@@ -301,29 +387,112 @@ fn collect_network_inputs<T: TickedInput>(
         stats.dropped_out_of_window += 1;
         return;
     }
-    // How many ticks ahead of the server this input arrived (negative = late).
-    // Reported back to the client so it can adapt its prediction lead.
+    // How many ticks ahead of the server this input arrived. Reported back to the client so it
+    // can adapt its prediction lead. `CurrentTick` is the tick the host last *ran* — inputs are
+    // read before this frame's ticks — so an input for it is already too late: on time is one or
+    // more.
     let margin = event.tick.offset_from(tick.0);
+    let ticks = delivered.0.entry(event.sender).or_default();
+    if ticks.first().is_some_and(|&first| first < oldest_accepted) {
+        *ticks = ticks.split_off(&oldest_accepted);
+    }
+    let first_copy = ticks.insert(event.tick);
     stats.received += 1;
-    if margin < 0 {
+    if margin <= 0 {
         stats.late += 1;
     }
-    margins.0.insert(
-        event.sender,
-        MeasuredMargin {
-            ticks: margin,
-            at: tick.0,
-        },
-    );
+    if first_copy {
+        stats.new_ticks += 1;
+        if margin <= 0 {
+            stats.late_new_ticks += 1;
+        }
+        let fresh = reported.0.remove(&event.sender);
+        let worst = match margins.0.get(&event.sender) {
+            Some(measured) if !fresh => measured.ticks.min(margin),
+            _ => margin,
+        };
+        margins.0.insert(
+            event.sender,
+            MeasuredMargin {
+                ticks: worst,
+                at: tick.0,
+            },
+        );
+    }
+    // What the next tick held for this sender before this input, and how late the input it
+    // came from was: when it is a late input filed forward, that is the newest input the sender
+    // had produced until now.
+    let next_tick = tick.0.next();
+    let held_next = fold
+        .as_ref()
+        .and_then(|_| queue.get(next_tick, event.sender).cloned());
+
     queue.insert(event.tick, event.sender, event.input.clone());
 
     let seen = newest.0.entry(event.sender).or_insert(Tick::ZERO);
-    if event.tick <= *seen {
-        return;
+    let previous_newest = *seen;
+    let is_newest = event.tick > previous_newest;
+    if is_newest {
+        *seen = event.tick;
+        if event.tick <= tick.0 {
+            queue.insert(next_tick, event.sender, event.input.clone());
+        }
     }
-    *seen = event.tick;
-    if event.tick <= tick.0 {
-        queue.insert(tick.0.next(), event.sender, event.input.clone());
+
+    if let Some(fold) = fold {
+        let replaced_next = event.tick == next_tick || (is_newest && event.tick <= tick.0);
+        let held_age = if previous_newest <= tick.0 {
+            tick.0.since(previous_newest)
+        } else {
+            Ticks::ZERO
+        };
+        fold_late_input(
+            &fold,
+            &mut queue,
+            ran.0.get(&event.sender),
+            event,
+            tick.0,
+            first_copy && margin <= 0 && !is_newest,
+            held_next.filter(|_| replaced_next && held_age <= fold.max_age),
+        );
+    }
+}
+
+/// Keep what a late input did, on the next tick the host runs. See [`LateInputFold`].
+///
+/// Two ways a late input's press is lost, and the two things done here:
+/// - **Overtaken.** Its own release, or anything newer, replaced it on the next tick. What the
+///   next tick held before is folded into what it holds now (`replaced`), so a press carried
+///   there survives every later write — the release, a redundant copy, the input meant for that
+///   tick.
+/// - **Straggler.** It came after a newer input, so it was never filed forward at all. Folded
+///   into what the next tick would run.
+fn fold_late_input<T: TickedInput>(
+    fold: &LateInputFold<T>,
+    queue: &mut InputQueue<T>,
+    ran: Option<&T>,
+    event: &ReceivedNetworkInput<T>,
+    server_tick: Tick,
+    straggler: bool,
+    replaced: Option<T>,
+) {
+    let next_tick = server_tick.next();
+    // Nothing run for this sender yet: there is no press to tell from a hold.
+    let Some(ran) = ran else {
+        return;
+    };
+    if let Some(replaced) = replaced
+        && let Some(mut next) = queue.get(next_tick, event.sender).cloned()
+    {
+        (fold.fold)(&mut next, &replaced, ran);
+        queue.insert(next_tick, event.sender, next);
+    }
+    if straggler && server_tick.since(event.tick) <= fold.max_age {
+        let Some(mut next) = queue.get_or_last(next_tick, event.sender).cloned() else {
+            return;
+        };
+        (fold.fold)(&mut next, &event.input, ran);
+        queue.insert(next_tick, event.sender, next);
     }
 }
 
@@ -434,13 +603,16 @@ impl<T: TickedInput> Command for BroadcastSnapshotCommand<T> {
                 }
                 None => 0,
             };
-            let your_margin = recipient
+            let measured = recipient
                 .and_then(|uuid| world.resource::<InputMargins>().0.get(&uuid).copied())
-                .filter(|measured| tick.since(measured.at) <= MARGIN_STALE_TICKS)
-                .map_or(MARGIN_UNMEASURED, |measured| {
-                    // One above the sentinel, so a genuinely enormous lateness stays a number.
-                    measured.ticks.clamp(i16::MIN as i64 + 1, i16::MAX as i64) as i16
-                });
+                .filter(|measured| tick.since(measured.at) <= MARGIN_STALE_TICKS);
+            let your_margin = measured.map_or(MARGIN_UNMEASURED, |measured| {
+                // One above the sentinel, so a genuinely enormous lateness stays a number.
+                measured.ticks.clamp(i16::MIN as i64 + 1, i16::MAX as i64) as i16
+            });
+            if let (Some(uuid), Some(_)) = (recipient, measured) {
+                world.resource_mut::<MarginsReported>().0.insert(uuid);
+            }
 
             // Which ids have been handed to a different thing since the world this recipient
             // last acknowledged. Relative to their baseline, because a reset is not free: it

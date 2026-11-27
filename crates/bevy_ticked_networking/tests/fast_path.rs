@@ -85,7 +85,7 @@ fn wire_pos(app: &App) -> u16 {
 /// Host-shaped: what the client predicted for `tick`, from its own history.
 fn matching(app: &mut App, tick: Tick) -> SnapshotPacket {
     let mut packet = SnapshotPacket::full(tick, build_full_body(app.world_mut(), tick));
-    packet.your_margin = 2;
+    packet.your_margin = bevy_ticked_networking::client::ClientTickBuffer::DEFAULT_MARGIN as i16;
     packet
 }
 

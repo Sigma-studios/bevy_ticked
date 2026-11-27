@@ -43,8 +43,9 @@ pub struct SnapshotPacket {
     /// The tick the body describes.
     pub tick: Tick,
     /// This recipient's input-arrival margin in ticks, measured by the server: how many ticks
-    /// ahead of the server its most recent input arrived (negative is late). The client sizes
-    /// its prediction lead from it. [`MARGIN_UNMEASURED`] when the server has no recent
+    /// ahead of the server the worst of its inputs over the last second arrived (one or more is
+    /// on time; see [`InputMargins`](crate::server::InputMargins)). The client sizes its
+    /// prediction lead from it. [`MARGIN_UNMEASURED`] when the server has no recent
     /// measurement — the client has sent no input lately — and the client then leaves its
     /// target where it is rather than steer on a number that means nothing.
     pub your_margin: i16,
